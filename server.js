@@ -100,9 +100,9 @@ app.post('/api/reservas', async (req, res) => {
     const [horaI, minI] = hora_inicio.split(':').map(Number);
     const [horaF, minF] = hora_fin.split(':').map(Number);
     
-    // Para Frente: 07:00-18:00, para otros: 08:00-17:00
+    // Para Frente: 07:00-18:00, para otros: 08:00-18:00
     const horaMinima = espacio_id === 3 ? 7 : 8;
-    const horaMaxima = espacio_id === 3 ? 18 : 17;
+    const horaMaxima = espacio_id === 3 ? 18 : 18;
     
     if (horaI < horaMinima || horaF > horaMaxima || horaI >= horaF) {
       return res.status(400).json({ error: `Horario inválido (${horaMinima}:00-${horaMaxima}:00)` });
