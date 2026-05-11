@@ -332,7 +332,8 @@ app.post('/api/bloqueos', async (req, res) => {
     const [horaF, minF] = hora_fin.split(':').map(Number);
     
     const horaMinima = espacio_id === 3 ? 7 : 8;
-    const horaMaxima = 18;
+    // Permitir hasta 23:59 para bloqueos de todo el día
+    const horaMaxima = 24;
     
     if (horaI < horaMinima || horaF > horaMaxima || horaI >= horaF) {
       return res.status(400).json({ error: `Horario inválido (${horaMinima}:00-${horaMaxima}:00)` });
