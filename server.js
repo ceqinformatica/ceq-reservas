@@ -331,12 +331,17 @@ app.post('/api/bloqueos', async (req, res) => {
     const [horaI, minI] = hora_inicio.split(':').map(Number);
     const [horaF, minF] = hora_fin.split(':').map(Number);
     
-    const horaMinima = espacio_id === 3 ? 7 : 8;
-    // Permitir hasta 23:59 para bloqueos de todo el día
-    const horaMaxima = 24;
+    // Para bloqueos de todo el día (00:00 - 23:59)
+    // Para reservas normales (8:00-18:00 para Altillo/Sala, 7:00-18:00 para Frente)
+    const isBloqueCompleto = horaI === 0 && minI === 0 && horaF === 23 && minF === 59;
     
-    if (horaI < horaMinima || horaF > horaMaxima || horaI >= horaF) {
-      return res.status(400).json({ error: `Horario inválido (${horaMinima}:00-${horaMaxima}:00)` });
+    if (!isBloqueCompleto) {
+      const horaMinima = espacio_id === 3 ? 7 : 8;
+      const horaMaxima = 18;
+      
+      if (horaI < horaMinima || horaF > horaMaxima || horaI >= horaF) {
+        return res.status(400).json({ error: `Horario inválido (${horaMinima}:00-${horaMaxima}:00)` });
+      }
     }
 
     const { data, error } = await supabase
