@@ -306,6 +306,77 @@ app.get('/api/estadisticas', async (req, res) => {
   }
 });
 
+// BLOQUEOS
+app.get('/api/bloqueos', async (req, res) => {
+  try {
+    const { data, error } = await supabase
+      .from('bloqueos')
+      .select('*')
+      .order('fecha', { ascending: true });
+    if (error) throw error;
+    res.json(data || []);
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+app.post('/api/bloqueos', async (req, res) => {
+  try {
+    const { espacio_id, fecha, hora_inicio, hora_fin, motivo } = req.body;
+
+    if (!espacio_id || !fecha || !hora_inicio || !hora_fin) {
+      return res.status(400).json({ error: 'Faltan campos requeridos' });
+    }
+
+    const [horaI, minI] = hora_inicio.split(':').map(Number);
+    const [horaF, minF] = hora_fin.split(':').map(Number);
+    
+    const horaMinima = espacio_id === 3 ? 7 : 8;
+    const horaMaxima = 18;
+    
+    if (horaI < horaMinima || horaF > horaMaxima || horaI >= horaF) {
+      return res.status(400).json({ error: `Horario inválido (${horaMinima}:00-${horaMaxima}:00)` });
+    }
+
+    const { data, error } = await supabase
+      .from('bloqueos')
+      .insert([{
+        espacio_id,
+        fecha,
+        hora_inicio,
+        hora_fin,
+        motivo
+      }])
+      .select();
+
+    if (error) {
+      if (error.code === '23505') {
+        return res.status(409).json({ error: 'Ese horario ya está bloqueado' });
+      }
+      throw error;
+    }
+
+    res.json({ bloqueo: data[0] });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+app.delete('/api/bloqueos/:id', async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { error } = await supabase
+      .from('bloqueos')
+      .delete()
+      .eq('id', id);
+    
+    if (error) throw error;
+    res.json({ success: true });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
 // Iniciar servidor
 app.listen(PORT, () => {
   console.log(`Servidor corriendo en puerto ${PORT}`);
