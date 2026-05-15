@@ -172,8 +172,8 @@ app.post('/api/reservas', async (req, res) => {
     if (email) {
       try {
         await resend.emails.send({
-          from: 'reservas@ceq.com',
-          to: email,
+          from: 'CEQ Reservas <onboarding@resend.dev>',
+          to: [email],
           subject: '✓ Confirmación de Reserva - CEQ',
           html: `
             <h2>¡Reserva Confirmada!</h2>
@@ -200,8 +200,8 @@ app.post('/api/reservas', async (req, res) => {
     // Enviar email al moderador
     try {
       await resend.emails.send({
-        from: 'reservas@ceq.com',
-        to: EMAIL_MODERADOR,
+        from: 'CEQ Reservas <onboarding@resend.dev>',
+        to: [EMAIL_MODERADOR],
         subject: '📌 Nueva Reserva - CEQ',
         html: `
           <h2>Nueva Reserva Registrada</h2>
