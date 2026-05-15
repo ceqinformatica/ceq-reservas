@@ -168,6 +168,8 @@ app.post('/api/reservas', async (req, res) => {
     const espaciosNombre = { 1: 'Altillo', 2: 'Sala de Reuniones', 3: 'Frente' };
     const nombreEspacio = espaciosNombre[espacio_id];
     
+    console.log('Email extraído:', email, 'Contacto original:', contacto);
+    
     // Enviar email al usuario
     if (email) {
       try {
