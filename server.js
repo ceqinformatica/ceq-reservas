@@ -2,9 +2,17 @@ require('dotenv').config();
 const express = require('express');
 const cors = require('cors');
 const { createClient } = require('@supabase/supabase-js');
+const { Resend } = require('resend');
 
 const app = express();
 const PORT = process.env.PORT || 3000;
+
+// Configuración Resend
+const RESEND_API_KEY = process.env.RESEND_API_KEY || 're_avJRa2A7_KnxN6q28c5TZBiJd7fsV4h44';
+const resend = new Resend(RESEND_API_KEY);
+
+// Email del moderador
+const EMAIL_MODERADOR = 'ceq.informatica@gmail.com';
 
 // Configuración Supabase
 const SUPABASE_URL = process.env.SUPABASE_URL || 'https://xftcenmlptzhxhffwtsk.supabase.co';
@@ -153,6 +161,65 @@ app.post('/api/reservas', async (req, res) => {
         return res.status(409).json({ error: 'Horario no disponible - otro usuario lo reservó justo ahora. Por favor, actualice la página e intente con otro horario.' });
       }
       throw error;
+    }
+    
+    // Extraer email del contacto
+    const email = contacto.split('|')[1]?.trim() || '';
+    const espaciosNombre = { 1: 'Altillo', 2: 'Sala de Reuniones', 3: 'Frente' };
+    const nombreEspacio = espaciosNombre[espacio_id];
+    
+    // Enviar email al usuario
+    if (email) {
+      try {
+        await resend.emails.send({
+          from: 'reservas@ceq.com',
+          to: email,
+          subject: '✓ Confirmación de Reserva - CEQ',
+          html: `
+            <h2>¡Reserva Confirmada!</h2>
+            <p>Hola ${nombre_solicitante},</p>
+            <p>Tu reserva ha sido confirmada exitosamente.</p>
+            <hr>
+            <p><strong>Detalles de tu reserva:</strong></p>
+            <ul>
+              <li><strong>Espacio:</strong> ${nombreEspacio}</li>
+              <li><strong>Fecha:</strong> ${fecha}</li>
+              <li><strong>Horario:</strong> ${hora_inicio} - ${hora_fin}</li>
+              <li><strong>Motivo:</strong> ${motivo || 'Sin especificar'}</li>
+              <li><strong>Código de cancelación:</strong> ${codigo}</li>
+            </ul>
+            <p>Si necesitas cancelar, usa tu código de cancelación en: <a href="https://ceq-reservas-frontend-pink.vercel.app/cancelar.html">Cancelar Reserva</a></p>
+            <p>Centro de Estudiantes de Química</p>
+          `
+        });
+      } catch (emailError) {
+        console.error('Error al enviar email al usuario:', emailError);
+      }
+    }
+    
+    // Enviar email al moderador
+    try {
+      await resend.emails.send({
+        from: 'reservas@ceq.com',
+        to: EMAIL_MODERADOR,
+        subject: '📌 Nueva Reserva - CEQ',
+        html: `
+          <h2>Nueva Reserva Registrada</h2>
+          <p><strong>Usuario:</strong> ${nombre_solicitante}</p>
+          <p><strong>Contacto:</strong> ${contacto}</p>
+          <hr>
+          <p><strong>Detalles:</strong></p>
+          <ul>
+            <li><strong>Espacio:</strong> ${nombreEspacio}</li>
+            <li><strong>Fecha:</strong> ${fecha}</li>
+            <li><strong>Horario:</strong> ${hora_inicio} - ${hora_fin}</li>
+            <li><strong>Motivo:</strong> ${motivo || 'Sin especificar'}</li>
+            <li><strong>Código:</strong> ${codigo}</li>
+          </ul>
+        `
+      });
+    } catch (emailError) {
+      console.error('Error al enviar email al moderador:', emailError);
     }
     
     res.status(201).json({
