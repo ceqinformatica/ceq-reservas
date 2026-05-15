@@ -173,7 +173,7 @@ app.post('/api/reservas', async (req, res) => {
     // Enviar email al usuario
     if (email) {
       try {
-        await resend.emails.send({
+        const emailRes = await resend.emails.send({
           from: 'CEQ Reservas <onboarding@resend.dev>',
           to: [email],
           subject: '✓ Confirmación de Reserva - CEQ',
@@ -194,9 +194,12 @@ app.post('/api/reservas', async (req, res) => {
             <p>Centro de Estudiantes de Química</p>
           `
         });
+        console.log('Email al usuario enviado:', emailRes);
       } catch (emailError) {
         console.error('Error al enviar email al usuario:', emailError);
       }
+    } else {
+      console.log('Email vacío, no se envía');
     }
     
     // Enviar email al moderador
