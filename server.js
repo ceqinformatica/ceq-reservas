@@ -8,7 +8,7 @@ const app = express();
 const PORT = process.env.PORT || 3000;
 
 // Configuración Resend
-const RESEND_API_KEY = process.env.RESEND_API_KEY || 're_avJRa2A7_KnxN6q28c5TZBiJd7fsV4h44';
+const RESEND_API_KEY = process.env.RESEND_API_KEY;
 const resend = new Resend(RESEND_API_KEY);
 
 // Email del moderador
