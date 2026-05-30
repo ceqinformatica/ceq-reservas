@@ -2,227 +2,136 @@ require('dotenv').config();
 const express = require('express');
 const cors = require('cors');
 const { createClient } = require('@supabase/supabase-js');
-const { Resend } = require('resend');
-const bcrypt = require('bcrypt');
-const jwt = require('jsonwebtoken');
-const crypto = require('crypto');
 
 const app = express();
 const PORT = process.env.PORT || 3000;
 
-// ========== CONFIGURACIÓN DE SEGURIDAD ==========
-
-// Verificar que todas las variables de entorno necesarias están presentes
-const requiredEnvVars = ['SUPABASE_URL', 'SUPABASE_KEY', 'RESEND_API_KEY', 'JWT_SECRET', 'ADMIN_PASSWORD_HASH'];
-requiredEnvVars.forEach(varName => {
-  if (!process.env[varName]) {
-    console.error(`❌ ERROR: Variable de entorno ${varName} no configurada`);
-    process.exit(1);
-  }
-});
-
 // Configuración Supabase
-const SUPABASE_URL = process.env.SUPABASE_URL;
-const SUPABASE_KEY = process.env.SUPABASE_KEY;
+const SUPABASE_URL = process.env.SUPABASE_URL || 'https://xftcenmlptzhxhffwtsk.supabase.co';
+const SUPABASE_KEY = process.env.SUPABASE_KEY || 'sb_secret_GowxJgT7b0E_ApXz2AtUJw_PIpjgVCh';
 const supabase = createClient(SUPABASE_URL, SUPABASE_KEY);
 
-// Configuración Resend
-const RESEND_API_KEY = process.env.RESEND_API_KEY;
-const resend = new Resend(RESEND_API_KEY);
-const EMAIL_MODERADOR = process.env.EMAIL_MODERADOR || 'ceq.informatica@gmail.com';
+// Middleware
+app.use(cors());
+app.use(express.json());
 
-// Configuración de seguridad
-const JWT_SECRET = process.env.JWT_SECRET;
-const ADMIN_PASSWORD_HASH = process.env.ADMIN_PASSWORD_HASH;
-
-// ========== MIDDLEWARE ==========
-
-// CORS configurado correctamente
-app.use(cors({
-  origin: [
-    'https://ceq-reservas-frontend-pink.vercel.app',
-    'http://localhost:3000',
-    'http://localhost:5173'
-  ],
-  credentials: true,
-  methods: ['GET', 'POST', 'DELETE', 'PUT'],
-  allowedHeaders: ['Content-Type', 'Authorization']
-}));
-
-// Limitar tamaño de payloads
-app.use(express.json({ limit: '10kb' }));
-
-// Middleware de autenticación JWT
-const verifyAdminToken = (req, res, next) => {
-  const authHeader = req.headers.authorization;
-  
-  if (!authHeader) {
-    return res.status(401).json({ error: 'Token requerido' });
-  }
-  
-  const token = authHeader.split(' ')[1];
-  
-  if (!token) {
-    return res.status(401).json({ error: 'Formato de token inválido' });
-  }
-  
-  try {
-    const decoded = jwt.verify(token, JWT_SECRET);
-    req.admin = decoded;
-    next();
-  } catch (error) {
-    if (error.name === 'TokenExpiredError') {
-      return res.status(401).json({ error: 'Token expirado' });
-    }
-    return res.status(403).json({ error: 'Token inválido' });
-  }
-};
-
-// ========== ENDPOINTS PÚBLICOS ==========
+// Generar código único
+function generarCodigo() {
+  return 'RES-' + Math.random().toString(36).substring(2, 8).toUpperCase();
+}
 
 // Health check
 app.get('/api/health', (req, res) => {
-  res.json({ status: 'ok' });
+  res.json({ status: 'ok', timestamp: new Date().toISOString() });
 });
 
-// LOGIN - Endpoint seguro
-app.post('/api/login', async (req, res) => {
-  try {
-    const { password } = req.body;
-    
-    if (!password) {
-      return res.status(400).json({ error: 'Contraseña requerida' });
-    }
-    
-    // Validar contraseña
-    const passwordValida = await bcrypt.compare(password, ADMIN_PASSWORD_HASH);
-    
-    if (!passwordValida) {
-      console.warn(`⚠️ Intento de login fallido a las ${new Date().toISOString()}`);
-      return res.status(401).json({ error: 'Contraseña incorrecta' });
-    }
-    
-    // Generar JWT (válido por 8 horas)
-    const token = jwt.sign(
-      { adminId: 'admin', timestamp: Date.now() },
-      JWT_SECRET,
-      { expiresIn: '8h' }
-    );
-    
-    console.log(`✅ Login exitoso a las ${new Date().toISOString()}`);
-    res.json({ 
-      token, 
-      mensaje: 'Sesión iniciada correctamente',
-      expiresIn: '8h'
-    });
-  } catch (error) {
-    console.error('❌ Error en login:', error);
-    res.status(500).json({ error: 'Error interno del servidor' });
-  }
-});
-
-// GET espacios
+// Obtener espacios
 app.get('/api/espacios', async (req, res) => {
   try {
-    const { data } = await supabase.from('espacios').select('*');
-    res.json(data || []);
+    const { data, error } = await supabase.from('espacios').select('*');
+    if (error) throw error;
+    res.json(data);
   } catch (error) {
-    console.error(error);
     res.status(500).json({ error: error.message });
   }
 });
 
-// GET reservas (público, filtrado por espacio y fecha)
+// Obtener reservas
 app.get('/api/reservas', async (req, res) => {
   try {
     const { espacio_id, fecha } = req.query;
-    
-    let query = supabase
-      .from('reservas')
-      .select('*')
-      .eq('estado', 'activa');
-    
-    if (espacio_id) query = query.eq('espacio_id', parseInt(espacio_id));
+    let query = supabase.from('reservas').select('*').eq('estado', 'activa');
+    if (espacio_id) query = query.eq('espacio_id', espacio_id);
     if (fecha) query = query.eq('fecha', fecha);
-    
     const { data, error } = await query;
-    
     if (error) throw error;
-    res.json(data || []);
+    res.json(data);
   } catch (error) {
-    console.error(error);
     res.status(500).json({ error: error.message });
   }
 });
 
-// GET bloqueos (público)
-app.get('/api/bloqueos', async (req, res) => {
-  try {
-    const { data, error } = await supabase
-      .from('bloqueos')
-      .select('*');
-    
-    if (error) throw error;
-    res.json(data || []);
-  } catch (error) {
-    console.error(error);
-    res.status(500).json({ error: error.message });
-  }
-});
-
-// Validar disponibilidad (público)
+// Validar disponibilidad
 app.post('/api/validar-disponibilidad', async (req, res) => {
   try {
     const { espacio_id, fecha, hora_inicio, hora_fin } = req.body;
-    
-    if (!espacio_id || !fecha || !hora_inicio || !hora_fin) {
-      return res.status(400).json({ error: 'Faltan parámetros' });
-    }
-    
-    // Buscar conflictos
     const { data, error } = await supabase
       .from('reservas')
       .select('*')
       .eq('espacio_id', espacio_id)
       .eq('fecha', fecha)
       .eq('estado', 'activa');
-    
     if (error) throw error;
-    
-    const hayConflicto = data.some(r => {
-      const rStart = parseInt(r.hora_inicio.split(':')[0]);
-      const rEnd = parseInt(r.hora_fin.split(':')[0]);
-      const hStart = parseInt(hora_inicio.split(':')[0]);
-      const hEnd = parseInt(hora_fin.split(':')[0]);
-      return !(rEnd <= hStart || rStart >= hEnd);
+    const disponible = !data.some(r => {
+      const horaIniReserva = parseInt(r.hora_inicio.split(':')[0]);
+      const horaFinReserva = parseInt(r.hora_fin.split(':')[0]);
+      const horaIniNueva = parseInt(hora_inicio.split(':')[0]);
+      const horaFinNueva = parseInt(hora_fin.split(':')[0]);
+      return horaIniNueva < horaFinReserva && horaFinNueva > horaIniReserva;
     });
-    
-    res.json({ disponible: !hayConflicto });
+    res.json({ disponible });
   } catch (error) {
-    console.error(error);
     res.status(500).json({ error: error.message });
   }
 });
 
-// POST crear reserva
+// Crear reserva
 app.post('/api/reservas', async (req, res) => {
   try {
     const { espacio_id, nombre_solicitante, contacto, fecha, hora_inicio, hora_fin, motivo } = req.body;
+    console.log('Datos recibidos:', { espacio_id, nombre_solicitante, contacto, fecha, hora_inicio, hora_fin, motivo });
     
-    // Validar entrada
     if (!espacio_id || !nombre_solicitante || !contacto || !fecha || !hora_inicio || !hora_fin) {
-      return res.status(400).json({ error: 'Faltan parámetros requeridos' });
+      return res.status(400).json({ error: 'Faltan datos obligatorios' });
     }
     
-    // Validar formato de hora
-    if (!/^\d{2}:\d{2}$/.test(hora_inicio) || !/^\d{2}:\d{2}$/.test(hora_fin)) {
-      return res.status(400).json({ error: 'Formato de hora inválido' });
+    const hoy = new Date().toISOString().split('T')[0];
+    const mañana = new Date(Date.now() + 86400000).toISOString().split('T')[0];
+    if (fecha < mañana) {
+      return res.status(400).json({ error: 'Mínimo 1 día de anticipación' });
     }
     
-    // Generar código de cancelación seguro (16 caracteres)
-    const codigo = crypto.randomBytes(8).toString('hex').toUpperCase();
+    const fechaObj = new Date(fecha);
+    const diaSemana = fechaObj.getDay();
+    if (diaSemana === 0 || diaSemana === 6) {
+      return res.status(400).json({ error: 'No se pueden reservar fines de semana' });
+    }
     
-    // Insertar reserva
+    const [horaI, minI] = hora_inicio.split(':').map(Number);
+    const [horaF, minF] = hora_fin.split(':').map(Number);
+    
+    // Para Frente: 07:00-18:00, para otros: 08:00-18:00
+    const horaMinima = espacio_id === 3 ? 7 : 8;
+    const horaMaxima = espacio_id === 3 ? 18 : 18;
+    
+    if (horaI < horaMinima || horaF > horaMaxima || horaI >= horaF) {
+      return res.status(400).json({ error: `Horario inválido (${horaMinima}:00-${horaMaxima}:00)` });
+    }
+    
+    // VALIDACIÓN CRÍTICA: verificar solapamientos
+    const { data: existentes, error: errorBuscar } = await supabase
+      .from('reservas')
+      .select('*')
+      .eq('espacio_id', espacio_id)
+      .eq('fecha', fecha)
+      .eq('estado', 'activa');
+    
+    if (errorBuscar) throw errorBuscar;
+    
+    const hay_solapamiento = existentes.some(r => {
+      const horaIniR = parseInt(r.hora_inicio.split(':')[0]);
+      const horaFinR = parseInt(r.hora_fin.split(':')[0]);
+      return horaI < horaFinR && horaF > horaIniR;
+    });
+    
+    if (hay_solapamiento) {
+      return res.status(409).json({ error: 'Horario no disponible - otro usuario lo reservó' });
+    }
+    
+    // Generar código ANTES de insertar
+    const codigo = generarCodigo();
+    
+    // Intentar insertar - si falla por UNIQUE constraint, hay race condition
     const { data: nuevaReserva, error } = await supabase
       .from('reservas')
       .insert([{
@@ -230,305 +139,174 @@ app.post('/api/reservas', async (req, res) => {
         nombre_solicitante,
         contacto,
         fecha,
-        hora_inicio: hora_inicio + ':00',
-        hora_fin: hora_fin + ':00',
-        estado: 'activa',
+        hora_inicio,
+        hora_fin,
         motivo: motivo || '',
+        estado: 'activa',
         codigo_cancelacion: codigo
       }])
       .select();
     
     if (error) {
       if (error.code === '23505') {
-        return res.status(409).json({ error: 'Horario no disponible - otro usuario lo reservó justo ahora' });
+        // Violación de UNIQUE constraint = race condition
+        return res.status(409).json({ error: 'Horario no disponible - otro usuario lo reservó justo ahora. Por favor, actualice la página e intente con otro horario.' });
       }
       throw error;
-    }
-    
-    // Extraer email del contacto (formato: "celular | email")
-    const email = contacto.split('|')[1]?.trim() || '';
-    const espaciosNombre = { 1: 'Altillo', 2: 'Sala de Reuniones', 3: 'Frente' };
-    const nombreEspacio = espaciosNombre[espacio_id];
-    
-    // Enviar email al usuario (si existe email)
-    if (email) {
-      try {
-        await resend.emails.send({
-          from: 'CEQ Reservas <reservas@ceq-una.com>',
-          to: [email],
-          subject: '✓ Confirmación de Reserva - CEQ',
-          html: `
-            <h2>¡Reserva Confirmada!</h2>
-            <p>Hola ${nombre_solicitante},</p>
-            <p>Tu reserva ha sido confirmada exitosamente.</p>
-            <hr>
-            <p><strong>Detalles:</strong></p>
-            <ul>
-              <li><strong>Espacio:</strong> ${nombreEspacio}</li>
-              <li><strong>Fecha:</strong> ${fecha}</li>
-              <li><strong>Horario:</strong> ${hora_inicio} - ${hora_fin}</li>
-              <li><strong>Motivo:</strong> ${motivo || 'Sin especificar'}</li>
-              <li><strong>Código de cancelación:</strong> ${codigo}</li>
-            </ul>
-            <p>Si necesitas cancelar, usa tu código en: <a href="https://ceq-reservas-frontend-pink.vercel.app/cancelar.html">Cancelar Reserva</a></p>
-            <p>Centro de Estudiantes de Química</p>
-          `
-        });
-      } catch (emailError) {
-        console.error('⚠️ Error al enviar email al usuario:', emailError);
-      }
-    }
-    
-    // Enviar email al moderador
-    try {
-      await resend.emails.send({
-        from: 'CEQ Reservas <reservas@ceq-una.com>',
-        to: [EMAIL_MODERADOR],
-        subject: '📌 Nueva Reserva - CEQ',
-        html: `
-          <h2>Nueva Reserva</h2>
-          <p><strong>Usuario:</strong> ${nombre_solicitante}</p>
-          <p><strong>Contacto:</strong> ${contacto}</p>
-          <hr>
-          <ul>
-            <li><strong>Espacio:</strong> ${nombreEspacio}</li>
-            <li><strong>Fecha:</strong> ${fecha}</li>
-            <li><strong>Horario:</strong> ${hora_inicio} - ${hora_fin}</li>
-            <li><strong>Motivo:</strong> ${motivo || 'Sin especificar'}</li>
-            <li><strong>Código:</strong> ${codigo}</li>
-          </ul>
-        `
-      });
-    } catch (emailError) {
-      console.error('⚠️ Error al enviar email al moderador:', emailError);
     }
     
     res.status(201).json({
       mensaje: 'Reserva creada exitosamente',
       reserva: nuevaReserva[0],
-      codigo
+      codigo: codigo
     });
   } catch (error) {
-    console.error(error);
+    console.error('Error:', error);
     res.status(500).json({ error: error.message });
   }
 });
 
-// Cancelar por código (público)
-app.post('/api/cancelar-por-codigo', async (req, res) => {
-  try {
-    const { codigo } = req.body;
-    
-    if (!codigo) {
-      return res.status(400).json({ error: 'Código requerido' });
-    }
-    
-    const { data, error } = await supabase
-      .from('reservas')
-      .select('id')
-      .eq('codigo_cancelacion', codigo)
-      .eq('estado', 'activa');
-    
-    if (error) throw error;
-    if (data.length === 0) {
-      return res.status(404).json({ error: 'Código no válido' });
-    }
-    
-    const { error: updateError } = await supabase
-      .from('reservas')
-      .update({ estado: 'cancelada' })
-      .eq('codigo_cancelacion', codigo);
-    
-    if (updateError) throw updateError;
-    res.json({ mensaje: 'Reserva cancelada' });
-  } catch (error) {
-    console.error(error);
-    res.status(500).json({ error: error.message });
-  }
-});
-
-// Reportar error (público)
-app.post('/api/reportes', async (req, res) => {
-  try {
-    const { mensaje, url, navegador } = req.body;
-    
-    if (!mensaje) {
-      return res.status(400).json({ error: 'Mensaje requerido' });
-    }
-    
-    const { error } = await supabase
-      .from('reportes_errores')
-      .insert([{ mensaje, url, navegador, leido: false }]);
-    
-    if (error) throw error;
-    res.status(201).json({ mensaje: 'Reporte enviado' });
-  } catch (error) {
-    console.error(error);
-    res.status(500).json({ error: error.message });
-  }
-});
-
-// ========== ENDPOINTS PROTEGIDOS (REQUIEREN JWT) ==========
-
-// GET admin/reservas
-app.get('/api/admin/reservas', verifyAdminToken, async (req, res) => {
+// Obtener reservas admin
+app.get('/api/admin/reservas', async (req, res) => {
   try {
     const { data, error } = await supabase
       .from('reservas')
-      .select('*')
-      .order('fecha', { ascending: false });
-    
-    if (error) throw error;
-    res.json(data || []);
-  } catch (error) {
-    console.error(error);
-    res.status(500).json({ error: error.message });
-  }
-});
-
-// POST crear bloqueo
-app.post('/api/bloqueos', verifyAdminToken, async (req, res) => {
-  try {
-    const { espacio_id, fecha, hora_inicio, hora_fin, motivo } = req.body;
-    
-    if (!espacio_id || !fecha || !hora_inicio || !hora_fin) {
-      return res.status(400).json({ error: 'Faltan parámetros' });
-    }
-    
-    const [horaI, minI] = hora_inicio.split(':').map(Number);
-    const [horaF, minF] = hora_fin.split(':').map(Number);
-    
-    const isBloqueCompleto = horaI === 0 && minI === 0 && horaF === 23 && minF === 59;
-    
-    if (!isBloqueCompleto) {
-      const horaMinima = espacio_id === 3 ? 7 : 8;
-      const horaMaxima = 18;
-      
-      if (horaI < horaMinima || horaF > horaMaxima || horaI >= horaF) {
-        return res.status(400).json({ error: `Horario inválido (${horaMinima}:00-${horaMaxima}:00)` });
-      }
-    }
-    
-    const { error } = await supabase
-      .from('bloqueos')
-      .insert([{
+      .select(`
+        id,
         espacio_id,
+        espacios(nombre),
+        nombre_solicitante,
+        contacto,
         fecha,
         hora_inicio,
         hora_fin,
-        motivo: motivo || 'Sin especificar'
-      }]);
-    
-    if (error) {
-      if (error.code === '23505') {
-        return res.status(409).json({ error: 'Ya existe un bloqueo para ese horario' });
-      }
-      throw error;
-    }
-    
-    res.status(201).json({ mensaje: 'Bloqueo creado' });
-  } catch (error) {
-    console.error(error);
-    res.status(500).json({ error: error.message });
-  }
-});
-
-// DELETE bloqueo
-app.delete('/api/bloqueos/:id', verifyAdminToken, async (req, res) => {
-  try {
-    const { id } = req.params;
-    
-    const { error } = await supabase
-      .from('bloqueos')
-      .delete()
-      .eq('id', id);
-    
+        estado,
+        motivo,
+        codigo_cancelacion,
+        created_at
+      `)
+      .order('fecha', { ascending: false });
     if (error) throw error;
-    res.json({ mensaje: 'Bloqueo eliminado' });
+    res.json(data);
   } catch (error) {
-    console.error(error);
     res.status(500).json({ error: error.message });
   }
 });
 
-// POST cancelar reserva (admin)
-app.post('/api/admin/cancelar/:reserva_id', verifyAdminToken, async (req, res) => {
+// Cancelar reserva por código
+app.post('/api/cancelar-por-codigo', async (req, res) => {
+  try {
+    const { codigo } = req.body;
+    if (!codigo) {
+      return res.status(400).json({ error: 'Código requerido' });
+    }
+    const { data: reservas, error: errorBuscar } = await supabase
+      .from('reservas')
+      .select('*')
+      .eq('codigo_cancelacion', codigo)
+      .eq('estado', 'activa');
+    if (errorBuscar || !reservas || reservas.length === 0) {
+      return res.status(404).json({ error: 'Código inválido o reserva ya cancelada' });
+    }
+    const reserva = reservas[0];
+    const { error: errorCancelar } = await supabase
+      .from('reservas')
+      .update({ estado: 'cancelada' })
+      .eq('id', reserva.id);
+    if (errorCancelar) throw errorCancelar;
+    res.json({ mensaje: 'Reserva cancelada exitosamente', reserva_id: reserva.id });
+  } catch (error) {
+    console.error('Error:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// Cancelar reserva admin
+app.post('/api/admin/cancelar/:reserva_id', async (req, res) => {
   try {
     const { reserva_id } = req.params;
-    
+    const { motivo } = req.body;
     const { error } = await supabase
       .from('reservas')
       .update({ estado: 'cancelada' })
       .eq('id', reserva_id);
-    
     if (error) throw error;
-    res.json({ mensaje: 'Reserva cancelada por admin' });
+    res.json({ mensaje: 'Reserva cancelada', reserva_id });
   } catch (error) {
-    console.error(error);
     res.status(500).json({ error: error.message });
   }
 });
 
-// GET reportes
-app.get('/api/admin/reportes', verifyAdminToken, async (req, res) => {
+// Obtener reportes
+app.get('/api/admin/reportes', async (req, res) => {
   try {
     const { data, error } = await supabase
       .from('reportes_errores')
       .select('*')
       .order('created_at', { ascending: false });
-    
     if (error) throw error;
-    res.json(data || []);
+    res.json(data);
   } catch (error) {
-    console.error(error);
     res.status(500).json({ error: error.message });
   }
 });
 
-// POST marcar reporte como leído
-app.post('/api/admin/reportes/:id/leer', verifyAdminToken, async (req, res) => {
+// Crear reporte
+app.post('/api/reportes', async (req, res) => {
+  try {
+    const { mensaje, url, navegador } = req.body;
+    if (!mensaje) {
+      return res.status(400).json({ error: 'Mensaje requerido' });
+    }
+    const { data, error } = await supabase
+      .from('reportes_errores')
+      .insert([{
+        mensaje,
+        url: url || '',
+        navegador: navegador || '',
+        leido: false
+      }])
+      .select();
+    if (error) throw error;
+    res.status(201).json({ mensaje: 'Reporte guardado', reporte: data[0] });
+  } catch (error) {
+    console.error('Error:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// Marcar reporte como leído
+app.post('/api/admin/reportes/:id/leer', async (req, res) => {
   try {
     const { id } = req.params;
-    
-    const { error } = await supabase
+    const { data, error } = await supabase
       .from('reportes_errores')
       .update({ leido: true })
-      .eq('id', id);
-    
+      .eq('id', id)
+      .select();
     if (error) throw error;
-    res.json({ mensaje: 'Reporte marcado como leído' });
+    res.json({ mensaje: 'Marcado como leído', reporte: data[0] });
   } catch (error) {
-    console.error(error);
     res.status(500).json({ error: error.message });
   }
 });
 
-// GET estadísticas
+// Estadísticas
 app.get('/api/estadisticas', async (req, res) => {
   try {
     const { data: activas } = await supabase
       .from('reservas')
       .select('id')
       .eq('estado', 'activa');
-    
-    const { data: canceladas } = await supabase
-      .from('reservas')
-      .select('id')
-      .eq('estado', 'cancelada');
-    
     res.json({
-      reservas_activas: activas?.length || 0,
-      reservas_canceladas: canceladas?.length || 0
+      reservas_activas: activas?.length || 0
     });
   } catch (error) {
-    console.error(error);
     res.status(500).json({ error: error.message });
   }
 });
 
-// ========== INICIAR SERVIDOR ==========
-
+// Iniciar servidor
 app.listen(PORT, () => {
-  console.log(`✅ Servidor corriendo en puerto ${PORT}`);
-  console.log(`🔒 Modo seguro: JWT, bcrypt y validaciones activadas`);
+  console.log(`Servidor corriendo en puerto ${PORT}`);
 });
