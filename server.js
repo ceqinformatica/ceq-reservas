@@ -41,6 +41,7 @@ const ADMIN_PASSWORD_HASH = process.env.ADMIN_PASSWORD_HASH;
 app.use(cors({
   origin: [
     'https://ceq-reservas-frontend-pink.vercel.app',
+    'https://reservas.ceq-una.com',
     'http://localhost:3000',
     'http://localhost:5173'
   ],
