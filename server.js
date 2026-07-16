@@ -397,9 +397,14 @@ app.post('/api/cancelar-por-codigo', async (req, res) => {
       `
     });
 
-    res.json({ mensaje: 'Reserva cancelada' });
+    res.json({ 
+      mensaje: 'Reserva cancelada correctamente',
+      reserva_id: reserva.id,
+      espacio_id: reserva.espacio_id,
+      fecha: reserva.fecha
+    });
   } catch (error) {
-    console.error(error);
+    console.error('❌ Error en cancelación:', error);
     res.status(500).json({ error: error.message });
   }
 });
