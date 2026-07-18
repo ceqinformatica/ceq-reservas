@@ -226,6 +226,19 @@ app.post('/api/reservas', async (req, res) => {
     if (!/^\d{2}:\d{2}$/.test(hora_inicio) || !/^\d{2}:\d{2}$/.test(hora_fin)) {
       return res.status(400).json({ error: 'Formato de hora inválido' });
     }
+
+    // Validar que la fecha esté dentro de la ventana permitida (hoy hasta hoy+5 días, sin fines de semana)
+    const hoy = new Date();
+    hoy.setHours(0, 0, 0, 0);
+    const fechaReserva = new Date(fecha + 'T00:00:00');
+    const fechaLimite = new Date(hoy);
+    fechaLimite.setDate(fechaLimite.getDate() + 5);
+
+    const esFinDeSemana = fechaReserva.getDay() === 0 || fechaReserva.getDay() === 6;
+
+    if (fechaReserva < hoy || fechaReserva > fechaLimite || esFinDeSemana) {
+      return res.status(400).json({ error: 'Fecha fuera del rango permitido para reservar' });
+    }
     
     // Generar código de cancelación seguro (16 caracteres)
     const codigo = crypto.randomBytes(8).toString('hex').toUpperCase();
