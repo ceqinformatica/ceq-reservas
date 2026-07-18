@@ -247,8 +247,8 @@ app.post('/api/reservas', async (req, res) => {
       .select();
     
     if (error) {
-      if (error.code === '23505') {
-        return res.status(409).json({ error: 'Horario no disponible - otro usuario lo reservó justo ahora' });
+      if (error.code === '23505' || error.code === '23P01') {
+        return res.status(409).json({ error: 'Horario no disponible - se solapa con otra reserva existente' });
       }
       throw error;
     }
