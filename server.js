@@ -2,7 +2,6 @@ require('dotenv').config();
 const express = require('express');
 const cors = require('cors');
 const { createClient } = require('@supabase/supabase-js');
-const { Resend } = require('resend');
 const bcrypt = require('bcrypt');
 const jwt = require('jsonwebtoken');
 const crypto = require('crypto');
@@ -13,7 +12,7 @@ const PORT = process.env.PORT || 3000;
 // ========== CONFIGURACIÓN DE SEGURIDAD ==========
 
 // Verificar que todas las variables de entorno necesarias están presentes
-const requiredEnvVars = ['SUPABASE_URL', 'SUPABASE_KEY', 'RESEND_API_KEY', 'JWT_SECRET', 'ADMIN_PASSWORD_HASH'];
+const requiredEnvVars = ['SUPABASE_URL', 'SUPABASE_KEY', 'BREVO_API_KEY', 'JWT_SECRET', 'ADMIN_PASSWORD_HASH'];
 requiredEnvVars.forEach(varName => {
   if (!process.env[varName]) {
     console.error(`❌ ERROR: Variable de entorno ${varName} no configurada`);
@@ -26,10 +25,40 @@ const SUPABASE_URL = process.env.SUPABASE_URL;
 const SUPABASE_KEY = process.env.SUPABASE_KEY;
 const supabase = createClient(SUPABASE_URL, SUPABASE_KEY);
 
-// Configuración Resend
-const RESEND_API_KEY = process.env.RESEND_API_KEY;
-const resend = new Resend(RESEND_API_KEY);
+// Configuración Brevo (envío de emails)
+const BREVO_API_KEY = process.env.BREVO_API_KEY;
 const EMAIL_MODERADOR = process.env.EMAIL_MODERADOR || 'ceq.informatica@gmail.com';
+
+// Función helper para enviar emails vía la API de Brevo
+async function enviarEmail({ to, subject, html }) {
+  try {
+    const destinatarios = Array.isArray(to) ? to : [to];
+    const res = await fetch('https://api.brevo.com/v3/smtp/email', {
+      method: 'POST',
+      headers: {
+        'accept': 'application/json',
+        'api-key': BREVO_API_KEY,
+        'content-type': 'application/json'
+      },
+      body: JSON.stringify({
+        sender: { name: 'CEQ Reservas', email: 'reservas@ceq-una.com' },
+        to: destinatarios.map(email => ({ email })),
+        subject,
+        htmlContent: html
+      })
+    });
+
+    if (!res.ok) {
+      const errorData = await res.json().catch(() => ({}));
+      console.error('⚠️ Error al enviar email vía Brevo:', res.status, errorData);
+      return false;
+    }
+    return true;
+  } catch (err) {
+    console.error('⚠️ Error de red al enviar email:', err);
+    return false;
+  }
+}
 
 // Configuración de seguridad
 const JWT_SECRET = process.env.JWT_SECRET;
@@ -273,56 +302,46 @@ app.post('/api/reservas', async (req, res) => {
     
     // Enviar email al usuario (si existe email)
     if (email) {
-      try {
-        await resend.emails.send({
-          from: 'CEQ Reservas <reservas@ceq-una.com>',
-          to: [email],
-          subject: '✓ Confirmación de Reserva - CEQ',
-          html: `
-            <h2>¡Reserva Confirmada!</h2>
-            <p>Hola ${nombre_solicitante},</p>
-            <p>Tu reserva ha sido confirmada exitosamente.</p>
-            <hr>
-            <p><strong>Detalles:</strong></p>
-            <ul>
-              <li><strong>Espacio:</strong> ${nombreEspacio}</li>
-              <li><strong>Fecha:</strong> ${fecha}</li>
-              <li><strong>Horario:</strong> ${hora_inicio} - ${hora_fin}</li>
-              <li><strong>Motivo:</strong> ${motivo || 'Sin especificar'}</li>
-              <li><strong>Código de cancelación:</strong> ${codigo}</li>
-            </ul>
-            <p>Si necesitas cancelar, usa tu código en: <a href="https://ceq-reservas-frontend-pink.vercel.app/cancelar.html">Cancelar Reserva</a></p>
-            <p>Centro de Estudiantes de Química</p>
-          `
-        });
-      } catch (emailError) {
-        console.error('⚠️ Error al enviar email al usuario:', emailError);
-      }
-    }
-    
-    // Enviar email al moderador
-    try {
-      await resend.emails.send({
-        from: 'CEQ Reservas <reservas@ceq-una.com>',
-        to: [EMAIL_MODERADOR],
-        subject: '📌 Nueva Reserva - CEQ',
+      await enviarEmail({
+        to: email,
+        subject: '✓ Confirmación de Reserva - CEQ',
         html: `
-          <h2>Nueva Reserva</h2>
-          <p><strong>Usuario:</strong> ${nombre_solicitante}</p>
-          <p><strong>Contacto:</strong> ${contacto}</p>
+          <h2>¡Reserva Confirmada!</h2>
+          <p>Hola ${nombre_solicitante},</p>
+          <p>Tu reserva ha sido confirmada exitosamente.</p>
           <hr>
+          <p><strong>Detalles:</strong></p>
           <ul>
             <li><strong>Espacio:</strong> ${nombreEspacio}</li>
             <li><strong>Fecha:</strong> ${fecha}</li>
             <li><strong>Horario:</strong> ${hora_inicio} - ${hora_fin}</li>
             <li><strong>Motivo:</strong> ${motivo || 'Sin especificar'}</li>
-            <li><strong>Código:</strong> ${codigo}</li>
+            <li><strong>Código de cancelación:</strong> ${codigo}</li>
           </ul>
+          <p>Si necesitas cancelar, usa tu código en: <a href="https://reservas.ceq-una.com/cancelar.html">Cancelar Reserva</a></p>
+          <p>Centro de Estudiantes de Química</p>
         `
       });
-    } catch (emailError) {
-      console.error('⚠️ Error al enviar email al moderador:', emailError);
     }
+    
+    // Enviar email al moderador
+    await enviarEmail({
+      to: EMAIL_MODERADOR,
+      subject: '📌 Nueva Reserva - CEQ',
+      html: `
+        <h2>Nueva Reserva</h2>
+        <p><strong>Usuario:</strong> ${nombre_solicitante}</p>
+        <p><strong>Contacto:</strong> ${contacto}</p>
+        <hr>
+        <ul>
+          <li><strong>Espacio:</strong> ${nombreEspacio}</li>
+          <li><strong>Fecha:</strong> ${fecha}</li>
+          <li><strong>Horario:</strong> ${hora_inicio} - ${hora_fin}</li>
+          <li><strong>Motivo:</strong> ${motivo || 'Sin especificar'}</li>
+          <li><strong>Código:</strong> ${codigo}</li>
+        </ul>
+      `
+    });
     
     res.status(201).json({
       mensaje: 'Reserva creada exitosamente',
@@ -378,8 +397,7 @@ app.post('/api/cancelar-por-codigo', async (req, res) => {
     // Enviar emails
     const email = reserva.contacto.split('|')[1]?.trim();
     if (email) {
-      await resend.emails.send({
-        from: 'CEQ Reservas <reservas@ceq-una.com>',
+      await enviarEmail({
         to: email,
         subject: 'Cancelación Confirmada - CEQ Reservas',
         html: `
@@ -397,8 +415,7 @@ app.post('/api/cancelar-por-codigo', async (req, res) => {
     }
 
     // Email al moderador
-    await resend.emails.send({
-      from: 'CEQ Reservas <reservas@ceq-una.com>',
+    await enviarEmail({
       to: EMAIL_MODERADOR,
       subject: 'Cancelación de Reserva - CEQ',
       html: `
@@ -556,8 +573,7 @@ app.post('/api/admin/cancelar/:reserva_id', verifyAdminToken, async (req, res) =
     // Enviar email al reservante con motivo
     const email = reserva.contacto.split('|')[1]?.trim();
     if (email) {
-      await resend.emails.send({
-        from: 'CEQ Reservas <reservas@ceq-una.com>',
+      await enviarEmail({
         to: email,
         subject: 'Cancelación de Reserva - CEQ',
         html: `
