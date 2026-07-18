@@ -299,6 +299,16 @@ app.post('/api/reservas', async (req, res) => {
     const email = contacto.split('|')[1]?.trim() || '';
     const espaciosNombre = { 1: 'Altillo', 2: 'Sala de Reuniones', 3: 'Frente' };
     const nombreEspacio = espaciosNombre[espacio_id];
+
+    // Línea de contacto según el espacio reservado
+    let contactoLinea = '';
+    if (espacio_id === 1) {
+      // Altillo: solo email
+      contactoLinea = `<p>Ante cualquier consulta, contactate con: ${EMAIL_MODERADOR}</p>`;
+    } else if (espacio_id === 3) {
+      // Frente: email + WhatsApp
+      contactoLinea = `<p>Ante cualquier consulta, contactate con: ${EMAIL_MODERADOR} o por <a href="https://wa.me/595981902697">WhatsApp</a></p>`;
+    }
     
     // Enviar email al usuario (si existe email)
     if (email) {
@@ -319,6 +329,7 @@ app.post('/api/reservas', async (req, res) => {
             <li><strong>Código de cancelación:</strong> ${codigo}</li>
           </ul>
           <p>Si necesitas cancelar, usa tu código en: <a href="https://reservas.ceq-una.com/cancelar.html">Cancelar Reserva</a></p>
+          ${contactoLinea}
           <p>Centro de Estudiantes de Química</p>
         `
       });
@@ -381,6 +392,23 @@ app.post('/api/cancelar-por-codigo', async (req, res) => {
 
     // Validar período de cancelación para Frente (2 días)
     if (reserva.espacio_id === 3 && diferenciaDias < 2) {
+      const emailUsuario = reserva.contacto.split('|')[1]?.trim();
+      if (emailUsuario) {
+        await enviarEmail({
+          to: emailUsuario,
+          subject: 'Período de Cancelación Gratuita Finalizado - CEQ',
+          html: `
+            <h2>El período de cancelación gratuita ha finalizado</h2>
+            <p>Intentaste cancelar tu reserva de <strong>${getEspacioNombre(reserva.espacio_id)}</strong>, pero el período de cancelación gratuita ya venció.</p>
+            <p><strong>Detalles de la Reserva:</strong></p>
+            <ul>
+              <li>Fecha: ${reserva.fecha}</li>
+              <li>Horario: ${reserva.hora_inicio.substring(0,5)} - ${reserva.hora_fin.substring(0,5)}</li>
+            </ul>
+            <p>Si de todas formas deseás realizar la cancelación, contactate por WhatsApp: <a href="https://wa.me/595981902697">Contactar por WhatsApp</a></p>
+          `
+        });
+      }
       return res.status(403).json({ 
         error: 'EL PERIODO DE CANCELACION GRATUITA HA FINALIZADO. SI DESEA REALIZAR LA CANCELACION CONTACTESE CON ceq.informatica@gmail.com' 
       });
@@ -401,8 +429,7 @@ app.post('/api/cancelar-por-codigo', async (req, res) => {
         to: email,
         subject: 'Cancelación Confirmada - CEQ Reservas',
         html: `
-          <h2>Reserva Cancelada</h2>
-          <p>Tu reserva ha sido cancelada correctamente.</p>
+          <h2>¡Has cancelado correctamente tu reserva!</h2>
           <p><strong>Detalles:</strong></p>
           <ul>
             <li>Fecha: ${reserva.fecha}</li>
@@ -575,9 +602,9 @@ app.post('/api/admin/cancelar/:reserva_id', verifyAdminToken, async (req, res) =
     if (email) {
       await enviarEmail({
         to: email,
-        subject: 'Cancelación de Reserva - CEQ',
+        subject: 'Tu Reserva Fue Cancelada por el Moderador - CEQ',
         html: `
-          <h2>Tu Reserva Ha Sido Cancelada</h2>
+          <h2>Tu reserva fue cancelada por el moderador</h2>
           <p><strong>Motivo:</strong> ${motivo || 'No especificado'}</p>
           <p><strong>Detalles de la Reserva:</strong></p>
           <ul>
