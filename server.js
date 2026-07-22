@@ -28,6 +28,30 @@ const supabase = createClient(SUPABASE_URL, SUPABASE_KEY);
 // Configuración Brevo (envío de emails)
 const BREVO_API_KEY = process.env.BREVO_API_KEY;
 const EMAIL_MODERADOR = process.env.EMAIL_MODERADOR || 'ceq.informatica@gmail.com';
+// Email específico para avisos del espacio Frente (si no se configura, usa el general)
+const EMAIL_MODERADOR_FRENTE = process.env.EMAIL_MODERADOR_FRENTE || EMAIL_MODERADOR;
+
+// Devuelve el/los email(s) de moderador correspondientes según el espacio (para notificaciones internas).
+// Altillo: solo el general. Frente: el general + el específico de Frente (sin duplicar si son iguales).
+function getEmailModerador(espacio_id) {
+  if (espacio_id === 3) {
+    return [...new Set([EMAIL_MODERADOR, EMAIL_MODERADOR_FRENTE])];
+  }
+  return [EMAIL_MODERADOR];
+}
+
+// Contacto público que se muestra al reservante para consultas sobre Frente
+const CONTACTO_EMAIL_FRENTE = 'Monsegonza511@gmail.com';
+const CONTACTO_WHATSAPP_FRENTE = '595972753471'; // formato wa.me: código de país + número, sin +, espacios ni guiones
+
+// Devuelve el HTML de la línea de contacto a mostrarle al usuario según el espacio.
+// Frente: email de contacto + WhatsApp. Altillo: solo el email general del moderador.
+function getContactoLineaHtml(espacio_id) {
+  if (espacio_id === 3) {
+    return `${CONTACTO_EMAIL_FRENTE} o por <a href="https://wa.me/${CONTACTO_WHATSAPP_FRENTE}">WhatsApp</a>`;
+  }
+  return `${EMAIL_MODERADOR}`;
+}
 
 // Función helper para enviar emails vía la API de Brevo
 async function enviarEmail({ to, subject, html }) {
@@ -301,14 +325,7 @@ app.post('/api/reservas', async (req, res) => {
     const nombreEspacio = espaciosNombre[espacio_id];
 
     // Línea de contacto según el espacio reservado
-    let contactoLinea = '';
-    if (espacio_id === 1) {
-      // Altillo: solo email
-      contactoLinea = `<p>Ante cualquier consulta, contactate con: ${EMAIL_MODERADOR}</p>`;
-    } else if (espacio_id === 3) {
-      // Frente: email + WhatsApp
-      contactoLinea = `<p>Ante cualquier consulta, contactate con: ${EMAIL_MODERADOR} o por <a href="https://wa.me/595981902697">WhatsApp</a></p>`;
-    }
+    const contactoLinea = `<p>Ante cualquier consulta, contactate con: ${getContactoLineaHtml(espacio_id)}</p>`;
     
     // Enviar email al usuario (si existe email)
     if (email) {
@@ -335,9 +352,9 @@ app.post('/api/reservas', async (req, res) => {
       });
     }
     
-    // Enviar email al moderador
+    // Enviar email al moderador correspondiente (Altillo o Frente)
     await enviarEmail({
-      to: EMAIL_MODERADOR,
+      to: getEmailModerador(espacio_id),
       subject: '📌 Nueva Reserva - CEQ',
       html: `
         <h2>Nueva Reserva</h2>
@@ -405,7 +422,7 @@ app.post('/api/cancelar-por-codigo', async (req, res) => {
               <li>Fecha: ${reserva.fecha}</li>
               <li>Horario: ${reserva.hora_inicio.substring(0,5)} - ${reserva.hora_fin.substring(0,5)}</li>
             </ul>
-            <p>Si de todas formas deseás realizar la cancelación, contactate por WhatsApp: <a href="https://wa.me/595981902697">Contactar por WhatsApp</a></p>
+            <p>Si de todas formas deseás realizar la cancelación, contactate por WhatsApp: <a href="https://wa.me/595972753471">Contactar por WhatsApp</a></p>
           `
         });
       }
@@ -436,24 +453,26 @@ app.post('/api/cancelar-por-codigo', async (req, res) => {
             <li>Espacio: ${getEspacioNombre(reserva.espacio_id)}</li>
             <li>Horario: ${reserva.hora_inicio.substring(0,5)} - ${reserva.hora_fin.substring(0,5)}</li>
           </ul>
-          <p>Si tienes dudas, contacta con: ${EMAIL_MODERADOR}</p>
+          <p>Si tienes dudas, contacta con: ${getContactoLineaHtml(reserva.espacio_id)}</p>
         `
       });
     }
 
-    // Email al moderador
-    await enviarEmail({
-      to: EMAIL_MODERADOR,
-      subject: 'Cancelación de Reserva - CEQ',
-      html: `
-        <h2>Reserva Cancelada por Usuario</h2>
-        <p><strong>Usuario:</strong> ${reserva.nombre_solicitante}</p>
-        <p><strong>Contacto:</strong> ${reserva.contacto}</p>
-        <p><strong>Espacio:</strong> ${getEspacioNombre(reserva.espacio_id)}</p>
-        <p><strong>Fecha:</strong> ${reserva.fecha}</p>
-        <p><strong>Horario:</strong> ${reserva.hora_inicio.substring(0,5)} - ${reserva.hora_fin.substring(0,5)}</p>
-      `
-    });
+    // Email al moderador (solo para autocancelaciones del espacio Frente)
+    if (reserva.espacio_id === 3) {
+      await enviarEmail({
+        to: getEmailModerador(reserva.espacio_id),
+        subject: 'Cancelación de Reserva - CEQ',
+        html: `
+          <h2>Reserva Cancelada por Usuario</h2>
+          <p><strong>Usuario:</strong> ${reserva.nombre_solicitante}</p>
+          <p><strong>Contacto:</strong> ${reserva.contacto}</p>
+          <p><strong>Espacio:</strong> ${getEspacioNombre(reserva.espacio_id)}</p>
+          <p><strong>Fecha:</strong> ${reserva.fecha}</p>
+          <p><strong>Horario:</strong> ${reserva.hora_inicio.substring(0,5)} - ${reserva.hora_fin.substring(0,5)}</p>
+        `
+      });
+    }
 
     res.json({ 
       mensaje: 'Reserva cancelada correctamente',
@@ -612,7 +631,7 @@ app.post('/api/admin/cancelar/:reserva_id', verifyAdminToken, async (req, res) =
             <li>Espacio: ${getEspacioNombre(reserva.espacio_id)}</li>
             <li>Horario: ${reserva.hora_inicio.substring(0,5)} - ${reserva.hora_fin.substring(0,5)}</li>
           </ul>
-          <p>Si tienes preguntas, contacta con: ${EMAIL_MODERADOR}</p>
+          <p>Si tienes preguntas, contacta con: ${getContactoLineaHtml(reserva.espacio_id)}</p>
         `
       });
     }
