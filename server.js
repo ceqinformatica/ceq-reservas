@@ -280,12 +280,12 @@ app.post('/api/reservas', async (req, res) => {
       return res.status(400).json({ error: 'Formato de hora inválido' });
     }
 
-    // Validar que la fecha esté dentro de la ventana permitida (hoy hasta hoy+5 días, sin fines de semana)
+    // Validar que la fecha esté dentro de la ventana permitida (hoy hasta hoy+31 días, sin fines de semana)
     const hoy = new Date();
     hoy.setHours(0, 0, 0, 0);
     const fechaReserva = new Date(fecha + 'T00:00:00');
     const fechaLimite = new Date(hoy);
-    fechaLimite.setDate(fechaLimite.getDate() + 5);
+    fechaLimite.setDate(fechaLimite.getDate() + 31);
 
     const esFinDeSemana = fechaReserva.getDay() === 0 || fechaReserva.getDay() === 6;
 
@@ -412,7 +412,7 @@ app.post('/api/cancelar-por-codigo', async (req, res) => {
       const emailUsuario = reserva.contacto.split('|')[1]?.trim();
       if (emailUsuario) {
         await enviarEmail({
-          to: emailUsuario,
+          to: [emailUsuario, CONTACTO_EMAIL_FRENTE],
           subject: 'Período de Cancelación Gratuita Finalizado - CEQ',
           html: `
             <h2>El período de cancelación gratuita ha finalizado</h2>
@@ -443,7 +443,7 @@ app.post('/api/cancelar-por-codigo', async (req, res) => {
     const email = reserva.contacto.split('|')[1]?.trim();
     if (email) {
       await enviarEmail({
-        to: email,
+        to: [email, CONTACTO_EMAIL_FRENTE],
         subject: 'Cancelación Confirmada - CEQ Reservas',
         html: `
           <h2>¡Has cancelado correctamente tu reserva!</h2>
@@ -620,7 +620,7 @@ app.post('/api/admin/cancelar/:reserva_id', verifyAdminToken, async (req, res) =
     const email = reserva.contacto.split('|')[1]?.trim();
     if (email) {
       await enviarEmail({
-        to: email,
+        to: [email, CONTACTO_EMAIL_FRENTE],
         subject: 'Tu Reserva Fue Cancelada por el Moderador - CEQ',
         html: `
           <h2>Tu reserva fue cancelada por el moderador</h2>
