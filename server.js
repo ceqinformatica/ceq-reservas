@@ -271,10 +271,6 @@ app.get('/api/reservas', async (req, res) => {
   try {
     const { espacio_id, fecha } = req.query;
 
-    if (!espacio_id && !fecha) {
-      return res.status(400).json({ error: 'Debe indicar espacio_id y/o fecha' });
-    }
-
     let query = supabase
       .from('reservas')
       .select('espacio_id, fecha, hora_inicio, hora_fin')
@@ -283,7 +279,7 @@ app.get('/api/reservas', async (req, res) => {
     if (espacio_id) query = query.eq('espacio_id', parseInt(espacio_id));
     if (fecha) query = query.eq('fecha', fecha);
     
-    const { data, error } = await query.limit(500);
+    const { data, error } = await query.limit(2000);
     
     if (error) throw error;
     res.json(data || []);
