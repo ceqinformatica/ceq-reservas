@@ -247,14 +247,17 @@ app.post('/api/login', loginLimiter, async (req, res) => {
       { expiresIn: '8h' }
     );
 
-    // AUTH-002: el token se manda como cookie httpOnly, no en el body de la
-    // respuesta. secure+sameSite=None porque el frontend (reservas.ceq-una.com)
-    // y el backend (onrender.com) son dominios distintos (cross-site), y los dos
-    // corren sobre HTTPS.
+    // AUTH-002: cookie de primera parte (mismo dominio raíz que el frontend),
+    // así los navegadores no la tratan como cookie de terceros y no la bloquean
+    // (Safari y el modo incógnito de Chrome bloquean cookies de terceros por defecto).
+    // Requiere que el backend esté servido desde un subdominio de ceq-una.com
+    // (ej. api.ceq-una.com) — si todavía corre solo en onrender.com, esta cookie
+    // con domain=.ceq-una.com no se va a setear correctamente.
     res.cookie('admin_token', token, {
       httpOnly: true,
       secure: true,
-      sameSite: 'none',
+      sameSite: 'lax',
+      domain: '.ceq-una.com',
       maxAge: 8 * 60 * 60 * 1000, // 8 horas, en milisegundos
       path: '/'
     });
@@ -275,7 +278,8 @@ app.post('/api/logout', (req, res) => {
   res.clearCookie('admin_token', {
     httpOnly: true,
     secure: true,
-    sameSite: 'none',
+    sameSite: 'lax',
+    domain: '.ceq-una.com',
     path: '/'
   });
   res.json({ mensaje: 'Sesión cerrada' });
