@@ -1,6 +1,8 @@
 require('dotenv').config();
 const express = require('express');
 const cors = require('cors');
+const helmet = require('helmet');
+const rateLimit = require('express-rate-limit');
 const { createClient } = require('@supabase/supabase-js');
 const bcrypt = require('bcrypt');
 const jwt = require('jsonwebtoken');
@@ -8,6 +10,32 @@ const crypto = require('crypto');
 
 const app = express();
 const PORT = process.env.PORT || 3000;
+
+// ========== UTILIDADES DE SEGURIDAD ==========
+
+// Escapa entidades HTML para evitar inyección en emails (SEC-006)
+function escapeHtml(texto) {
+  if (texto === null || texto === undefined) return '';
+  return String(texto)
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;');
+}
+
+// Responde con un mensaje genérico al cliente y loguea el detalle real solo en el servidor (API-001).
+// No exponer error.message crudo: puede filtrar nombres de tablas/columnas/constraints de Supabase.
+function manejarError(res, error, mensajePublico = 'Error interno del servidor', status = 500) {
+  console.error('❌ Error interno:', error);
+  res.status(status).json({ error: mensajePublico });
+}
+
+// Valida que un valor sea un entero positivo (para IDs de path params) (API-003)
+function esIdValido(valor) {
+  const n = Number(valor);
+  return Number.isInteger(n) && n > 0;
+}
 
 // ========== CONFIGURACIÓN DE SEGURIDAD ==========
 
@@ -90,6 +118,15 @@ const ADMIN_PASSWORD_HASH = process.env.ADMIN_PASSWORD_HASH;
 
 // ========== MIDDLEWARE ==========
 
+// Cabeceras de seguridad (SEC-004). CSP queda deshabilitada por ahora: el frontend
+// actual usa scripts y handlers inline (onclick=...) en varios lugares, y activar una
+// CSP estricta sin antes extraer ese código a archivos separados rompería la UI.
+// Pendiente: extraer JS inline de index.html/admin.html y activar contentSecurityPolicy.
+app.use(helmet({
+  contentSecurityPolicy: false,
+  crossOriginEmbedderPolicy: false
+}));
+
 // CORS configurado correctamente
 app.use(cors({
   origin: [
@@ -105,6 +142,40 @@ app.use(cors({
 
 // Limitar tamaño de payloads
 app.use(express.json({ limit: '10kb' }));
+
+// ========== RATE LIMITING (AUTH-001, ABUSE-001) ==========
+
+const loginLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000, // 15 minutos
+  max: 5,
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { error: 'Demasiados intentos. Probá de nuevo en unos minutos.' }
+});
+
+const crearReservaLimiter = rateLimit({
+  windowMs: 60 * 60 * 1000, // 1 hora
+  max: 15,
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { error: 'Demasiadas solicitudes. Probá de nuevo más tarde.' }
+});
+
+const cancelarLimiter = rateLimit({
+  windowMs: 60 * 60 * 1000,
+  max: 20,
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { error: 'Demasiados intentos de cancelación. Probá de nuevo más tarde.' }
+});
+
+const reportesLimiter = rateLimit({
+  windowMs: 60 * 60 * 1000,
+  max: 10,
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { error: 'Demasiados reportes enviados. Probá de nuevo más tarde.' }
+});
 
 // ========== UTILIDADES ==========
 
@@ -147,7 +218,7 @@ app.get('/api/health', (req, res) => {
 });
 
 // LOGIN - Endpoint seguro
-app.post('/api/login', async (req, res) => {
+app.post('/api/login', loginLimiter, async (req, res) => {
   try {
     const { password } = req.body;
     
@@ -188,31 +259,36 @@ app.get('/api/espacios', async (req, res) => {
     const { data } = await supabase.from('espacios').select('*');
     res.json(data || []);
   } catch (error) {
-    console.error(error);
-    res.status(500).json({ error: error.message });
+    manejarError(res, error);
   }
 });
 
-// GET reservas (público, filtrado por espacio y fecha)
+// GET reservas (público, filtrado por espacio y fecha) — SOLO datos de disponibilidad,
+// SIN datos personales ni código de cancelación (corrige SEC-001/PRIV-001: antes
+// exponía select('*') con nombre, contacto, motivo, id y codigo_cancelacion en claro,
+// lo cual permitía cancelar reservas ajenas usando ese mismo código).
 app.get('/api/reservas', async (req, res) => {
   try {
     const { espacio_id, fecha } = req.query;
-    
+
+    if (!espacio_id && !fecha) {
+      return res.status(400).json({ error: 'Debe indicar espacio_id y/o fecha' });
+    }
+
     let query = supabase
       .from('reservas')
-      .select('*')
+      .select('espacio_id, fecha, hora_inicio, hora_fin')
       .eq('estado', 'activa');
     
     if (espacio_id) query = query.eq('espacio_id', parseInt(espacio_id));
     if (fecha) query = query.eq('fecha', fecha);
     
-    const { data, error } = await query;
+    const { data, error } = await query.limit(500);
     
     if (error) throw error;
     res.json(data || []);
   } catch (error) {
-    console.error(error);
-    res.status(500).json({ error: error.message });
+    manejarError(res, error);
   }
 });
 
@@ -221,13 +297,13 @@ app.get('/api/bloqueos', async (req, res) => {
   try {
     const { data, error } = await supabase
       .from('bloqueos')
-      .select('*');
+      .select('espacio_id, fecha, hora_inicio, hora_fin')
+      .limit(1000);
     
     if (error) throw error;
     res.json(data || []);
   } catch (error) {
-    console.error(error);
-    res.status(500).json({ error: error.message });
+    manejarError(res, error);
   }
 });
 
@@ -260,13 +336,12 @@ app.post('/api/validar-disponibilidad', async (req, res) => {
     
     res.json({ disponible: !hayConflicto });
   } catch (error) {
-    console.error(error);
-    res.status(500).json({ error: error.message });
+    manejarError(res, error);
   }
 });
 
 // POST crear reserva
-app.post('/api/reservas', async (req, res) => {
+app.post('/api/reservas', crearReservaLimiter, async (req, res) => {
   try {
     const { espacio_id, nombre_solicitante, contacto, fecha, hora_inicio, hora_fin, motivo } = req.body;
     
@@ -274,10 +349,47 @@ app.post('/api/reservas', async (req, res) => {
     if (!espacio_id || !nombre_solicitante || !contacto || !fecha || !hora_inicio || !hora_fin) {
       return res.status(400).json({ error: 'Faltan parámetros requeridos' });
     }
+
+    // Longitudes máximas razonables (VAL-002)
+    if (String(nombre_solicitante).length > 150 || String(contacto).length > 200 || (motivo && String(motivo).length > 500)) {
+      return res.status(400).json({ error: 'Uno o más campos exceden la longitud permitida' });
+    }
+
+    // Solo se ofrecen públicamente los espacios Altillo (1) y Frente (3)
+    const espacioIdNum = parseInt(espacio_id);
+    if (![1, 3].includes(espacioIdNum)) {
+      return res.status(400).json({ error: 'Espacio inválido' });
+    }
     
     // Validar formato de hora
     if (!/^\d{2}:\d{2}$/.test(hora_inicio) || !/^\d{2}:\d{2}$/.test(hora_fin)) {
       return res.status(400).json({ error: 'Formato de hora inválido' });
+    }
+
+    const [horaIniH, horaIniM] = hora_inicio.split(':').map(Number);
+    const [horaFinH, horaFinM] = hora_fin.split(':').map(Number);
+
+    if (![horaIniH, horaIniM, horaFinH, horaFinM].every(Number.isFinite) ||
+        horaIniH > 23 || horaFinH > 23 || horaIniM > 59 || horaFinM > 59) {
+      return res.status(400).json({ error: 'Hora inválida' });
+    }
+
+    const inicioMin = horaIniH * 60 + horaIniM;
+    const finMin = horaFinH * 60 + horaFinM;
+
+    if (inicioMin >= finMin) {
+      return res.status(400).json({ error: 'La hora de inicio debe ser anterior a la hora de fin' });
+    }
+
+    const duracionHoras = (finMin - inicioMin) / 60;
+    if (duracionHoras < 1 || duracionHoras > 3) {
+      return res.status(400).json({ error: 'La duración debe ser entre 1 y 3 horas' });
+    }
+
+    // Franja horaria permitida por espacio (Frente: 7-18, Altillo: 8-18)
+    const horaMinimaPermitida = espacioIdNum === 3 ? 7 : 8;
+    if (horaIniH < horaMinimaPermitida || horaFinH > 18 || (horaFinH === 18 && horaFinM > 0)) {
+      return res.status(400).json({ error: `Horario fuera de rango (${horaMinimaPermitida}:00-18:00)` });
     }
 
     // Validar que la fecha esté dentro de la ventana permitida (hoy hasta hoy+31 días, sin fines de semana)
@@ -289,8 +401,31 @@ app.post('/api/reservas', async (req, res) => {
 
     const esFinDeSemana = fechaReserva.getDay() === 0 || fechaReserva.getDay() === 6;
 
-    if (fechaReserva < hoy || fechaReserva > fechaLimite || esFinDeSemana) {
+    if (isNaN(fechaReserva.getTime()) || fechaReserva < hoy || fechaReserva > fechaLimite || esFinDeSemana) {
       return res.status(400).json({ error: 'Fecha fuera del rango permitido para reservar' });
+    }
+
+    // Verificar que no exista un bloqueo administrativo para ese espacio/fecha/horario (BUG-001).
+    // Nota: esto reduce el riesgo pero no es 100% atómico frente a un bloqueo creado en el mismo instante;
+    // la garantía definitiva requiere una función/transacción en la base (ver informe de auditoría, CONC-001).
+    const { data: bloqueosConflicto, error: errorBloqueos } = await supabase
+      .from('bloqueos')
+      .select('hora_inicio, hora_fin')
+      .eq('espacio_id', espacioIdNum)
+      .eq('fecha', fecha);
+
+    if (errorBloqueos) throw errorBloqueos;
+
+    const hayBloqueo = (bloqueosConflicto || []).some(b => {
+      const [bIniH, bIniM] = b.hora_inicio.split(':').map(Number);
+      const [bFinH, bFinM] = b.hora_fin.split(':').map(Number);
+      const bIniMin = bIniH * 60 + bIniM;
+      const bFinMin = bFinH * 60 + bFinM;
+      return inicioMin < bFinMin && finMin > bIniMin;
+    });
+
+    if (hayBloqueo) {
+      return res.status(409).json({ error: 'El horario seleccionado está bloqueado por administración' });
     }
     
     // Generar código de cancelación seguro (16 caracteres)
@@ -300,7 +435,7 @@ app.post('/api/reservas', async (req, res) => {
     const { data: nuevaReserva, error } = await supabase
       .from('reservas')
       .insert([{
-        espacio_id,
+        espacio_id: espacioIdNum,
         nombre_solicitante,
         contacto,
         fecha,
@@ -322,10 +457,16 @@ app.post('/api/reservas', async (req, res) => {
     // Extraer email del contacto (formato: "celular | email")
     const email = contacto.split('|')[1]?.trim() || '';
     const espaciosNombre = { 1: 'Altillo', 2: 'Sala de Reuniones', 3: 'Frente' };
-    const nombreEspacio = espaciosNombre[espacio_id];
+    const nombreEspacio = espaciosNombre[espacioIdNum];
 
     // Línea de contacto según el espacio reservado
-    const contactoLinea = `<p>Ante cualquier consulta, contactate con: ${getContactoLineaHtml(espacio_id)}</p>`;
+    const contactoLinea = `<p>Ante cualquier consulta, contactate con: ${getContactoLineaHtml(espacioIdNum)}</p>`;
+
+    // Valores escapados para uso en HTML de emails (SEC-006): nombre/motivo/contacto son
+    // ingresados libremente por cualquier visitante y no deben interpretarse como HTML.
+    const nombreSeguro = escapeHtml(nombre_solicitante);
+    const motivoSeguro = escapeHtml(motivo);
+    const contactoSeguro = escapeHtml(contacto);
     
     // Enviar email al usuario (si existe email)
     if (email) {
@@ -334,7 +475,7 @@ app.post('/api/reservas', async (req, res) => {
         subject: '✓ Confirmación de Reserva - CEQ',
         html: `
           <h2>¡Reserva Confirmada!</h2>
-          <p>Hola ${nombre_solicitante},</p>
+          <p>Hola ${nombreSeguro},</p>
           <p>Tu reserva ha sido confirmada exitosamente.</p>
           <hr>
           <p><strong>Detalles:</strong></p>
@@ -342,7 +483,7 @@ app.post('/api/reservas', async (req, res) => {
             <li><strong>Espacio:</strong> ${nombreEspacio}</li>
             <li><strong>Fecha:</strong> ${fecha}</li>
             <li><strong>Horario:</strong> ${hora_inicio} - ${hora_fin}</li>
-            <li><strong>Motivo:</strong> ${motivo || 'Sin especificar'}</li>
+            <li><strong>Motivo:</strong> ${motivoSeguro || 'Sin especificar'}</li>
             <li><strong>Código de cancelación:</strong> ${codigo}</li>
           </ul>
           <p>Si necesitas cancelar, usa tu código en: <a href="https://reservas.ceq-una.com/cancelar.html">Cancelar Reserva</a></p>
@@ -354,18 +495,18 @@ app.post('/api/reservas', async (req, res) => {
     
     // Enviar email al moderador correspondiente (Altillo o Frente)
     await enviarEmail({
-      to: getEmailModerador(espacio_id),
+      to: getEmailModerador(espacioIdNum),
       subject: '📌 Nueva Reserva - CEQ',
       html: `
         <h2>Nueva Reserva</h2>
-        <p><strong>Usuario:</strong> ${nombre_solicitante}</p>
-        <p><strong>Contacto:</strong> ${contacto}</p>
+        <p><strong>Usuario:</strong> ${nombreSeguro}</p>
+        <p><strong>Contacto:</strong> ${contactoSeguro}</p>
         <hr>
         <ul>
           <li><strong>Espacio:</strong> ${nombreEspacio}</li>
           <li><strong>Fecha:</strong> ${fecha}</li>
           <li><strong>Horario:</strong> ${hora_inicio} - ${hora_fin}</li>
-          <li><strong>Motivo:</strong> ${motivo || 'Sin especificar'}</li>
+          <li><strong>Motivo:</strong> ${motivoSeguro || 'Sin especificar'}</li>
           <li><strong>Código:</strong> ${codigo}</li>
         </ul>
       `
@@ -377,17 +518,16 @@ app.post('/api/reservas', async (req, res) => {
       codigo
     });
   } catch (error) {
-    console.error(error);
-    res.status(500).json({ error: error.message });
+    manejarError(res, error);
   }
 });
 
 // Cancelar por código (público)
-app.post('/api/cancelar-por-codigo', async (req, res) => {
+app.post('/api/cancelar-por-codigo', cancelarLimiter, async (req, res) => {
   try {
     const { codigo } = req.body;
     
-    if (!codigo) {
+    if (!codigo || typeof codigo !== 'string' || codigo.length > 64) {
       return res.status(400).json({ error: 'Código requerido' });
     }
     
@@ -412,7 +552,7 @@ app.post('/api/cancelar-por-codigo', async (req, res) => {
       const emailUsuario = reserva.contacto.split('|')[1]?.trim();
       if (emailUsuario) {
         await enviarEmail({
-          to: [emailUsuario, CONTACTO_EMAIL_FRENTE],
+          to: emailUsuario,
           subject: 'Período de Cancelación Gratuita Finalizado - CEQ',
           html: `
             <h2>El período de cancelación gratuita ha finalizado</h2>
@@ -426,24 +566,49 @@ app.post('/api/cancelar-por-codigo', async (req, res) => {
           `
         });
       }
+
+      // Aviso al moderador: hubo un intento de cancelación fuera del período gratuito
+      await enviarEmail({
+        to: getEmailModerador(reserva.espacio_id),
+        subject: 'Intento de Cancelación Fuera de Plazo - CEQ',
+        html: `
+          <h2>Intento de Cancelación (Período Vencido)</h2>
+          <p><strong>Usuario:</strong> ${escapeHtml(reserva.nombre_solicitante)}</p>
+          <p><strong>Contacto:</strong> ${escapeHtml(reserva.contacto)}</p>
+          <p><strong>Espacio:</strong> ${getEspacioNombre(reserva.espacio_id)}</p>
+          <p><strong>Fecha de la reserva:</strong> ${reserva.fecha}</p>
+          <p><strong>Horario:</strong> ${reserva.hora_inicio.substring(0,5)} - ${reserva.hora_fin.substring(0,5)}</p>
+          <p>El usuario intentó cancelar esta reserva, pero el período de cancelación gratuita ya había vencido. La reserva sigue activa.</p>
+        `
+      });
+
       return res.status(403).json({ 
         error: 'EL PERIODO DE CANCELACION GRATUITA HA FINALIZADO. SI DESEA REALIZAR LA CANCELACION CONTACTESE CON ceq.informatica@gmail.com' 
       });
     }
     
-    // Actualizar estado
-    const { error: updateError } = await supabase
+    // Actualizar estado de forma condicional y atómica (BUG-005): solo transiciona si
+    // seguía activa en ese instante. Si otra petición concurrente ya la canceló,
+    // updateData viene vacío y respondemos de forma idempotente sin reenviar emails.
+    const { data: updateData, error: updateError } = await supabase
       .from('reservas')
       .update({ estado: 'cancelada' })
-      .eq('codigo_cancelacion', codigo);
+      .eq('codigo_cancelacion', codigo)
+      .eq('estado', 'activa')
+      .select();
     
     if (updateError) throw updateError;
 
-    // Enviar emails
+    if (!updateData || updateData.length === 0) {
+      return res.json({ mensaje: 'La reserva ya se encontraba cancelada' });
+    }
+
+    // Enviar emails (PRIV-002 corregido: el contacto de Frente ya no se copia en
+    // el email del propio usuario; solo se le muestra como texto de contacto)
     const email = reserva.contacto.split('|')[1]?.trim();
     if (email) {
       await enviarEmail({
-        to: [email, CONTACTO_EMAIL_FRENTE],
+        to: email,
         subject: 'Cancelación Confirmada - CEQ Reservas',
         html: `
           <h2>¡Has cancelado correctamente tu reserva!</h2>
@@ -465,8 +630,8 @@ app.post('/api/cancelar-por-codigo', async (req, res) => {
         subject: 'Cancelación de Reserva - CEQ',
         html: `
           <h2>Reserva Cancelada por Usuario</h2>
-          <p><strong>Usuario:</strong> ${reserva.nombre_solicitante}</p>
-          <p><strong>Contacto:</strong> ${reserva.contacto}</p>
+          <p><strong>Usuario:</strong> ${escapeHtml(reserva.nombre_solicitante)}</p>
+          <p><strong>Contacto:</strong> ${escapeHtml(reserva.contacto)}</p>
           <p><strong>Espacio:</strong> ${getEspacioNombre(reserva.espacio_id)}</p>
           <p><strong>Fecha:</strong> ${reserva.fecha}</p>
           <p><strong>Horario:</strong> ${reserva.hora_inicio.substring(0,5)} - ${reserva.hora_fin.substring(0,5)}</p>
@@ -481,18 +646,25 @@ app.post('/api/cancelar-por-codigo', async (req, res) => {
       fecha: reserva.fecha
     });
   } catch (error) {
-    console.error('❌ Error en cancelación:', error);
-    res.status(500).json({ error: error.message });
+    manejarError(res, error);
   }
 });
 
 // Reportar error (público)
-app.post('/api/reportes', async (req, res) => {
+app.post('/api/reportes', reportesLimiter, async (req, res) => {
   try {
     const { mensaje, url, navegador } = req.body;
     
-    if (!mensaje) {
+    if (!mensaje || typeof mensaje !== 'string') {
       return res.status(400).json({ error: 'Mensaje requerido' });
+    }
+
+    if (mensaje.length > 1000 || (url && String(url).length > 500) || (navegador && String(navegador).length > 300)) {
+      return res.status(400).json({ error: 'Uno o más campos exceden la longitud permitida' });
+    }
+
+    if (url && !/^https?:\/\//i.test(url)) {
+      return res.status(400).json({ error: 'URL inválida' });
     }
     
     const { error } = await supabase
@@ -502,8 +674,7 @@ app.post('/api/reportes', async (req, res) => {
     if (error) throw error;
     return res.status(201).json({ mensaje: 'Reporte enviado correctamente' });
   } catch (error) {
-    console.error(error);
-    return res.status(500).json({ error: error.message });
+    return manejarError(res, error);
   }
 });
 
@@ -520,8 +691,23 @@ app.get('/api/admin/reservas', verifyAdminToken, async (req, res) => {
     if (error) throw error;
     res.json(data || []);
   } catch (error) {
-    console.error(error);
-    res.status(500).json({ error: error.message });
+    manejarError(res, error);
+  }
+});
+
+// GET bloqueos completos para el panel de admin (incluye id y motivo, a diferencia
+// del endpoint público /api/bloqueos que solo expone lo necesario para pintar el calendario)
+app.get('/api/admin/bloqueos', verifyAdminToken, async (req, res) => {
+  try {
+    const { data, error } = await supabase
+      .from('bloqueos')
+      .select('*')
+      .order('fecha', { ascending: false });
+
+    if (error) throw error;
+    res.json(data || []);
+  } catch (error) {
+    manejarError(res, error);
   }
 });
 
@@ -533,9 +719,21 @@ app.post('/api/bloqueos', verifyAdminToken, async (req, res) => {
     if (!espacio_id || !fecha || !hora_inicio || !hora_fin) {
       return res.status(400).json({ error: 'Faltan parámetros' });
     }
+
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(fecha) || isNaN(new Date(fecha + 'T00:00:00').getTime())) {
+      return res.status(400).json({ error: 'Fecha inválida' });
+    }
+
+    if (!/^\d{2}:\d{2}$/.test(hora_inicio) || !/^\d{2}:\d{2}$/.test(hora_fin)) {
+      return res.status(400).json({ error: 'Formato de hora inválido' });
+    }
     
     const [horaI, minI] = hora_inicio.split(':').map(Number);
     const [horaF, minF] = hora_fin.split(':').map(Number);
+
+    if (![horaI, minI, horaF, minF].every(Number.isFinite) || horaI > 23 || horaF > 23 || minI > 59 || minF > 59) {
+      return res.status(400).json({ error: 'Hora inválida' });
+    }
     
     const isBloqueCompleto = horaI === 0 && minI === 0 && horaF === 23 && minF === 59;
     
@@ -555,7 +753,7 @@ app.post('/api/bloqueos', verifyAdminToken, async (req, res) => {
         fecha,
         hora_inicio,
         hora_fin,
-        motivo: motivo || 'Sin especificar'
+        motivo: motivo ? String(motivo).slice(0, 300) : 'Sin especificar'
       }]);
     
     if (error) {
@@ -567,8 +765,7 @@ app.post('/api/bloqueos', verifyAdminToken, async (req, res) => {
     
     res.status(201).json({ mensaje: 'Bloqueo creado' });
   } catch (error) {
-    console.error(error);
-    res.status(500).json({ error: error.message });
+    manejarError(res, error);
   }
 });
 
@@ -576,17 +773,24 @@ app.post('/api/bloqueos', verifyAdminToken, async (req, res) => {
 app.delete('/api/bloqueos/:id', verifyAdminToken, async (req, res) => {
   try {
     const { id } = req.params;
+
+    if (!esIdValido(id)) {
+      return res.status(400).json({ error: 'ID inválido' });
+    }
     
-    const { error } = await supabase
+    const { data, error } = await supabase
       .from('bloqueos')
       .delete()
-      .eq('id', id);
+      .eq('id', id)
+      .select();
     
     if (error) throw error;
+    if (!data || data.length === 0) {
+      return res.status(404).json({ error: 'Bloqueo no encontrado' });
+    }
     res.json({ mensaje: 'Bloqueo eliminado' });
   } catch (error) {
-    console.error(error);
-    res.status(500).json({ error: error.message });
+    manejarError(res, error);
   }
 });
 
@@ -595,6 +799,10 @@ app.post('/api/admin/cancelar/:reserva_id', verifyAdminToken, async (req, res) =
   try {
     const { reserva_id } = req.params;
     const { motivo } = req.body;
+
+    if (!esIdValido(reserva_id)) {
+      return res.status(400).json({ error: 'ID inválido' });
+    }
 
     // Obtener datos de la reserva
     const { data, error: selectError } = await supabase
@@ -608,23 +816,35 @@ app.post('/api/admin/cancelar/:reserva_id', verifyAdminToken, async (req, res) =
     }
 
     const reserva = data[0];
+
+    if (reserva.estado !== 'activa') {
+      return res.json({ mensaje: 'La reserva ya se encontraba cancelada' });
+    }
     
-    const { error } = await supabase
+    // Transición condicional (BUG-005): solo cancela si seguía activa
+    const { data: updateData, error } = await supabase
       .from('reservas')
       .update({ estado: 'cancelada' })
-      .eq('id', reserva_id);
+      .eq('id', reserva_id)
+      .eq('estado', 'activa')
+      .select();
     
     if (error) throw error;
 
-    // Enviar email al reservante con motivo
+    if (!updateData || updateData.length === 0) {
+      return res.json({ mensaje: 'La reserva ya se encontraba cancelada' });
+    }
+
+    // Enviar email al reservante con motivo (PRIV-002 corregido: ya no se copia
+    // al contacto de Frente en el email del propio usuario)
     const email = reserva.contacto.split('|')[1]?.trim();
     if (email) {
       await enviarEmail({
-        to: [email, CONTACTO_EMAIL_FRENTE],
+        to: email,
         subject: 'Tu Reserva Fue Cancelada por el Moderador - CEQ',
         html: `
           <h2>Tu reserva fue cancelada por el moderador</h2>
-          <p><strong>Motivo:</strong> ${motivo || 'No especificado'}</p>
+          <p><strong>Motivo:</strong> ${escapeHtml(motivo) || 'No especificado'}</p>
           <p><strong>Detalles de la Reserva:</strong></p>
           <ul>
             <li>Fecha: ${reserva.fecha}</li>
@@ -638,8 +858,7 @@ app.post('/api/admin/cancelar/:reserva_id', verifyAdminToken, async (req, res) =
 
     res.json({ mensaje: 'Reserva cancelada por admin' });
   } catch (error) {
-    console.error(error);
-    res.status(500).json({ error: error.message });
+    manejarError(res, error);
   }
 });
 
@@ -654,8 +873,7 @@ app.get('/api/admin/reportes', verifyAdminToken, async (req, res) => {
     if (error) throw error;
     res.json(data || []);
   } catch (error) {
-    console.error(error);
-    res.status(500).json({ error: error.message });
+    manejarError(res, error);
   }
 });
 
@@ -663,40 +881,50 @@ app.get('/api/admin/reportes', verifyAdminToken, async (req, res) => {
 app.post('/api/admin/reportes/:id/leer', verifyAdminToken, async (req, res) => {
   try {
     const { id } = req.params;
+
+    if (!esIdValido(id)) {
+      return res.status(400).json({ error: 'ID inválido' });
+    }
     
-    const { error } = await supabase
+    const { data, error } = await supabase
       .from('reportes_errores')
       .update({ leido: true })
-      .eq('id', id);
+      .eq('id', id)
+      .select();
     
     if (error) throw error;
+    if (!data || data.length === 0) {
+      return res.status(404).json({ error: 'Reporte no encontrado' });
+    }
     res.json({ mensaje: 'Reporte marcado como leído' });
   } catch (error) {
-    console.error(error);
-    res.status(500).json({ error: error.message });
+    manejarError(res, error);
   }
 });
 
 // GET estadísticas
 app.get('/api/estadisticas', async (req, res) => {
   try {
-    const { data: activas } = await supabase
+    const { count: activas, error: errorActivas } = await supabase
       .from('reservas')
-      .select('id')
+      .select('id', { count: 'exact', head: true })
       .eq('estado', 'activa');
-    
-    const { data: canceladas } = await supabase
+
+    if (errorActivas) throw errorActivas;
+
+    const { count: canceladas, error: errorCanceladas } = await supabase
       .from('reservas')
-      .select('id')
+      .select('id', { count: 'exact', head: true })
       .eq('estado', 'cancelada');
+
+    if (errorCanceladas) throw errorCanceladas;
     
     res.json({
-      reservas_activas: activas?.length || 0,
-      reservas_canceladas: canceladas?.length || 0
+      reservas_activas: activas || 0,
+      reservas_canceladas: canceladas || 0
     });
   } catch (error) {
-    console.error(error);
-    res.status(500).json({ error: error.message });
+    manejarError(res, error);
   }
 });
 
