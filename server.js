@@ -532,6 +532,12 @@ app.post('/api/reservas', crearReservaLimiter, async (req, res) => {
       if (error.code === '23505' || error.code === '23P01') {
         return res.status(409).json({ error: 'Horario no disponible - se solapa con otra reserva existente' });
       }
+      // CONC-001: el trigger de la base detectó, de forma atómica, que el horario
+      // está bloqueado por administración (esto puede pasar incluso si el chequeo
+      // previo en JS no lo detectó, por ejemplo si el bloqueo se creó en el mismo instante)
+      if (error.code === 'CEQ01') {
+        return res.status(409).json({ error: 'El horario seleccionado está bloqueado por administración' });
+      }
       throw error;
     }
     
@@ -884,6 +890,12 @@ app.post('/api/bloqueos', verifyAdminToken, async (req, res) => {
     if (error) {
       if (error.code === '23505') {
         return res.status(409).json({ error: 'Ya existe un bloqueo para ese horario' });
+      }
+      // CONC-001: el trigger detectó, de forma atómica, una reserva activa que se
+      // solapa (red de seguridad final por si el chequeo previo en JS -VAL-003- no
+      // llegó a detectarla, por ejemplo si la reserva se creó en el mismo instante)
+      if (error.code === 'CEQ02') {
+        return res.status(409).json({ error: 'Ya hay una reserva activa en ese horario. Cancelala primero si querés bloquear el espacio.' });
       }
       throw error;
     }
