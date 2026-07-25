@@ -190,7 +190,7 @@ app.use(cors({
   ],
   credentials: true,
   methods: ['GET', 'POST', 'DELETE', 'PUT'],
-  allowedHeaders: ['Content-Type', 'Authorization']
+  allowedHeaders: ['Content-Type', 'Authorization', 'X-CSRF-Token']
 }));
 
 // Limitar tamaño de payloads
