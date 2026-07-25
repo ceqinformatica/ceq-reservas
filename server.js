@@ -44,6 +44,32 @@ function hashCodigo(codigo) {
   return crypto.createHash('sha256').update(codigo).digest('hex');
 }
 
+// BUG-006: el servidor de Render corre en UTC, pero las reglas de negocio
+// (ventana de 5 días, período de cancelación de 2 días) tienen que evaluarse
+// según el día calendario en Paraguay (America/Asuncion, UTC-3), no según la
+// hora del servidor. Sin esto, cerca de la medianoche UTC (21hs en Paraguay)
+// los cálculos de "cuántos días faltan" podían saltar un día de más o de menos.
+function hoyEnAsuncion() {
+  const formatter = new Intl.DateTimeFormat('en-CA', {
+    timeZone: 'America/Asuncion',
+    year: 'numeric', month: '2-digit', day: '2-digit'
+  });
+  const partes = formatter.formatToParts(new Date());
+  const anio = partes.find(p => p.type === 'year').value;
+  const mes = partes.find(p => p.type === 'month').value;
+  const dia = partes.find(p => p.type === 'day').value;
+  // Se representa como medianoche UTC del día calendario en Paraguay, para
+  // poder restar de forma limpia contra otras fechas 'YYYY-MM-DD' parseadas igual.
+  return new Date(`${anio}-${mes}-${dia}T00:00:00Z`);
+}
+
+// Diferencia en días de calendario completos entre hoy (en Paraguay) y una fecha 'YYYY-MM-DD'
+function diferenciaEnDiasCalendario(fechaISO) {
+  const fechaObjetivo = new Date(fechaISO + 'T00:00:00Z');
+  const hoy = hoyEnAsuncion();
+  return Math.round((fechaObjetivo - hoy) / (1000 * 60 * 60 * 24));
+}
+
 // ========== CONFIGURACIÓN DE SEGURIDAD ==========
 
 // Verificar que todas las variables de entorno necesarias están presentes
@@ -442,14 +468,16 @@ app.post('/api/reservas', crearReservaLimiter, async (req, res) => {
       }
     }
 
-    // Validar que la fecha esté dentro de la ventana permitida (hoy hasta hoy+31 días, sin fines de semana)
-    const hoy = new Date();
-    hoy.setHours(0, 0, 0, 0);
-    const fechaReserva = new Date(fecha + 'T00:00:00');
+    // Validar que la fecha esté dentro de la ventana permitida (hoy hasta hoy+31 días, sin fines de semana).
+    // BUG-006: se usa hoyEnAsuncion() en vez de `new Date()` porque el servidor corre en UTC
+    // (Render), y comparar contra la hora UTC podía correr la ventana un día para adelante
+    // o para atrás según el momento del día en que se hiciera la petición.
+    const hoy = hoyEnAsuncion();
+    const fechaReserva = new Date(fecha + 'T00:00:00Z');
     const fechaLimite = new Date(hoy);
-    fechaLimite.setDate(fechaLimite.getDate() + 31);
+    fechaLimite.setUTCDate(fechaLimite.getUTCDate() + 31);
 
-    const esFinDeSemana = fechaReserva.getDay() === 0 || fechaReserva.getDay() === 6;
+    const esFinDeSemana = fechaReserva.getUTCDay() === 0 || fechaReserva.getUTCDay() === 6;
 
     if (isNaN(fechaReserva.getTime()) || fechaReserva < hoy || fechaReserva > fechaLimite || esFinDeSemana) {
       return res.status(400).json({ error: 'Fecha fuera del rango permitido para reservar' });
@@ -598,9 +626,14 @@ app.post('/api/cancelar-por-codigo', cancelarLimiter, async (req, res) => {
     }
 
     const reserva = data[0];
-    const fechaReserva = new Date(reserva.fecha);
-    const hoy = new Date();
-    const diferenciaDias = Math.floor((fechaReserva - hoy) / (1000 * 60 * 60 * 24));
+    // BUG-006: antes se comparaban milisegundos crudos entre `new Date(reserva.fecha)`
+    // (medianoche UTC de esa fecha) y `new Date()` (hora exacta actual del servidor,
+    // en UTC), y se hacía Math.floor. Eso significaba que el resultado dependía de la
+    // hora del día en que se hacía la petición, no solo de la fecha calendario: una
+    // reserva "a 2 días" podía calcularse como "a 1 día" simplemente por hacer el
+    // pedido de tarde en vez de la mañana (hora Paraguay). Ahora se compara día
+    // calendario contra día calendario, fijo en huso horario de Paraguay.
+    const diferenciaDias = diferenciaEnDiasCalendario(reserva.fecha);
 
     // Validar período de cancelación para Frente (2 días)
     if (reserva.espacio_id === 3 && diferenciaDias < 2) {
@@ -799,6 +832,42 @@ app.post('/api/bloqueos', verifyAdminToken, async (req, res) => {
       if (horaI < horaMinima || horaF > horaMaxima || horaI >= horaF) {
         return res.status(400).json({ error: `Horario inválido (${horaMinima}:00-${horaMaxima}:00)` });
       }
+    }
+
+    // VAL-003: antes se podía crear un bloqueo "por encima" de una reserva activa
+    // existente sin ningún aviso, dejando un estado contradictorio (una reserva
+    // confirmada en un horario que ahora figura como bloqueado). Se verifica y
+    // se rechaza explícitamente, mostrando qué reserva(s) están en conflicto,
+    // para que el admin decida (por ejemplo, cancelarlas primero si corresponde).
+    const { data: reservasConflicto, error: errorReservasConflicto } = await supabase
+      .from('reservas')
+      .select('id, nombre_solicitante, hora_inicio, hora_fin')
+      .eq('espacio_id', espacio_id)
+      .eq('fecha', fecha)
+      .eq('estado', 'activa');
+
+    if (errorReservasConflicto) throw errorReservasConflicto;
+
+    const inicioBloqueoMin = horaI * 60 + minI;
+    const finBloqueoMin = horaF * 60 + minF;
+
+    const conflictos = (reservasConflicto || []).filter(r => {
+      const [rIniH, rIniM] = r.hora_inicio.split(':').map(Number);
+      const [rFinH, rFinM] = r.hora_fin.split(':').map(Number);
+      const rIniMin = rIniH * 60 + rIniM;
+      const rFinMin = rFinH * 60 + rFinM;
+      return inicioBloqueoMin < rFinMin && finBloqueoMin > rIniMin;
+    });
+
+    if (conflictos.length > 0) {
+      return res.status(409).json({
+        error: 'Ya hay reservas activas en ese horario. Cancelalas primero si querés bloquear el espacio.',
+        reservas_en_conflicto: conflictos.map(r => ({
+          id: r.id,
+          nombre: r.nombre_solicitante,
+          horario: `${r.hora_inicio.substring(0,5)} - ${r.hora_fin.substring(0,5)}`
+        }))
+      });
     }
     
     const { error } = await supabase
