@@ -272,6 +272,19 @@ const verifyAdminToken = (req, res, next) => {
   }
 };
 
+// CSRF (doble-submit): exige que el valor de la cookie csrf_token coincida con
+// el header X-CSRF-Token que manda el frontend. Se aplica solo a rutas que
+// modifican datos (POST/DELETE de admin); las de solo lectura (GET) no lo necesitan.
+const verificarCSRF = (req, res, next) => {
+  const cookieToken = req.cookies?.csrf_token;
+  const headerToken = req.headers['x-csrf-token'];
+
+  if (!cookieToken || !headerToken || cookieToken !== headerToken) {
+    return res.status(403).json({ error: 'Token CSRF inválido o ausente' });
+  }
+  next();
+};
+
 // ========== ENDPOINTS PÚBLICOS ==========
 
 // Health check
@@ -318,6 +331,23 @@ app.post('/api/login', loginLimiter, async (req, res) => {
       path: '/'
     });
     
+    // CSRF (doble-submit token): además de la cookie httpOnly del JWT, se manda
+    // otra cookie NO httpOnly con un valor aleatorio. El JS del admin la lee y la
+    // reenvía en un header en cada petición que modifica datos; el servidor exige
+    // que cookie y header coincidan. Un sitio malicioso podría lograr que el
+    // navegador mande la cookie sola (eso es justamente lo que previene SameSite),
+    // pero no puede leer su valor para copiarlo en el header, por la política de
+    // mismo origen del navegador.
+    const csrfToken = crypto.randomBytes(24).toString('hex');
+    res.cookie('csrf_token', csrfToken, {
+      httpOnly: false,
+      secure: true,
+      sameSite: 'lax',
+      domain: '.ceq-una.com',
+      maxAge: 8 * 60 * 60 * 1000,
+      path: '/'
+    });
+    
     console.log(`✅ Login exitoso a las ${new Date().toISOString()}`);
     res.json({ 
       mensaje: 'Sesión iniciada correctamente',
@@ -329,10 +359,17 @@ app.post('/api/login', loginLimiter, async (req, res) => {
   }
 });
 
-// Cerrar sesión: limpia la cookie del token (AUTH-002)
+// Cerrar sesión: limpia las cookies del token y del CSRF (AUTH-002)
 app.post('/api/logout', (req, res) => {
   res.clearCookie('admin_token', {
     httpOnly: true,
+    secure: true,
+    sameSite: 'lax',
+    domain: '.ceq-una.com',
+    path: '/'
+  });
+  res.clearCookie('csrf_token', {
+    httpOnly: false,
     secure: true,
     sameSite: 'lax',
     domain: '.ceq-una.com',
@@ -828,7 +865,7 @@ app.get('/api/admin/bloqueos', verifyAdminToken, async (req, res) => {
 });
 
 // POST crear bloqueo
-app.post('/api/bloqueos', verifyAdminToken, async (req, res) => {
+app.post('/api/bloqueos', verifyAdminToken, verificarCSRF, async (req, res) => {
   try {
     const { espacio_id, fecha, hora_inicio, hora_fin, motivo } = req.body;
     
@@ -929,7 +966,7 @@ app.post('/api/bloqueos', verifyAdminToken, async (req, res) => {
 });
 
 // DELETE bloqueo
-app.delete('/api/bloqueos/:id', verifyAdminToken, async (req, res) => {
+app.delete('/api/bloqueos/:id', verifyAdminToken, verificarCSRF, async (req, res) => {
   try {
     const { id } = req.params;
 
@@ -954,7 +991,7 @@ app.delete('/api/bloqueos/:id', verifyAdminToken, async (req, res) => {
 });
 
 // POST cancelar reserva (admin)
-app.post('/api/admin/cancelar/:reserva_id', verifyAdminToken, async (req, res) => {
+app.post('/api/admin/cancelar/:reserva_id', verifyAdminToken, verificarCSRF, async (req, res) => {
   try {
     const { reserva_id } = req.params;
     const { motivo } = req.body;
@@ -1063,7 +1100,7 @@ app.get('/api/admin/reportes', verifyAdminToken, async (req, res) => {
 });
 
 // POST marcar reporte como leído
-app.post('/api/admin/reportes/:id/leer', verifyAdminToken, async (req, res) => {
+app.post('/api/admin/reportes/:id/leer', verifyAdminToken, verificarCSRF, async (req, res) => {
   try {
     const { id } = req.params;
 
