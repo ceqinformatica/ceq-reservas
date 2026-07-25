@@ -263,17 +263,18 @@ app.get('/api/espacios', async (req, res) => {
   }
 });
 
-// GET reservas (público, filtrado por espacio y fecha) — SOLO datos de disponibilidad,
-// SIN datos personales ni código de cancelación (corrige SEC-001/PRIV-001: antes
-// exponía select('*') con nombre, contacto, motivo, id y codigo_cancelacion en claro,
-// lo cual permitía cancelar reservas ajenas usando ese mismo código).
+// GET reservas (público, filtrado por espacio y fecha) — expone solo lo necesario
+// para que los usuarios puedan corroborar sus propias reservas en el calendario público
+// (nombre y motivo), pero NUNCA contacto ni código de cancelación (SEC-001/PRIV-001):
+// antes se exponía select('*') completo, lo que permitía cancelar reservas ajenas
+// usando el codigo_cancelacion filtrado por este mismo endpoint.
 app.get('/api/reservas', async (req, res) => {
   try {
     const { espacio_id, fecha } = req.query;
 
     let query = supabase
       .from('reservas')
-      .select('espacio_id, fecha, hora_inicio, hora_fin')
+      .select('espacio_id, fecha, hora_inicio, hora_fin, nombre_solicitante, motivo')
       .eq('estado', 'activa');
     
     if (espacio_id) query = query.eq('espacio_id', parseInt(espacio_id));
@@ -377,15 +378,29 @@ app.post('/api/reservas', crearReservaLimiter, async (req, res) => {
       return res.status(400).json({ error: 'La hora de inicio debe ser anterior a la hora de fin' });
     }
 
-    const duracionHoras = (finMin - inicioMin) / 60;
-    if (duracionHoras < 1 || duracionHoras > 3) {
-      return res.status(400).json({ error: 'La duración debe ser entre 1 y 3 horas' });
-    }
+    if (espacioIdNum === 3) {
+      // Frente: solo se permiten los 3 turnos fijos (Desayuno, Almuerzo, Merienda).
+      // No es una duración libre: Merienda dura 4hs, por eso no se valida como rango 1-3h.
+      const turnosValidosFrente = [
+        { inicio: '07:00', fin: '10:00' },
+        { inicio: '10:00', fin: '13:00' },
+        { inicio: '14:00', fin: '18:00' }
+      ];
+      const esTurnoValido = turnosValidosFrente.some(t => t.inicio === hora_inicio && t.fin === hora_fin);
+      if (!esTurnoValido) {
+        return res.status(400).json({ error: 'Turno inválido para Frente. Debe ser Desayuno (07-10), Almuerzo (10-13) o Merienda (14-18)' });
+      }
+    } else {
+      // Altillo: selección libre de horas dentro del rango, entre 1 y 3 horas
+      const duracionHoras = (finMin - inicioMin) / 60;
+      if (duracionHoras < 1 || duracionHoras > 3) {
+        return res.status(400).json({ error: 'La duración debe ser entre 1 y 3 horas' });
+      }
 
-    // Franja horaria permitida por espacio (Frente: 7-18, Altillo: 8-18)
-    const horaMinimaPermitida = espacioIdNum === 3 ? 7 : 8;
-    if (horaIniH < horaMinimaPermitida || horaFinH > 18 || (horaFinH === 18 && horaFinM > 0)) {
-      return res.status(400).json({ error: `Horario fuera de rango (${horaMinimaPermitida}:00-18:00)` });
+      const horaMinimaPermitida = 8;
+      if (horaIniH < horaMinimaPermitida || horaFinH > 18 || (horaFinH === 18 && horaFinM > 0)) {
+        return res.status(400).json({ error: `Horario fuera de rango (${horaMinimaPermitida}:00-18:00)` });
+      }
     }
 
     // Validar que la fecha esté dentro de la ventana permitida (hoy hasta hoy+31 días, sin fines de semana)
