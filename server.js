@@ -3,6 +3,7 @@ const express = require('express');
 const cors = require('cors');
 const helmet = require('helmet');
 const rateLimit = require('express-rate-limit');
+const cookieParser = require('cookie-parser');
 const { createClient } = require('@supabase/supabase-js');
 const bcrypt = require('bcrypt');
 const jwt = require('jsonwebtoken');
@@ -148,6 +149,7 @@ app.use(cors({
 
 // Limitar tamaño de payloads
 app.use(express.json({ limit: '10kb' }));
+app.use(cookieParser());
 
 // ========== RATE LIMITING (AUTH-001, ABUSE-001) ==========
 
@@ -190,18 +192,16 @@ function getEspacioNombre(id) {
   return espacios[id] || 'Espacio ' + id;
 }
 
-// Middleware de autenticación JWT
+// Middleware de autenticación JWT (AUTH-002: el token viaja en una cookie httpOnly,
+// no en localStorage ni en el header Authorization. Esto hace que sea imposible que
+// JavaScript del lado del cliente lea o robe el token, incluso si hubiera un XSS
+// que hoy no conocemos; antes, cualquier script inyectado podía leer localStorage
+// directamente y robar la sesión de admin completa).
 const verifyAdminToken = (req, res, next) => {
-  const authHeader = req.headers.authorization;
-  
-  if (!authHeader) {
-    return res.status(401).json({ error: 'Token requerido' });
-  }
-  
-  const token = authHeader.split(' ')[1];
+  const token = req.cookies?.admin_token;
   
   if (!token) {
-    return res.status(401).json({ error: 'Formato de token inválido' });
+    return res.status(401).json({ error: 'Token requerido' });
   }
   
   try {
@@ -246,10 +246,21 @@ app.post('/api/login', loginLimiter, async (req, res) => {
       JWT_SECRET,
       { expiresIn: '8h' }
     );
+
+    // AUTH-002: el token se manda como cookie httpOnly, no en el body de la
+    // respuesta. secure+sameSite=None porque el frontend (reservas.ceq-una.com)
+    // y el backend (onrender.com) son dominios distintos (cross-site), y los dos
+    // corren sobre HTTPS.
+    res.cookie('admin_token', token, {
+      httpOnly: true,
+      secure: true,
+      sameSite: 'none',
+      maxAge: 8 * 60 * 60 * 1000, // 8 horas, en milisegundos
+      path: '/'
+    });
     
     console.log(`✅ Login exitoso a las ${new Date().toISOString()}`);
     res.json({ 
-      token, 
       mensaje: 'Sesión iniciada correctamente',
       expiresIn: '8h'
     });
@@ -257,6 +268,24 @@ app.post('/api/login', loginLimiter, async (req, res) => {
     console.error('❌ Error en login:', error);
     res.status(500).json({ error: 'Error interno del servidor' });
   }
+});
+
+// Cerrar sesión: limpia la cookie del token (AUTH-002)
+app.post('/api/logout', (req, res) => {
+  res.clearCookie('admin_token', {
+    httpOnly: true,
+    secure: true,
+    sameSite: 'none',
+    path: '/'
+  });
+  res.json({ mensaje: 'Sesión cerrada' });
+});
+
+// Verificar si hay una sesión de admin activa (para saber si mostrar el panel
+// o el login al cargar la página, ya que el token ya no se puede leer desde el
+// JavaScript del cliente)
+app.get('/api/admin/verificar-sesion', verifyAdminToken, (req, res) => {
+  res.json({ ok: true });
 });
 
 // GET espacios
