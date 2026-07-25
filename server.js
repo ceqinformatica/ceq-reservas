@@ -867,6 +867,31 @@ app.post('/api/admin/cancelar/:reserva_id', verifyAdminToken, async (req, res) =
       });
     }
 
+    // Avisar a los moderadores correspondientes cuando se cancela una reserva desde
+    // el panel admin: Altillo solo a ceq.informatica; Frente a ambos (ceq.informatica + Monse),
+    // así se enteran cruzadamente de las cancelaciones que hace el otro moderador.
+    const destinatariosAviso = reserva.espacio_id === 3
+      ? [...new Set([EMAIL_MODERADOR, CONTACTO_EMAIL_FRENTE])]
+      : [EMAIL_MODERADOR];
+
+    await enviarEmail({
+      to: destinatariosAviso,
+      subject: '🔔 Un moderador canceló una reserva - CEQ',
+      html: `
+        <h2>Cancelación realizada por un moderador</h2>
+        <p>Un moderador canceló la siguiente reserva desde el panel de administración:</p>
+        <ul>
+          <li><strong>Usuario:</strong> ${escapeHtml(reserva.nombre_solicitante)}</li>
+          <li><strong>Contacto:</strong> ${escapeHtml(reserva.contacto)}</li>
+          <li><strong>Espacio:</strong> ${getEspacioNombre(reserva.espacio_id)}</li>
+          <li><strong>Fecha:</strong> ${reserva.fecha}</li>
+          <li><strong>Horario:</strong> ${reserva.hora_inicio.substring(0,5)} - ${reserva.hora_fin.substring(0,5)}</li>
+          <li><strong>Motivo de la cancelación:</strong> ${escapeHtml(motivo) || 'No especificado'}</li>
+        </ul>
+        <p style="color:#888; font-size:12px;">Este aviso se envía a ambos moderadores para que estén al tanto de las cancelaciones que se hagan desde el panel.</p>
+      `
+    });
+
     res.json({ mensaje: 'Reserva cancelada por admin' });
   } catch (error) {
     manejarError(res, error);
