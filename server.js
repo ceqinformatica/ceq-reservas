@@ -37,6 +37,12 @@ function esIdValido(valor) {
   return Number.isInteger(n) && n > 0;
 }
 
+// SEC-005: hashea el código de cancelación con SHA-256. Nunca se guarda ni se
+// vuelve a leer el código en claro desde la base — solo se compara el hash.
+function hashCodigo(codigo) {
+  return crypto.createHash('sha256').update(codigo).digest('hex');
+}
+
 // ========== CONFIGURACIÓN DE SEGURIDAD ==========
 
 // Verificar que todas las variables de entorno necesarias están presentes
@@ -439,8 +445,11 @@ app.post('/api/reservas', crearReservaLimiter, async (req, res) => {
       return res.status(409).json({ error: 'El horario seleccionado está bloqueado por administración' });
     }
     
-    // Generar código de cancelación seguro (16 caracteres)
+    // Generar código de cancelación seguro (16 caracteres). Solo se guarda su hash
+    // en la base (SEC-005); el código en claro se le muestra al usuario una única
+    // vez acá y por email, y nunca se vuelve a poder recuperar desde la base.
     const codigo = crypto.randomBytes(8).toString('hex').toUpperCase();
+    const codigoHash = hashCodigo(codigo);
     
     // Insertar reserva
     const { data: nuevaReserva, error } = await supabase
@@ -454,7 +463,7 @@ app.post('/api/reservas', crearReservaLimiter, async (req, res) => {
         hora_fin: hora_fin + ':00',
         estado: 'activa',
         motivo: motivo || '',
-        codigo_cancelacion: codigo
+        codigo_cancelacion_hash: codigoHash
       }])
       .select();
     
@@ -542,10 +551,12 @@ app.post('/api/cancelar-por-codigo', cancelarLimiter, async (req, res) => {
       return res.status(400).json({ error: 'Código requerido' });
     }
     
+    const codigoHashBuscado = hashCodigo(codigo.trim().toUpperCase());
+
     const { data, error } = await supabase
       .from('reservas')
       .select('*')
-      .eq('codigo_cancelacion', codigo)
+      .eq('codigo_cancelacion_hash', codigoHashBuscado)
       .eq('estado', 'activa');
     
     if (error) throw error;
@@ -604,7 +615,7 @@ app.post('/api/cancelar-por-codigo', cancelarLimiter, async (req, res) => {
     const { data: updateData, error: updateError } = await supabase
       .from('reservas')
       .update({ estado: 'cancelada' })
-      .eq('codigo_cancelacion', codigo)
+      .eq('codigo_cancelacion_hash', codigoHashBuscado)
       .eq('estado', 'activa')
       .select();
     
