@@ -812,7 +812,8 @@ app.post('/api/bloqueos', verifyAdminToken, async (req, res) => {
       return res.status(400).json({ error: 'Fecha inválida' });
     }
 
-    if (!/^\d{2}:\d{2}$/.test(hora_inicio) || !/^\d{2}:\d{2}$/.test(hora_fin)) {
+    // Acepta HH:MM o HH:MM:SS (el bloqueo de día completo manda "00:00:00"/"23:59:00" con segundos)
+    if (!/^\d{2}:\d{2}(:\d{2})?$/.test(hora_inicio) || !/^\d{2}:\d{2}(:\d{2})?$/.test(hora_fin)) {
       return res.status(400).json({ error: 'Formato de hora inválido' });
     }
     
