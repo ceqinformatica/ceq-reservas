@@ -5,11 +5,19 @@ const helmet = require('helmet');
 const rateLimit = require('express-rate-limit');
 const cookieParser = require('cookie-parser');
 const { createClient } = require('@supabase/supabase-js');
-const bcrypt = require('bcrypt');
+const bcrypt = require('bcryptjs');
 const jwt = require('jsonwebtoken');
 const crypto = require('crypto');
 
 const app = express();
+
+// Render (y en el medio, potencialmente Cloudflare) hacen de proxy delante del
+// servidor. Sin esto, Express ve la IP del proxy en vez de la del visitante real,
+// lo que rompe silenciosamente los rate limiters (AUTH-001/ABUSE-001): todos los
+// usuarios comparten el mismo contador, o -si no se confía en el header para nada-
+// alguien puede intentar forzar el reseteo del límite. `1` = confiar en el primer
+// salto (el proxy inmediato de Render), no en cualquier IP que venga en el header.
+app.set('trust proxy', 1);
 const PORT = process.env.PORT || 3000;
 
 // ========== UTILIDADES DE SEGURIDAD ==========
@@ -68,6 +76,19 @@ function diferenciaEnDiasCalendario(fechaISO) {
   const fechaObjetivo = new Date(fechaISO + 'T00:00:00Z');
   const hoy = hoyEnAsuncion();
   return Math.round((fechaObjetivo - hoy) / (1000 * 60 * 60 * 24));
+}
+
+// VAL-001: hora actual en Paraguay, en minutos desde medianoche. Se usa para
+// rechazar reservas de "hoy" cuyo horario de inicio ya pasó (antes solo se
+// comparaba el día calendario, así que se podía reservar "hoy 08:00" a las 3 de la tarde).
+function horaActualEnAsuncionEnMinutos() {
+  const formatter = new Intl.DateTimeFormat('en-GB', {
+    timeZone: 'America/Asuncion', hour: '2-digit', minute: '2-digit', hour12: false
+  });
+  const partes = formatter.formatToParts(new Date());
+  const horas = Number(partes.find(p => p.type === 'hour').value);
+  const minutos = Number(partes.find(p => p.type === 'minute').value);
+  return horas * 60 + minutos;
 }
 
 // ========== CONFIGURACIÓN DE SEGURIDAD ==========
@@ -163,7 +184,6 @@ app.use(helmet({
 // CORS configurado correctamente
 app.use(cors({
   origin: [
-    'https://ceq-reservas-frontend-pink.vercel.app',
     'https://reservas.ceq-una.com',
     'http://localhost:3000',
     'http://localhost:5173'
@@ -211,6 +231,16 @@ const reportesLimiter = rateLimit({
   message: { error: 'Demasiados reportes enviados. Probá de nuevo más tarde.' }
 });
 
+// Límite genérico para endpoints públicos de solo lectura (más permisivo, pero
+// evita que queden completamente sin ningún tope de scraping/DoS barato)
+const lecturaPublicaLimiter = rateLimit({
+  windowMs: 5 * 60 * 1000, // 5 minutos
+  max: 60,
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { error: 'Demasiadas solicitudes. Probá de nuevo en unos minutos.' }
+});
+
 // ========== UTILIDADES ==========
 
 function getEspacioNombre(id) {
@@ -231,7 +261,7 @@ const verifyAdminToken = (req, res, next) => {
   }
   
   try {
-    const decoded = jwt.verify(token, JWT_SECRET);
+    const decoded = jwt.verify(token, JWT_SECRET, { algorithms: ['HS256'] });
     req.admin = decoded;
     next();
   } catch (error) {
@@ -270,7 +300,7 @@ app.post('/api/login', loginLimiter, async (req, res) => {
     const token = jwt.sign(
       { adminId: 'admin', timestamp: Date.now() },
       JWT_SECRET,
-      { expiresIn: '8h' }
+      { expiresIn: '8h', algorithm: 'HS256' }
     );
 
     // AUTH-002: cookie de primera parte (mismo dominio raíz que el frontend),
@@ -333,7 +363,7 @@ app.get('/api/espacios', async (req, res) => {
 // (nombre y motivo), pero NUNCA contacto ni código de cancelación (SEC-001/PRIV-001):
 // antes se exponía select('*') completo, lo que permitía cancelar reservas ajenas
 // usando el codigo_cancelacion filtrado por este mismo endpoint.
-app.get('/api/reservas', async (req, res) => {
+app.get('/api/reservas', lecturaPublicaLimiter, async (req, res) => {
   try {
     const { espacio_id, fecha } = req.query;
 
@@ -355,7 +385,7 @@ app.get('/api/reservas', async (req, res) => {
 });
 
 // GET bloqueos (público)
-app.get('/api/bloqueos', async (req, res) => {
+app.get('/api/bloqueos', lecturaPublicaLimiter, async (req, res) => {
   try {
     const { data, error } = await supabase
       .from('bloqueos')
@@ -369,52 +399,35 @@ app.get('/api/bloqueos', async (req, res) => {
   }
 });
 
-// Validar disponibilidad (público)
-app.post('/api/validar-disponibilidad', async (req, res) => {
-  try {
-    const { espacio_id, fecha, hora_inicio, hora_fin } = req.body;
-    
-    if (!espacio_id || !fecha || !hora_inicio || !hora_fin) {
-      return res.status(400).json({ error: 'Faltan parámetros' });
-    }
-    
-    // Buscar conflictos
-    const { data, error } = await supabase
-      .from('reservas')
-      .select('*')
-      .eq('espacio_id', espacio_id)
-      .eq('fecha', fecha)
-      .eq('estado', 'activa');
-    
-    if (error) throw error;
-    
-    const hayConflicto = data.some(r => {
-      const rStart = parseInt(r.hora_inicio.split(':')[0]);
-      const rEnd = parseInt(r.hora_fin.split(':')[0]);
-      const hStart = parseInt(hora_inicio.split(':')[0]);
-      const hEnd = parseInt(hora_fin.split(':')[0]);
-      return !(rEnd <= hStart || rStart >= hEnd);
-    });
-    
-    res.json({ disponible: !hayConflicto });
-  } catch (error) {
-    manejarError(res, error);
-  }
-});
+// Validar disponibilidad: se eliminó este endpoint (no lo usa el frontend, no tenía
+// rate limiter, y su lógica estaba desactualizada -ignoraba minutos y bloqueos-,
+// así que era superficie pública expuesta sin ningún beneficio real).
 
 // POST crear reserva
 app.post('/api/reservas', crearReservaLimiter, async (req, res) => {
   try {
     const { espacio_id, nombre_solicitante, contacto, fecha, hora_inicio, hora_fin, motivo } = req.body;
     
-    // Validar entrada
-    if (!espacio_id || !nombre_solicitante || !contacto || !fecha || !hora_inicio || !hora_fin) {
+    // Faltan parámetros requeridos. `motivo` también es obligatorio acá (el HTML ya
+    // lo exige, pero golpeando la API directamente se podía saltear esa validación).
+    if (!espacio_id || !nombre_solicitante || !contacto || !fecha || !hora_inicio || !hora_fin || !motivo) {
       return res.status(400).json({ error: 'Faltan parámetros requeridos' });
     }
 
     // Longitudes máximas razonables (VAL-002)
-    if (String(nombre_solicitante).length > 150 || String(contacto).length > 200 || (motivo && String(motivo).length > 500)) {
+    if (String(nombre_solicitante).length > 150 || String(contacto).length > 200 || String(motivo).length > 500) {
       return res.status(400).json({ error: 'Uno o más campos exceden la longitud permitida' });
+    }
+
+    // VAL-002: el resto del sistema asume el formato "celular | email" y usa
+    // contacto.split('|')[1] para mandar la confirmación por mail. Si el formato no
+    // coincide (por ejemplo, golpeando la API directo sin pasar por el formulario),
+    // esa parte queda undefined y el email de confirmación se pierde en silencio,
+    // sin avisar a nadie que falló.
+    const partesContacto = String(contacto).split('|').map(p => p.trim());
+    const emailValidoRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+    if (partesContacto.length !== 2 || !partesContacto[0] || !emailValidoRegex.test(partesContacto[1])) {
+      return res.status(400).json({ error: 'El contacto debe tener el formato "celular | email" con un email válido' });
     }
 
     // Solo se ofrecen públicamente los espacios Altillo (1) y Frente (3)
@@ -481,6 +494,14 @@ app.post('/api/reservas', crearReservaLimiter, async (req, res) => {
 
     if (isNaN(fechaReserva.getTime()) || fechaReserva < hoy || fechaReserva > fechaLimite || esFinDeSemana) {
       return res.status(400).json({ error: 'Fecha fuera del rango permitido para reservar' });
+    }
+
+    // VAL-001: si la reserva es para hoy, el horario de inicio no puede ya haber pasado
+    if (fechaReserva.getTime() === hoy.getTime()) {
+      const minutosActuales = horaActualEnAsuncionEnMinutos();
+      if (inicioMin <= minutosActuales) {
+        return res.status(400).json({ error: 'No se puede reservar un horario que ya pasó' });
+      }
     }
 
     // Verificar que no exista un bloqueo administrativo para ese espacio/fecha/horario (BUG-001).
@@ -780,7 +801,8 @@ app.get('/api/admin/reservas', verifyAdminToken, async (req, res) => {
     const { data, error } = await supabase
       .from('reservas')
       .select('*')
-      .order('fecha', { ascending: false });
+      .order('fecha', { ascending: false })
+      .limit(2000); // tope de seguridad; si el volumen crece mucho, pasar a paginación real
     
     if (error) throw error;
     res.json(data || []);
@@ -1030,7 +1052,8 @@ app.get('/api/admin/reportes', verifyAdminToken, async (req, res) => {
     const { data, error } = await supabase
       .from('reportes_errores')
       .select('*')
-      .order('created_at', { ascending: false });
+      .order('created_at', { ascending: false })
+      .limit(2000);
     
     if (error) throw error;
     res.json(data || []);
@@ -1065,7 +1088,7 @@ app.post('/api/admin/reportes/:id/leer', verifyAdminToken, async (req, res) => {
 });
 
 // GET estadísticas
-app.get('/api/estadisticas', async (req, res) => {
+app.get('/api/estadisticas', lecturaPublicaLimiter, async (req, res) => {
   try {
     const { count: activas, error: errorActivas } = await supabase
       .from('reservas')
