@@ -441,6 +441,26 @@ app.get('/api/bloqueos', lecturaPublicaLimiter, async (req, res) => {
 // así que era superficie pública expuesta sin ningún beneficio real).
 
 // POST crear reserva
+// GET meses habilitados (público) — devuelve solo los que están habilitados, para
+// que el calendario público sepa qué meses puede mostrar/permitir navegar. No expone
+// nada sensible: es la misma información que ya se ve reflejada en qué días quedan
+// clickeables en el calendario.
+app.get('/api/meses-habilitados', lecturaPublicaLimiter, async (req, res) => {
+  try {
+    const { data, error } = await supabase
+      .from('meses_habilitados')
+      .select('anio, mes')
+      .eq('habilitado', true)
+      .order('anio', { ascending: true })
+      .order('mes', { ascending: true });
+
+    if (error) throw error;
+    res.json(data || []);
+  } catch (error) {
+    manejarError(res, error);
+  }
+});
+
 app.post('/api/reservas', crearReservaLimiter, async (req, res) => {
   try {
     const { espacio_id, nombre_solicitante, contacto, fecha, hora_inicio, hora_fin, motivo } = req.body;
@@ -518,19 +538,34 @@ app.post('/api/reservas', crearReservaLimiter, async (req, res) => {
       }
     }
 
-    // Validar que la fecha esté dentro de la ventana permitida (hoy hasta hoy+31 días, sin fines de semana).
-    // BUG-006: se usa hoyEnAsuncion() en vez de `new Date()` porque el servidor corre en UTC
-    // (Render), y comparar contra la hora UTC podía correr la ventana un día para adelante
-    // o para atrás según el momento del día en que se hiciera la petición.
+    // La fecha no puede ser pasada ni caer en fin de semana. El límite superior ya
+    // no es una ventana fija de 31 días: ahora depende de qué meses haya habilitado
+    // manualmente un moderador (ver tabla meses_habilitados y endpoints /api/meses-habilitados).
     const hoy = hoyEnAsuncion();
     const fechaReserva = new Date(fecha + 'T00:00:00Z');
-    const fechaLimite = new Date(hoy);
-    fechaLimite.setUTCDate(fechaLimite.getUTCDate() + 31);
-
     const esFinDeSemana = fechaReserva.getUTCDay() === 0 || fechaReserva.getUTCDay() === 6;
 
-    if (isNaN(fechaReserva.getTime()) || fechaReserva < hoy || fechaReserva > fechaLimite || esFinDeSemana) {
+    if (isNaN(fechaReserva.getTime()) || fechaReserva < hoy || esFinDeSemana) {
       return res.status(400).json({ error: 'Fecha fuera del rango permitido para reservar' });
+    }
+
+    // El mes de la fecha pedida tiene que estar explícitamente habilitado. Reemplaza
+    // la vieja ventana fija de "hoy + 31 días": ahora un moderador habilita/deshabilita
+    // meses a mano desde el panel admin (por ejemplo, a fin de mes habilita el actual +
+    // el siguiente, para que se puedan reservar los primeros días del mes entrante).
+    const anioReserva = fechaReserva.getUTCFullYear();
+    const mesReserva = fechaReserva.getUTCMonth() + 1;
+    const { data: mesHabilitadoData, error: errorMesHabilitado } = await supabase
+      .from('meses_habilitados')
+      .select('habilitado')
+      .eq('anio', anioReserva)
+      .eq('mes', mesReserva)
+      .eq('habilitado', true)
+      .maybeSingle();
+
+    if (errorMesHabilitado) throw errorMesHabilitado;
+    if (!mesHabilitadoData) {
+      return res.status(400).json({ error: 'Ese mes todavía no está habilitado para reservas' });
     }
 
     // VAL-001: si la reserva es para hoy, el horario de inicio no puede ya haber pasado
@@ -865,6 +900,56 @@ app.get('/api/admin/bloqueos', verifyAdminToken, async (req, res) => {
 });
 
 // POST crear bloqueo
+// GET meses habilitados (admin) — a diferencia del endpoint público, devuelve todas
+// las filas existentes (habilitadas y deshabilitadas), para poder pintar el estado
+// real de cada toggle en el panel. Los meses que nunca se tocaron simplemente no
+// tienen fila (el frontend los trata como deshabilitados por default).
+app.get('/api/admin/meses-habilitados', verifyAdminToken, async (req, res) => {
+  try {
+    const { data, error } = await supabase
+      .from('meses_habilitados')
+      .select('anio, mes, habilitado')
+      .order('anio', { ascending: true })
+      .order('mes', { ascending: true });
+
+    if (error) throw error;
+    res.json(data || []);
+  } catch (error) {
+    manejarError(res, error);
+  }
+});
+
+// POST habilitar/deshabilitar un mes puntual (admin)
+app.post('/api/admin/meses-habilitados', verifyAdminToken, verificarCSRF, async (req, res) => {
+  try {
+    const { anio, mes, habilitado } = req.body;
+    const anioNum = parseInt(anio);
+    const mesNum = parseInt(mes);
+
+    if (!Number.isInteger(anioNum) || anioNum < 2020 || anioNum > 2100) {
+      return res.status(400).json({ error: 'Año inválido' });
+    }
+    if (!Number.isInteger(mesNum) || mesNum < 1 || mesNum > 12) {
+      return res.status(400).json({ error: 'Mes inválido' });
+    }
+    if (typeof habilitado !== 'boolean') {
+      return res.status(400).json({ error: 'El campo habilitado debe ser true o false' });
+    }
+
+    const { error } = await supabase
+      .from('meses_habilitados')
+      .upsert(
+        { anio: anioNum, mes: mesNum, habilitado, updated_at: new Date().toISOString() },
+        { onConflict: 'anio,mes' }
+      );
+
+    if (error) throw error;
+    res.json({ mensaje: 'Actualizado correctamente' });
+  } catch (error) {
+    manejarError(res, error);
+  }
+});
+
 app.post('/api/bloqueos', verifyAdminToken, verificarCSRF, async (req, res) => {
   try {
     const { espacio_id, fecha, hora_inicio, hora_fin, motivo } = req.body;
