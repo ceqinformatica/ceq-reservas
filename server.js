@@ -248,6 +248,26 @@ function getEspacioNombre(id) {
   return espacios[id] || 'Espacio ' + id;
 }
 
+// Frente reserva por turnos fijos con nombre propio (Desayuno/Almuerzo/Merienda), no por
+// horario libre como Altillo. En vez de mostrar solo el rango crudo "07:00 - 10:00" en
+// emails y en el detalle del día, se muestra el nombre del turno junto con el rango, para
+// que quede claro qué momento del día y qué horario exacto puede usar la persona.
+// Recibe horaInicio/horaFin ya recortadas a "HH:MM" (sin segundos).
+const NOMBRES_TURNOS_FRENTE = {
+  '07:00-10:00': 'Desayuno',
+  '10:00-13:00': 'Almuerzo',
+  '14:00-18:00': 'Merienda'
+};
+
+function descripcionHorario(espacioId, horaInicioHHMM, horaFinHHMM) {
+  const rango = `${horaInicioHHMM} - ${horaFinHHMM}`;
+  if (Number(espacioId) === 3) {
+    const nombreTurno = NOMBRES_TURNOS_FRENTE[`${horaInicioHHMM}-${horaFinHHMM}`];
+    if (nombreTurno) return `${nombreTurno} (${rango})`;
+  }
+  return rango;
+}
+
 // Middleware de autenticación JWT (AUTH-002: el token viaja en una cookie httpOnly,
 // no en localStorage ni en el header Authorization. Esto hace que sea imposible que
 // JavaScript del lado del cliente lea o robe el token, incluso si hubiera un XSS
@@ -662,7 +682,7 @@ app.post('/api/reservas', crearReservaLimiter, async (req, res) => {
           <ul>
             <li><strong>Espacio:</strong> ${nombreEspacio}</li>
             <li><strong>Fecha:</strong> ${fecha}</li>
-            <li><strong>Horario:</strong> ${hora_inicio} - ${hora_fin}</li>
+            <li><strong>Horario:</strong> ${descripcionHorario(espacioIdNum, hora_inicio, hora_fin)}</li>
             <li><strong>Motivo:</strong> ${motivoSeguro || 'Sin especificar'}</li>
             <li><strong>Código de cancelación:</strong> ${codigo}</li>
           </ul>
@@ -676,7 +696,7 @@ app.post('/api/reservas', crearReservaLimiter, async (req, res) => {
     // Enviar email al moderador correspondiente (Altillo o Frente)
     await enviarEmail({
       to: getEmailModerador(espacioIdNum),
-      subject: '📌 Nueva Reserva - CEQ',
+      subject: `📌 Nueva Reserva (${nombreEspacio}) - CEQ`,
       html: `
         <h2>Nueva Reserva</h2>
         <p><strong>Usuario:</strong> ${nombreSeguro}</p>
@@ -685,7 +705,7 @@ app.post('/api/reservas', crearReservaLimiter, async (req, res) => {
         <ul>
           <li><strong>Espacio:</strong> ${nombreEspacio}</li>
           <li><strong>Fecha:</strong> ${fecha}</li>
-          <li><strong>Horario:</strong> ${hora_inicio} - ${hora_fin}</li>
+          <li><strong>Horario:</strong> ${descripcionHorario(espacioIdNum, hora_inicio, hora_fin)}</li>
           <li><strong>Motivo:</strong> ${motivoSeguro || 'Sin especificar'}</li>
           <li><strong>Código:</strong> ${codigo}</li>
         </ul>
@@ -747,7 +767,7 @@ app.post('/api/cancelar-por-codigo', cancelarLimiter, async (req, res) => {
             <p><strong>Detalles de la Reserva:</strong></p>
             <ul>
               <li>Fecha: ${reserva.fecha}</li>
-              <li>Horario: ${reserva.hora_inicio.substring(0,5)} - ${reserva.hora_fin.substring(0,5)}</li>
+              <li>Horario: ${descripcionHorario(reserva.espacio_id, reserva.hora_inicio.substring(0,5), reserva.hora_fin.substring(0,5))}</li>
             </ul>
             <p>Si de todas formas deseás realizar la cancelación, contactate por WhatsApp: <a href="https://wa.me/595972753471">Contactar por WhatsApp</a></p>
           `
@@ -764,7 +784,7 @@ app.post('/api/cancelar-por-codigo', cancelarLimiter, async (req, res) => {
           <p><strong>Contacto:</strong> ${escapeHtml(reserva.contacto)}</p>
           <p><strong>Espacio:</strong> ${getEspacioNombre(reserva.espacio_id)}</p>
           <p><strong>Fecha de la reserva:</strong> ${reserva.fecha}</p>
-          <p><strong>Horario:</strong> ${reserva.hora_inicio.substring(0,5)} - ${reserva.hora_fin.substring(0,5)}</p>
+          <p><strong>Horario:</strong> ${descripcionHorario(reserva.espacio_id, reserva.hora_inicio.substring(0,5), reserva.hora_fin.substring(0,5))}</p>
           <p>El usuario intentó cancelar esta reserva, pero el período de cancelación gratuita ya había vencido. La reserva sigue activa.</p>
         `
       });
@@ -803,7 +823,7 @@ app.post('/api/cancelar-por-codigo', cancelarLimiter, async (req, res) => {
           <ul>
             <li>Fecha: ${reserva.fecha}</li>
             <li>Espacio: ${getEspacioNombre(reserva.espacio_id)}</li>
-            <li>Horario: ${reserva.hora_inicio.substring(0,5)} - ${reserva.hora_fin.substring(0,5)}</li>
+            <li>Horario: ${descripcionHorario(reserva.espacio_id, reserva.hora_inicio.substring(0,5), reserva.hora_fin.substring(0,5))}</li>
           </ul>
           <p>Si tienes dudas, contacta con: ${getContactoLineaHtml(reserva.espacio_id)}</p>
         `
@@ -821,7 +841,7 @@ app.post('/api/cancelar-por-codigo', cancelarLimiter, async (req, res) => {
           <p><strong>Contacto:</strong> ${escapeHtml(reserva.contacto)}</p>
           <p><strong>Espacio:</strong> ${getEspacioNombre(reserva.espacio_id)}</p>
           <p><strong>Fecha:</strong> ${reserva.fecha}</p>
-          <p><strong>Horario:</strong> ${reserva.hora_inicio.substring(0,5)} - ${reserva.hora_fin.substring(0,5)}</p>
+          <p><strong>Horario:</strong> ${descripcionHorario(reserva.espacio_id, reserva.hora_inicio.substring(0,5), reserva.hora_fin.substring(0,5))}</p>
         `
       });
     }
@@ -934,6 +954,35 @@ app.post('/api/admin/meses-habilitados', verifyAdminToken, verificarCSRF, async 
     }
     if (typeof habilitado !== 'boolean') {
       return res.status(400).json({ error: 'El campo habilitado debe ser true o false' });
+    }
+
+    // Los meses habilitados siempre tienen que quedar como un bloque consecutivo,
+    // sin huecos: el calendario público (index.html) decide cuándo mostrar los botones
+    // de navegación de mes asumiendo que no hay saltos. Se simula el estado resultante
+    // ANTES de guardar, y se rechaza si dejaría un hueco (ej: julio + septiembre sin agosto).
+    const { data: actuales, error: errorActuales } = await supabase
+      .from('meses_habilitados')
+      .select('anio, mes')
+      .eq('habilitado', true);
+
+    if (errorActuales) throw errorActuales;
+
+    const valorNuevo = anioNum * 12 + mesNum;
+    const valoresResultantes = (actuales || [])
+      .map(m => m.anio * 12 + m.mes)
+      .filter(v => v !== valorNuevo);
+
+    if (habilitado) valoresResultantes.push(valorNuevo);
+    valoresResultantes.sort((a, b) => a - b);
+
+    const esConsecutivo = valoresResultantes.every(
+      (v, i) => i === 0 || v - valoresResultantes[i - 1] === 1
+    );
+
+    if (!esConsecutivo) {
+      return res.status(400).json({
+        error: 'Los meses habilitados tienen que quedar consecutivos, sin huecos. Habilitá o deshabilitá de a uno, siempre desde una punta del rango.'
+      });
     }
 
     const { error } = await supabase
@@ -1130,7 +1179,7 @@ app.post('/api/admin/cancelar/:reserva_id', verifyAdminToken, verificarCSRF, asy
           <ul>
             <li>Fecha: ${reserva.fecha}</li>
             <li>Espacio: ${getEspacioNombre(reserva.espacio_id)}</li>
-            <li>Horario: ${reserva.hora_inicio.substring(0,5)} - ${reserva.hora_fin.substring(0,5)}</li>
+            <li>Horario: ${descripcionHorario(reserva.espacio_id, reserva.hora_inicio.substring(0,5), reserva.hora_fin.substring(0,5))}</li>
           </ul>
           <p>Si tienes preguntas, contacta con: ${getContactoLineaHtml(reserva.espacio_id)}</p>
         `
@@ -1146,7 +1195,7 @@ app.post('/api/admin/cancelar/:reserva_id', verifyAdminToken, verificarCSRF, asy
 
     await enviarEmail({
       to: destinatariosAviso,
-      subject: '🔔 Un moderador canceló una reserva - CEQ',
+      subject: `🔔 Un moderador canceló una reserva (${getEspacioNombre(reserva.espacio_id)}) - CEQ`,
       html: `
         <h2>Cancelación realizada por un moderador</h2>
         <p>Un moderador canceló la siguiente reserva desde el panel de administración:</p>
@@ -1155,7 +1204,7 @@ app.post('/api/admin/cancelar/:reserva_id', verifyAdminToken, verificarCSRF, asy
           <li><strong>Contacto:</strong> ${escapeHtml(reserva.contacto)}</li>
           <li><strong>Espacio:</strong> ${getEspacioNombre(reserva.espacio_id)}</li>
           <li><strong>Fecha:</strong> ${reserva.fecha}</li>
-          <li><strong>Horario:</strong> ${reserva.hora_inicio.substring(0,5)} - ${reserva.hora_fin.substring(0,5)}</li>
+          <li><strong>Horario:</strong> ${descripcionHorario(reserva.espacio_id, reserva.hora_inicio.substring(0,5), reserva.hora_fin.substring(0,5))}</li>
           <li><strong>Motivo de la cancelación:</strong> ${escapeHtml(motivo) || 'No especificado'}</li>
         </ul>
         <p style="color:#888; font-size:12px;">Este aviso se envía a ambos moderadores para que estén al tanto de las cancelaciones que se hagan desde el panel.</p>
