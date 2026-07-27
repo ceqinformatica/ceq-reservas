@@ -658,6 +658,10 @@ app.post('/api/reservas', crearReservaLimiter, async (req, res) => {
     const email = contacto.split('|')[1]?.trim() || '';
     const espaciosNombre = { 1: 'Altillo', 2: 'Sala de Reuniones', 3: 'Frente' };
     const nombreEspacio = espaciosNombre[espacioIdNum];
+    // Se agrega al asunto de cada email para que Gmail (y clientes similares) no agrupen
+    // como si fueran la misma conversación a dos reservas distintas que comparten el
+    // mismo asunto genérico (ej. dos "Nueva Reserva (Altillo) - CEQ" de personas distintas).
+    const reservaId = nuevaReserva[0].id;
 
     // Línea de contacto según el espacio reservado
     const contactoLinea = `<p>Ante cualquier consulta, contactate con: ${getContactoLineaHtml(espacioIdNum)}</p>`;
@@ -672,7 +676,7 @@ app.post('/api/reservas', crearReservaLimiter, async (req, res) => {
     if (email) {
       await enviarEmail({
         to: email,
-        subject: '✓ Confirmación de Reserva - CEQ',
+        subject: `✓ Confirmación de Reserva - CEQ #${reservaId}`,
         html: `
           <h2>¡Reserva Confirmada!</h2>
           <p>Hola ${nombreSeguro},</p>
@@ -696,7 +700,7 @@ app.post('/api/reservas', crearReservaLimiter, async (req, res) => {
     // Enviar email al moderador correspondiente (Altillo o Frente)
     await enviarEmail({
       to: getEmailModerador(espacioIdNum),
-      subject: `📌 Nueva Reserva (${nombreEspacio}) - CEQ`,
+      subject: `📌 Nueva Reserva (${nombreEspacio}) - CEQ #${reservaId}`,
       html: `
         <h2>Nueva Reserva</h2>
         <p><strong>Usuario:</strong> ${nombreSeguro}</p>
@@ -760,7 +764,7 @@ app.post('/api/cancelar-por-codigo', cancelarLimiter, async (req, res) => {
       if (emailUsuario) {
         await enviarEmail({
           to: emailUsuario,
-          subject: 'Período de Cancelación Gratuita Finalizado - CEQ',
+          subject: `Período de Cancelación Gratuita Finalizado - CEQ #${reserva.id}`,
           html: `
             <h2>El período de cancelación gratuita ha finalizado</h2>
             <p>Intentaste cancelar tu reserva de <strong>${getEspacioNombre(reserva.espacio_id)}</strong>, pero el período de cancelación gratuita ya venció.</p>
@@ -777,7 +781,7 @@ app.post('/api/cancelar-por-codigo', cancelarLimiter, async (req, res) => {
       // Aviso al moderador: hubo un intento de cancelación fuera del período gratuito
       await enviarEmail({
         to: getEmailModerador(reserva.espacio_id),
-        subject: 'Intento de Cancelación Fuera de Plazo - CEQ',
+        subject: `Intento de Cancelación Fuera de Plazo - CEQ #${reserva.id}`,
         html: `
           <h2>Intento de Cancelación (Período Vencido)</h2>
           <p><strong>Usuario:</strong> ${escapeHtml(reserva.nombre_solicitante)}</p>
@@ -816,7 +820,7 @@ app.post('/api/cancelar-por-codigo', cancelarLimiter, async (req, res) => {
     if (email) {
       await enviarEmail({
         to: email,
-        subject: 'Cancelación Confirmada - CEQ Reservas',
+        subject: `Cancelación Confirmada - CEQ Reservas #${reserva.id}`,
         html: `
           <h2>¡Has cancelado correctamente tu reserva!</h2>
           <p><strong>Detalles:</strong></p>
@@ -834,7 +838,7 @@ app.post('/api/cancelar-por-codigo', cancelarLimiter, async (req, res) => {
     if (reserva.espacio_id === 3) {
       await enviarEmail({
         to: getEmailModerador(reserva.espacio_id),
-        subject: 'Cancelación de Reserva - CEQ',
+        subject: `Cancelación de Reserva - CEQ #${reserva.id}`,
         html: `
           <h2>Reserva Cancelada por Usuario</h2>
           <p><strong>Usuario:</strong> ${escapeHtml(reserva.nombre_solicitante)}</p>
@@ -1171,7 +1175,7 @@ app.post('/api/admin/cancelar/:reserva_id', verifyAdminToken, verificarCSRF, asy
     if (email) {
       await enviarEmail({
         to: email,
-        subject: 'Tu Reserva Fue Cancelada por el Moderador - CEQ',
+        subject: `Tu Reserva Fue Cancelada por el Moderador - CEQ #${reserva.id}`,
         html: `
           <h2>Tu reserva fue cancelada por el moderador</h2>
           <p><strong>Motivo:</strong> ${escapeHtml(motivo) || 'No especificado'}</p>
@@ -1195,7 +1199,7 @@ app.post('/api/admin/cancelar/:reserva_id', verifyAdminToken, verificarCSRF, asy
 
     await enviarEmail({
       to: destinatariosAviso,
-      subject: `🔔 Un moderador canceló una reserva (${getEspacioNombre(reserva.espacio_id)}) - CEQ`,
+      subject: `🔔 Un moderador canceló una reserva (${getEspacioNombre(reserva.espacio_id)}) - CEQ #${reserva.id}`,
       html: `
         <h2>Cancelación realizada por un moderador</h2>
         <p>Un moderador canceló la siguiente reserva desde el panel de administración:</p>
