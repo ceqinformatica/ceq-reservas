@@ -834,8 +834,10 @@ app.post('/api/cancelar-por-codigo', cancelarLimiter, async (req, res) => {
       });
     }
 
-    // Email al moderador (solo para autocancelaciones del espacio Frente)
-    if (reserva.espacio_id === 3) {
+    // Email al moderador. Antes solo se mandaba para Frente; ahora se manda siempre —
+    // getEmailModerador() ya se encarga de que a Altillo le llegue solo a ceq.informatica,
+    // y a Frente le siga llegando también a Monse, sin tocar nada más.
+    {
       await enviarEmail({
         to: getEmailModerador(reserva.espacio_id),
         subject: `Cancelación de Reserva - CEQ #${reserva.id}`,
