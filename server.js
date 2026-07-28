@@ -1157,9 +1157,11 @@ app.post('/api/admin/reservas', verifyAdminToken, verificarCSRF, async (req, res
       return res.status(400).json({ error: 'El contacto debe tener el formato "celular | email" con un email válido' });
     }
 
+    // Este endpoint es solo para Frente — la prioridad de la Comisión Directiva
+    // aplica únicamente ahí, no tiene sentido para Altillo.
     const espacioIdNum = parseInt(espacio_id);
-    if (![1, 3].includes(espacioIdNum)) {
-      return res.status(400).json({ error: 'Espacio inválido' });
+    if (espacioIdNum !== 3) {
+      return res.status(400).json({ error: 'Este endpoint es solo para Frente' });
     }
 
     if (!/^\d{2}:\d{2}$/.test(hora_inicio) || !/^\d{2}:\d{2}$/.test(hora_fin)) {
@@ -1181,25 +1183,14 @@ app.post('/api/admin/reservas', verifyAdminToken, verificarCSRF, async (req, res
       return res.status(400).json({ error: 'La hora de inicio debe ser anterior a la hora de fin' });
     }
 
-    if (espacioIdNum === 3) {
-      const turnosValidosFrente = [
-        { inicio: '07:00', fin: '10:00' },
-        { inicio: '10:00', fin: '13:00' },
-        { inicio: '14:00', fin: '18:00' }
-      ];
-      const esTurnoValido = turnosValidosFrente.some(t => t.inicio === hora_inicio && t.fin === hora_fin);
-      if (!esTurnoValido) {
-        return res.status(400).json({ error: 'Turno inválido para Frente. Debe ser Desayuno (07-10), Almuerzo (10-13) o Merienda (14-18)' });
-      }
-    } else {
-      const duracionHoras = (finMin - inicioMin) / 60;
-      if (duracionHoras < 1 || duracionHoras > 3) {
-        return res.status(400).json({ error: 'La duración debe ser entre 1 y 3 horas' });
-      }
-      const horaMinimaPermitida = 8;
-      if (horaIniH < horaMinimaPermitida || horaFinH > 18 || (horaFinH === 18 && horaFinM > 0)) {
-        return res.status(400).json({ error: `Horario fuera de rango (${horaMinimaPermitida}:00-18:00)` });
-      }
+    const turnosValidosFrente = [
+      { inicio: '07:00', fin: '10:00' },
+      { inicio: '10:00', fin: '13:00' },
+      { inicio: '14:00', fin: '18:00' }
+    ];
+    const esTurnoValido = turnosValidosFrente.some(t => t.inicio === hora_inicio && t.fin === hora_fin);
+    if (!esTurnoValido) {
+      return res.status(400).json({ error: 'Turno inválido. Debe ser Desayuno (07-10), Almuerzo (10-13) o Merienda (14-18)' });
     }
 
     // A diferencia del endpoint público, acá NO se chequea meses_habilitados — es
