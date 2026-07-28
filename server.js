@@ -1131,6 +1131,154 @@ app.delete('/api/bloqueos/:id', verifyAdminToken, verificarCSRF, async (req, res
 });
 
 // POST cancelar reserva (admin)
+// POST crear reserva de PRIORIDAD (admin) — para que la Comisión Directiva pueda
+// reservar un turno de Frente (o Altillo) ANTES de que ese mes se habilite
+// públicamente. A diferencia de un bloqueo, esto SÍ ocupa un turno con nombre real:
+// queda protegido por el mismo EXCLUDE constraint que cualquier otra reserva, así
+// que cuando el mes se habilite después, el público va a ver ese turno como ya
+// ocupado, no como libre. Reutiliza exactamente la misma validación de formato que
+// el endpoint público — la única diferencia real es que salta el chequeo de
+// meses_habilitados, que es justamente el punto de este endpoint.
+app.post('/api/admin/reservas', verifyAdminToken, verificarCSRF, async (req, res) => {
+  try {
+    const { espacio_id, nombre_solicitante, contacto, fecha, hora_inicio, hora_fin, motivo } = req.body;
+
+    if (!espacio_id || !nombre_solicitante || !contacto || !fecha || !hora_inicio || !hora_fin || !motivo) {
+      return res.status(400).json({ error: 'Faltan parámetros requeridos' });
+    }
+
+    if (String(nombre_solicitante).length > 150 || String(contacto).length > 200 || String(motivo).length > 500) {
+      return res.status(400).json({ error: 'Uno o más campos exceden la longitud permitida' });
+    }
+
+    const partesContacto = String(contacto).split('|').map(p => p.trim());
+    const emailValidoRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+    if (partesContacto.length !== 2 || !partesContacto[0] || !emailValidoRegex.test(partesContacto[1])) {
+      return res.status(400).json({ error: 'El contacto debe tener el formato "celular | email" con un email válido' });
+    }
+
+    const espacioIdNum = parseInt(espacio_id);
+    if (![1, 3].includes(espacioIdNum)) {
+      return res.status(400).json({ error: 'Espacio inválido' });
+    }
+
+    if (!/^\d{2}:\d{2}$/.test(hora_inicio) || !/^\d{2}:\d{2}$/.test(hora_fin)) {
+      return res.status(400).json({ error: 'Formato de hora inválido' });
+    }
+
+    const [horaIniH, horaIniM] = hora_inicio.split(':').map(Number);
+    const [horaFinH, horaFinM] = hora_fin.split(':').map(Number);
+
+    if (![horaIniH, horaIniM, horaFinH, horaFinM].every(Number.isFinite) ||
+        horaIniH > 23 || horaFinH > 23 || horaIniM > 59 || horaFinM > 59) {
+      return res.status(400).json({ error: 'Hora inválida' });
+    }
+
+    const inicioMin = horaIniH * 60 + horaIniM;
+    const finMin = horaFinH * 60 + horaFinM;
+
+    if (inicioMin >= finMin) {
+      return res.status(400).json({ error: 'La hora de inicio debe ser anterior a la hora de fin' });
+    }
+
+    if (espacioIdNum === 3) {
+      const turnosValidosFrente = [
+        { inicio: '07:00', fin: '10:00' },
+        { inicio: '10:00', fin: '13:00' },
+        { inicio: '14:00', fin: '18:00' }
+      ];
+      const esTurnoValido = turnosValidosFrente.some(t => t.inicio === hora_inicio && t.fin === hora_fin);
+      if (!esTurnoValido) {
+        return res.status(400).json({ error: 'Turno inválido para Frente. Debe ser Desayuno (07-10), Almuerzo (10-13) o Merienda (14-18)' });
+      }
+    } else {
+      const duracionHoras = (finMin - inicioMin) / 60;
+      if (duracionHoras < 1 || duracionHoras > 3) {
+        return res.status(400).json({ error: 'La duración debe ser entre 1 y 3 horas' });
+      }
+      const horaMinimaPermitida = 8;
+      if (horaIniH < horaMinimaPermitida || horaFinH > 18 || (horaFinH === 18 && horaFinM > 0)) {
+        return res.status(400).json({ error: `Horario fuera de rango (${horaMinimaPermitida}:00-18:00)` });
+      }
+    }
+
+    // A diferencia del endpoint público, acá NO se chequea meses_habilitados — es
+    // justamente el punto de este endpoint. Sí se sigue exigiendo que la fecha no
+    // sea pasada ni caiga en fin de semana, y el chequeo de horario ya pasado si es hoy.
+    const hoy = hoyEnAsuncion();
+    const fechaReserva = new Date(fecha + 'T00:00:00Z');
+    const esFinDeSemana = fechaReserva.getUTCDay() === 0 || fechaReserva.getUTCDay() === 6;
+
+    if (isNaN(fechaReserva.getTime()) || fechaReserva < hoy || esFinDeSemana) {
+      return res.status(400).json({ error: 'Fecha fuera del rango permitido para reservar' });
+    }
+
+    if (fechaReserva.getTime() === hoy.getTime()) {
+      const minutosActuales = horaActualEnAsuncionEnMinutos();
+      if (inicioMin <= minutosActuales) {
+        return res.status(400).json({ error: 'No se puede reservar un horario que ya pasó' });
+      }
+    }
+
+    // Chequeo previo (no atómico) de bloqueos, igual que el endpoint público. La
+    // garantía real la sigue dando el trigger de la base (CEQ01).
+    const { data: bloqueosConflicto, error: errorBloqueos } = await supabase
+      .from('bloqueos')
+      .select('hora_inicio, hora_fin')
+      .eq('espacio_id', espacioIdNum)
+      .eq('fecha', fecha);
+
+    if (errorBloqueos) throw errorBloqueos;
+
+    const hayBloqueo = (bloqueosConflicto || []).some(b => {
+      const [bIniH, bIniM] = b.hora_inicio.split(':').map(Number);
+      const [bFinH, bFinM] = b.hora_fin.split(':').map(Number);
+      const bIniMin = bIniH * 60 + bIniM;
+      const bFinMin = bFinH * 60 + bFinM;
+      return inicioMin < bFinMin && finMin > bIniMin;
+    });
+
+    if (hayBloqueo) {
+      return res.status(409).json({ error: 'El horario seleccionado está bloqueado por administración' });
+    }
+
+    const codigo = crypto.randomBytes(8).toString('hex').toUpperCase();
+    const codigoHash = hashCodigo(codigo);
+
+    const { data: nuevaReserva, error } = await supabase
+      .from('reservas')
+      .insert([{
+        espacio_id: espacioIdNum,
+        nombre_solicitante: String(nombre_solicitante).trim(),
+        contacto: String(contacto).trim(),
+        fecha,
+        hora_inicio: hora_inicio + ':00',
+        hora_fin: hora_fin + ':00',
+        estado: 'activa',
+        motivo: motivo || '',
+        codigo_cancelacion_hash: codigoHash,
+        reservado_por_admin: true
+      }])
+      .select();
+
+    if (error) {
+      if (error.code === '23505' || error.code === '23P01') {
+        return res.status(409).json({ error: 'Horario no disponible - se solapa con otra reserva existente' });
+      }
+      if (error.code === 'CEQ01') {
+        return res.status(409).json({ error: 'El horario seleccionado está bloqueado por administración' });
+      }
+      throw error;
+    }
+
+    // A propósito no se manda ningún email acá (ni confirmación ni aviso a moderador):
+    // quien crea esto ya es el moderador, y está viendo el resultado en pantalla al toque.
+    res.json({ mensaje: 'Reserva de prioridad creada correctamente', reserva: nuevaReserva[0] });
+  } catch (error) {
+    manejarError(res, error);
+  }
+});
+
 app.post('/api/admin/cancelar/:reserva_id', verifyAdminToken, verificarCSRF, async (req, res) => {
   try {
     const { reserva_id } = req.params;
