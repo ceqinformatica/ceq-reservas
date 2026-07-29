@@ -1262,8 +1262,35 @@ app.post('/api/admin/reservas', verifyAdminToken, verificarCSRF, async (req, res
       throw error;
     }
 
-    // A propósito no se manda ningún email acá (ni confirmación ni aviso a moderador):
-    // quien crea esto ya es el moderador, y está viendo el resultado en pantalla al toque.
+    // Se manda la misma confirmación que recibe cualquier persona que reserva por el
+    // formulario público, al email que se haya cargado en el contacto de la reserva
+    // de prioridad — para que la Comisión Directiva también tenga registro/código.
+    const email = partesContacto[1];
+    await enviarEmail({
+      to: email,
+      subject: `✓ Confirmación de Reserva - CEQ #${nuevaReserva[0].id}`,
+      html: `
+        <h2>¡Reserva Confirmada!</h2>
+        <p>Hola ${escapeHtml(nombre_solicitante)},</p>
+        <p>Tu reserva ha sido confirmada exitosamente.</p>
+        <hr>
+        <p><strong>Detalles:</strong></p>
+        <ul>
+          <li><strong>Espacio:</strong> Frente</li>
+          <li><strong>Fecha:</strong> ${fecha}</li>
+          <li><strong>Horario:</strong> ${descripcionHorario(espacioIdNum, hora_inicio, hora_fin)}</li>
+          <li><strong>Motivo:</strong> ${escapeHtml(motivo) || 'Sin especificar'}</li>
+          <li><strong>Código de cancelación:</strong> ${codigo}</li>
+        </ul>
+        <p>Si necesitas cancelar, usa tu código en: <a href="https://reservas.ceq-una.com/cancelar.html">Cancelar Reserva</a></p>
+        <p>Ante cualquier consulta, contactate con: ${getContactoLineaHtml(espacioIdNum)}</p>
+        <p>Centro de Estudiantes de Química</p>
+      `
+    });
+
+    // A propósito no se manda aviso al moderador acá (a diferencia del formulario
+    // público): quien crea esto ya es el moderador, y está viendo el resultado en
+    // pantalla al toque, no hace falta que se notifique a sí mismo.
     res.json({ mensaje: 'Reserva de prioridad creada correctamente', reserva: nuevaReserva[0] });
   } catch (error) {
     manejarError(res, error);
