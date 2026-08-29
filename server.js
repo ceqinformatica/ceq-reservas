@@ -235,7 +235,13 @@ const reportesLimiter = rateLimit({
 // evita que queden completamente sin ningún tope de scraping/DoS barato)
 const lecturaPublicaLimiter = rateLimit({
   windowMs: 5 * 60 * 1000, // 5 minutos
-  max: 60,
+  // Antes era 60. Con el auto-refresco del calendario cada 20s haciendo hasta 4
+  // pedidos por ciclo, UNA sola pestaña abierta ya gastaba las 60 solicitudes en
+  // 5 minutos. En redes compartidas (WiFi de facultad, misma operadora móvil)
+  // varias personas distintas salen con la misma IP pública, así que el cupo se
+  // agotaba entre todas con uso normal, no por abuso. 300 deja margen holgado
+  // para varias decenas de personas conectadas simultáneamente desde la misma IP.
+  max: 300,
   standardHeaders: true,
   legacyHeaders: false,
   message: { error: 'Demasiadas solicitudes. Probá de nuevo en unos minutos.' }
