@@ -8,6 +8,7 @@ const { createClient } = require('@supabase/supabase-js');
 const bcrypt = require('bcryptjs');
 const jwt = require('jsonwebtoken');
 const crypto = require('crypto');
+const net = require('net');
 
 const app = express();
 
@@ -197,11 +198,45 @@ app.use(cors({
 app.use(express.json({ limit: '10kb' }));
 app.use(cookieParser());
 
+// DIAGNÓSTICO TEMPORAL: loguea qué IP ve Express vs. qué IP manda Cloudflare,
+// para confirmar en los logs de Render (buscar "[IPDBG]") que cf-connecting-ip
+// trae la IP real del visitante. Borrar este bloque una vez confirmado.
+app.use((req, res, next) => {
+  if (req.path === '/api/meses-habilitados') {
+    console.log('[IPDBG]', JSON.stringify({
+      ip: req.ip,
+      clave: obtenerIpCliente(req),
+      xff: req.headers['x-forwarded-for'],
+      cf: req.headers['cf-connecting-ip']
+    }));
+  }
+  next();
+});
+
 // ========== RATE LIMITING (AUTH-001, ABUSE-001) ==========
+
+// IP real del visitante para usar como clave de los rate limiters.
+// La API corre en Render, que tiene delante su propio Cloudflare + uno o más
+// balanceadores internos. Con `trust proxy 1`, req.ip termina siendo la IP de uno
+// de esos saltos internos (que rota), no la del visitante: todos los usuarios del
+// sitio compartían unos pocos contadores y el límite se agotaba entre todos.
+// Cloudflare siempre pisa el header cf-connecting-ip con la IP real que se conectó
+// a él, así que el cliente no lo puede falsificar. Si por algún motivo no viene
+// (o no es una IP válida), se vuelve al comportamiento anterior (req.ip).
+function obtenerIpCliente(req) {
+  const cf = req.headers['cf-connecting-ip'];
+  if (typeof cf === 'string' && net.isIP(cf.trim())) {
+    return cf.trim();
+  }
+  return req.ip;
+}
 
 const loginLimiter = rateLimit({
   windowMs: 15 * 60 * 1000, // 15 minutos
   max: 5,
+  // Solo cuentan los intentos fallidos: un login correcto no consume el cupo
+  skipSuccessfulRequests: true,
+  keyGenerator: obtenerIpCliente,
   standardHeaders: true,
   legacyHeaders: false,
   message: { error: 'Demasiados intentos. Probá de nuevo en unos minutos.' }
@@ -209,7 +244,10 @@ const loginLimiter = rateLimit({
 
 const crearReservaLimiter = rateLimit({
   windowMs: 60 * 60 * 1000, // 1 hora
-  max: 15,
+  // Antes 15: en una red compartida (WiFi de facultad) varias personas salen con
+  // la misma IP pública, y el día que se habilita un mes nuevo reservan muchas a la vez.
+  max: 30,
+  keyGenerator: obtenerIpCliente,
   standardHeaders: true,
   legacyHeaders: false,
   message: { error: 'Demasiadas solicitudes. Probá de nuevo más tarde.' }
@@ -218,6 +256,7 @@ const crearReservaLimiter = rateLimit({
 const cancelarLimiter = rateLimit({
   windowMs: 60 * 60 * 1000,
   max: 20,
+  keyGenerator: obtenerIpCliente,
   standardHeaders: true,
   legacyHeaders: false,
   message: { error: 'Demasiados intentos de cancelación. Probá de nuevo más tarde.' }
@@ -226,6 +265,7 @@ const cancelarLimiter = rateLimit({
 const reportesLimiter = rateLimit({
   windowMs: 60 * 60 * 1000,
   max: 10,
+  keyGenerator: obtenerIpCliente,
   standardHeaders: true,
   legacyHeaders: false,
   message: { error: 'Demasiados reportes enviados. Probá de nuevo más tarde.' }
@@ -241,7 +281,10 @@ const lecturaPublicaLimiter = rateLimit({
   // varias personas distintas salen con la misma IP pública, así que el cupo se
   // agotaba entre todas con uso normal, no por abuso. 300 deja margen holgado
   // para varias decenas de personas conectadas simultáneamente desde la misma IP.
-  max: 300,
+  // Subido a 600: una pestaña abierta hace ~30 pedidos cada 5 min, así que esto
+  // alcanza para ~20 personas detrás de la misma IP pública (ej. WiFi de facultad).
+  max: 600,
+  keyGenerator: obtenerIpCliente,
   standardHeaders: true,
   legacyHeaders: false,
   message: { error: 'Demasiadas solicitudes. Probá de nuevo en unos minutos.' }
@@ -1038,7 +1081,7 @@ app.post('/api/bloqueos', verifyAdminToken, verificarCSRF, async (req, res) => {
     const isBloqueCompleto = horaI === 0 && minI === 0 && horaF === 23 && minF === 59;
     
     if (!isBloqueCompleto) {
-      const horaMinima = espacio_id === 3 ? 7 : 8;
+      const horaMinima = Number(espacio_id) === 3 ? 7 : 8;
       const horaMaxima = 18;
       
       if (horaI < horaMinima || horaF > horaMaxima || horaI >= horaF) {
