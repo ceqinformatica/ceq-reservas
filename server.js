@@ -219,12 +219,22 @@ function obtenerIpCliente(req) {
   return req.ip;
 }
 
+// Cuando un limiter rechaza un pedido (429), lo deja registrado en los logs de Render
+// (buscar "429" en Logs) antes de responder. Sin esto, los 429 no dejaban ningún rastro
+// y uno solo se enteraba por los reportes de usuarios. Si aparecen IPs 10.x acá, es
+// señal de que Render dejó de mandar cf-connecting-ip y hay que revisar obtenerIpCliente().
+function registrar429(req, res, next, options) {
+  console.warn(`⚠️ 429 rate limit: IP ${obtenerIpCliente(req)} en ${req.method} ${req.originalUrl}`);
+  res.status(options.statusCode).json(options.message);
+}
+
 const loginLimiter = rateLimit({
   windowMs: 15 * 60 * 1000, // 15 minutos
   max: 5,
   // Solo cuentan los intentos fallidos: un login correcto no consume el cupo
   skipSuccessfulRequests: true,
   keyGenerator: obtenerIpCliente,
+  handler: registrar429,
   standardHeaders: true,
   legacyHeaders: false,
   message: { error: 'Demasiados intentos. Probá de nuevo en unos minutos.' }
@@ -236,6 +246,7 @@ const crearReservaLimiter = rateLimit({
   // la misma IP pública, y el día que se habilita un mes nuevo reservan muchas a la vez.
   max: 30,
   keyGenerator: obtenerIpCliente,
+  handler: registrar429,
   standardHeaders: true,
   legacyHeaders: false,
   message: { error: 'Demasiadas solicitudes. Probá de nuevo más tarde.' }
@@ -245,6 +256,7 @@ const cancelarLimiter = rateLimit({
   windowMs: 60 * 60 * 1000,
   max: 20,
   keyGenerator: obtenerIpCliente,
+  handler: registrar429,
   standardHeaders: true,
   legacyHeaders: false,
   message: { error: 'Demasiados intentos de cancelación. Probá de nuevo más tarde.' }
@@ -254,6 +266,7 @@ const reportesLimiter = rateLimit({
   windowMs: 60 * 60 * 1000,
   max: 10,
   keyGenerator: obtenerIpCliente,
+  handler: registrar429,
   standardHeaders: true,
   legacyHeaders: false,
   message: { error: 'Demasiados reportes enviados. Probá de nuevo más tarde.' }
@@ -269,16 +282,44 @@ const lecturaPublicaLimiter = rateLimit({
   // varias personas distintas salen con la misma IP pública, así que el cupo se
   // agotaba entre todas con uso normal, no por abuso. 300 deja margen holgado
   // para varias decenas de personas conectadas simultáneamente desde la misma IP.
-  // Subido a 600: una pestaña abierta hace ~30 pedidos cada 5 min, así que esto
-  // alcanza para ~20 personas detrás de la misma IP pública (ej. WiFi de facultad).
-  max: 600,
+  // Subido a 1200 (antes 600) al pasar el auto-refresco del calendario a cada 20s:
+  // una pestaña abierta hace ~40-50 pedidos cada 5 min, así que esto alcanza para
+  // ~25 personas usando el sitio a la vez detrás de la misma IP pública (ej. WiFi de facultad).
+  max: 1200,
   keyGenerator: obtenerIpCliente,
+  handler: registrar429,
   standardHeaders: true,
   legacyHeaders: false,
   message: { error: 'Demasiadas solicitudes. Probá de nuevo en unos minutos.' }
 });
 
 // ========== UTILIDADES ==========
+
+// Máximo de reservas activas por persona por mes (formulario público)
+const MAX_RESERVAS_POR_PERSONA_MES = 2;
+
+// Emails exentos del límite anterior (ej. el de quien hace pruebas del sistema).
+// Se configuran en Render como variable de entorno, separados por coma:
+//   EMAILS_SIN_LIMITE=uno@gmail.com,otro@gmail.com
+// No se escriben acá en el código porque el repositorio es público.
+const EMAILS_SIN_LIMITE = new Set(
+  (process.env.EMAILS_SIN_LIMITE || '')
+    .split(',')
+    .map(e => e.trim().toLowerCase())
+    .filter(Boolean)
+);
+
+// A partir de un contacto "celular | email" devuelve { email, celular } normalizados,
+// para reconocer a la misma persona aunque escriba distinto el número
+// (0981 123 456, +595 981123456, 981-123-456 → "981123456": últimos 9 dígitos).
+function identidadContacto(contacto) {
+  const [cel = '', mail = ''] = String(contacto || '').split('|').map(p => p.trim());
+  const digitos = cel.replace(/\D/g, '');
+  return {
+    email: mail.toLowerCase() || null,
+    celular: digitos.length >= 6 ? digitos.slice(-9) : null
+  };
+}
 
 function getEspacioNombre(id) {
   const espacios = { 1: 'Altillo', 2: 'Sala de Reuniones', 3: 'Frente' };
@@ -467,8 +508,19 @@ app.get('/api/reservas', lecturaPublicaLimiter, async (req, res) => {
       .eq('estado', 'activa');
     
     if (espacio_id) query = query.eq('espacio_id', parseInt(espacio_id));
-    if (fecha) query = query.eq('fecha', fecha);
-    
+    if (fecha) {
+      query = query.eq('fecha', fecha);
+    } else {
+      // Solo desde el primer día del mes actual (en Paraguay) en adelante. Antes se
+      // devolvían TODAS las reservas activas de la historia con un tope de 2000: cuando
+      // la base pasara ese número, el calendario iba a empezar a mostrar como libres
+      // turnos que en realidad estaban ocupados, sin ningún aviso. Se arranca desde el
+      // día 1 (y no desde hoy) para que el mes en curso se siga viendo completo.
+      const hoy = hoyEnAsuncion();
+      const primerDiaMes = `${hoy.getUTCFullYear()}-${String(hoy.getUTCMonth() + 1).padStart(2, '0')}-01`;
+      query = query.gte('fecha', primerDiaMes);
+    }
+
     const { data, error } = await query.limit(2000);
     
     if (error) throw error;
@@ -512,7 +564,13 @@ app.get('/api/meses-habilitados', lecturaPublicaLimiter, async (req, res) => {
       .order('mes', { ascending: true });
 
     if (error) throw error;
-    res.json(data || []);
+
+    // Al calendario público no se le mandan los meses que ya terminaron (aunque sigan
+    // marcados como habilitados en el panel): ahí no se puede reservar nada, y solo
+    // hacían aparecer el botón "Anterior" hacia meses muertos.
+    const hoy = hoyEnAsuncion();
+    const valorMesActual = hoy.getUTCFullYear() * 12 + (hoy.getUTCMonth() + 1);
+    res.json((data || []).filter(m => m.anio * 12 + m.mes >= valorMesActual));
   } catch (error) {
     manejarError(res, error);
   }
@@ -544,9 +602,13 @@ app.post('/api/reservas', crearReservaLimiter, async (req, res) => {
       return res.status(400).json({ error: 'El contacto debe tener el formato "celular | email" con un email válido' });
     }
 
-    // Solo se ofrecen públicamente los espacios Altillo (1) y Frente (3)
+    // Por ahora solo se ofrece públicamente Frente (3). Altillo (1) se gestiona a mano
+    // con planilla (ver modalAvisoAltillo en index.html): el botón estaba oculto, pero
+    // la API lo seguía aceptando y alguien podía reservarlo por fuera de la página.
+    // Para volver a habilitar Altillo, agregar el 1 a esta lista.
+    const ESPACIOS_PUBLICOS = [3];
     const espacioIdNum = parseInt(espacio_id);
-    if (![1, 3].includes(espacioIdNum)) {
+    if (!ESPACIOS_PUBLICOS.includes(espacioIdNum)) {
       return res.status(400).json({ error: 'Espacio inválido' });
     }
     
@@ -623,6 +685,37 @@ app.post('/api/reservas', crearReservaLimiter, async (req, res) => {
     if (errorMesHabilitado) throw errorMesHabilitado;
     if (!mesHabilitadoData) {
       return res.status(400).json({ error: 'Ese mes todavía no está habilitado para reservas' });
+    }
+
+    // Límite de reservas activas por persona por mes (en el mes de la FECHA reservada,
+    // no del día en que se reserva). Se identifica a la persona por email Y por celular,
+    // para que no alcance con cambiar solo uno de los dos. Las canceladas no cuentan.
+    // Las reservas de prioridad del panel admin no pasan por acá (no tienen límite).
+    if (!EMAILS_SIN_LIMITE.has(partesContacto[1].toLowerCase())) {
+      const ultimoDia = new Date(Date.UTC(anioReserva, mesReserva, 0)).getUTCDate();
+      const mesStr = String(mesReserva).padStart(2, '0');
+      const { data: reservasDelMes, error: errorReservasMes } = await supabase
+        .from('reservas')
+        .select('contacto')
+        .eq('estado', 'activa')
+        .eq('espacio_id', espacioIdNum)
+        .gte('fecha', `${anioReserva}-${mesStr}-01`)
+        .lte('fecha', `${anioReserva}-${mesStr}-${ultimoDia}`);
+
+      if (errorReservasMes) throw errorReservasMes;
+
+      const persona = identidadContacto(contacto);
+      const cantidad = (reservasDelMes || []).filter(r => {
+        const otra = identidadContacto(r.contacto);
+        return (persona.email && otra.email === persona.email) ||
+               (persona.celular && otra.celular === persona.celular);
+      }).length;
+
+      if (cantidad >= MAX_RESERVAS_POR_PERSONA_MES) {
+        return res.status(400).json({
+          error: `Ya tenés ${cantidad} reservas activas en ${getEspacioNombre(espacioIdNum)} para ese mes. El máximo es ${MAX_RESERVAS_POR_PERSONA_MES} por persona. Si necesitás otro turno, cancelá una de tus reservas anteriores.`
+        });
+      }
     }
 
     // VAL-001: si la reserva es para hoy, el horario de inicio no puede ya haber pasado
