@@ -136,7 +136,10 @@ function getContactoLineaHtml(espacio_id) {
   return `${EMAIL_MODERADOR}`;
 }
 
-// Función helper para enviar emails vía la API de Brevo
+// Función helper para enviar emails vía la API de Brevo.
+// Nunca lanza error (lo captura y lo loguea), así que se llama SIN await: los
+// endpoints responden al usuario de inmediato y el email sale en segundo plano,
+// en vez de hacer esperar al usuario varios segundos a que conteste Brevo.
 async function enviarEmail({ to, subject, html }) {
   try {
     const destinatarios = Array.isArray(to) ? to : [to];
@@ -706,9 +709,19 @@ app.post('/api/reservas', crearReservaLimiter, async (req, res) => {
     const motivoSeguro = escapeHtml(motivo);
     const contactoSeguro = escapeHtml(contacto);
     
+    // Se responde al usuario APENAS se guardó la reserva, y los emails se mandan
+    // después, en segundo plano. Antes se esperaba a Brevo (2 emails en serie) antes
+    // de contestar: la confirmación tardaba varios segundos, la gente creía que había
+    // fallado y volvía a reservar. enviarEmail() nunca lanza error (lo captura y loguea).
+    res.status(201).json({
+      mensaje: 'Reserva creada exitosamente',
+      reserva: nuevaReserva[0],
+      codigo
+    });
+
     // Enviar email al usuario (si existe email)
     if (email) {
-      await enviarEmail({
+      enviarEmail({
         to: email,
         subject: `✓ Confirmación de Reserva - CEQ #${reservaId}`,
         html: `
@@ -732,7 +745,7 @@ app.post('/api/reservas', crearReservaLimiter, async (req, res) => {
     }
     
     // Enviar email al moderador correspondiente (Altillo o Frente)
-    await enviarEmail({
+    enviarEmail({
       to: getEmailModerador(espacioIdNum),
       subject: `📌 Nueva Reserva (${nombreEspacio}) - CEQ #${reservaId}`,
       html: `
@@ -748,12 +761,6 @@ app.post('/api/reservas', crearReservaLimiter, async (req, res) => {
           <li><strong>Código:</strong> ${codigo}</li>
         </ul>
       `
-    });
-    
-    res.status(201).json({
-      mensaje: 'Reserva creada exitosamente',
-      reserva: nuevaReserva[0],
-      codigo
     });
   } catch (error) {
     manejarError(res, error);
@@ -796,7 +803,7 @@ app.post('/api/cancelar-por-codigo', cancelarLimiter, async (req, res) => {
     if (reserva.espacio_id === 3 && diferenciaDias < 2) {
       const emailUsuario = reserva.contacto.split('|')[1]?.trim();
       if (emailUsuario) {
-        await enviarEmail({
+        enviarEmail({
           to: emailUsuario,
           subject: `Período de Cancelación Gratuita Finalizado - CEQ #${reserva.id}`,
           html: `
@@ -813,7 +820,7 @@ app.post('/api/cancelar-por-codigo', cancelarLimiter, async (req, res) => {
       }
 
       // Aviso al moderador: hubo un intento de cancelación fuera del período gratuito
-      await enviarEmail({
+      enviarEmail({
         to: getEmailModerador(reserva.espacio_id),
         subject: `Intento de Cancelación Fuera de Plazo - CEQ #${reserva.id}`,
         html: `
@@ -852,7 +859,7 @@ app.post('/api/cancelar-por-codigo', cancelarLimiter, async (req, res) => {
     // el email del propio usuario; solo se le muestra como texto de contacto)
     const email = reserva.contacto.split('|')[1]?.trim();
     if (email) {
-      await enviarEmail({
+      enviarEmail({
         to: email,
         subject: `Cancelación Confirmada - CEQ Reservas #${reserva.id}`,
         html: `
@@ -872,7 +879,7 @@ app.post('/api/cancelar-por-codigo', cancelarLimiter, async (req, res) => {
     // getEmailModerador() ya se encarga de que a Altillo le llegue solo a ceq.informatica,
     // y a Frente le siga llegando también a Monse, sin tocar nada más.
     {
-      await enviarEmail({
+      enviarEmail({
         to: getEmailModerador(reserva.espacio_id),
         subject: `Cancelación de Reserva - CEQ #${reserva.id}`,
         html: `
@@ -1300,7 +1307,7 @@ app.post('/api/admin/reservas', verifyAdminToken, verificarCSRF, async (req, res
     // formulario público, al email que se haya cargado en el contacto de la reserva
     // de prioridad — para que la Comisión Directiva también tenga registro/código.
     const email = partesContacto[1];
-    await enviarEmail({
+    enviarEmail({
       to: email,
       subject: `✓ Confirmación de Reserva - CEQ #${nuevaReserva[0].id}`,
       html: `
@@ -1375,7 +1382,7 @@ app.post('/api/admin/cancelar/:reserva_id', verifyAdminToken, verificarCSRF, asy
     // al contacto de Frente en el email del propio usuario)
     const email = reserva.contacto.split('|')[1]?.trim();
     if (email) {
-      await enviarEmail({
+      enviarEmail({
         to: email,
         subject: `Tu Reserva Fue Cancelada por el Moderador - CEQ #${reserva.id}`,
         html: `
@@ -1399,7 +1406,7 @@ app.post('/api/admin/cancelar/:reserva_id', verifyAdminToken, verificarCSRF, asy
       ? [...new Set([EMAIL_MODERADOR, CONTACTO_EMAIL_FRENTE])]
       : [EMAIL_MODERADOR];
 
-    await enviarEmail({
+    enviarEmail({
       to: destinatariosAviso,
       subject: `🔔 Un moderador canceló una reserva (${getEspacioNombre(reserva.espacio_id)}) - CEQ #${reserva.id}`,
       html: `
