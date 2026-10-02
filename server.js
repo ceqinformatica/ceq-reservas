@@ -198,31 +198,16 @@ app.use(cors({
 app.use(express.json({ limit: '10kb' }));
 app.use(cookieParser());
 
-// DIAGNÓSTICO TEMPORAL: loguea qué IP ve Express vs. qué IP manda Cloudflare,
-// para confirmar en los logs de Render (buscar "[IPDBG]") que cf-connecting-ip
-// trae la IP real del visitante. Borrar este bloque una vez confirmado.
-app.use((req, res, next) => {
-  if (req.path === '/api/meses-habilitados') {
-    console.log('[IPDBG]', JSON.stringify({
-      ip: req.ip,
-      clave: obtenerIpCliente(req),
-      xff: req.headers['x-forwarded-for'],
-      cf: req.headers['cf-connecting-ip']
-    }));
-  }
-  next();
-});
-
 // ========== RATE LIMITING (AUTH-001, ABUSE-001) ==========
 
 // IP real del visitante para usar como clave de los rate limiters.
-// La API corre en Render, que tiene delante su propio Cloudflare + uno o más
-// balanceadores internos. Con `trust proxy 1`, req.ip termina siendo la IP de uno
-// de esos saltos internos (que rota), no la del visitante: todos los usuarios del
-// sitio compartían unos pocos contadores y el límite se agotaba entre todos.
-// Cloudflare siempre pisa el header cf-connecting-ip con la IP real que se conectó
-// a él, así que el cliente no lo puede falsificar. Si por algún motivo no viene
-// (o no es una IP válida), se vuelve al comportamiento anterior (req.ip).
+// La API corre en Render, que tiene delante su propio Cloudflare + un balanceador
+// interno. Verificado en logs: X-Forwarded-For llega como
+// "<cliente>, <IP de Cloudflare>, <10.x interna de Render>", así que con
+// `trust proxy 1` req.ip era la 10.x interna — la MISMA para todos los visitantes,
+// y todo el sitio compartía un único contador. Cloudflare siempre pisa el header
+// cf-connecting-ip con la IP real que se conectó a él, así que el cliente no lo
+// puede falsificar. Si no viene (o no es una IP válida), se usa req.ip como antes.
 function obtenerIpCliente(req) {
   const cf = req.headers['cf-connecting-ip'];
   if (typeof cf === 'string' && net.isIP(cf.trim())) {
