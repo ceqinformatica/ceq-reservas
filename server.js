@@ -386,8 +386,35 @@ const verificarCSRF = (req, res, next) => {
 // ========== ENDPOINTS PÚBLICOS ==========
 
 // Health check
-app.get('/api/health', (req, res) => {
-  res.json({ status: 'ok' });
+// Además de confirmar que el servidor responde, hace una consulta mínima a la base
+// de datos. Sirve para dos cosas:
+//  1. Un monitor externo (UptimeRobot) que llama acá cada 5 minutos mantiene despiertos
+//     tanto al servidor de Render como a la base de Supabase (el plan gratuito de
+//     Supabase pausa el proyecto tras una semana sin actividad, por ejemplo en vacaciones).
+//  2. Si la base falla, responde 503 y el monitor avisa por email.
+// El resultado se reutiliza durante 30 segundos, para que llamadas repetidas a esta
+// ruta (que no tiene rate limit) no generen una consulta a la base cada vez.
+let ultimoChequeoBase = { momento: 0, ok: false };
+app.get('/api/health', async (req, res) => {
+  if (Date.now() - ultimoChequeoBase.momento > 30 * 1000) {
+    try {
+      // Se pide 1 fila normal (GET) y no solo el conteo (HEAD): con HEAD la librería de
+      // Supabase toma un 404 sin cuerpo como éxito, y el chequeo podía decir "ok" sin serlo.
+      const { error } = await supabase
+        .from('meses_habilitados')
+        .select('mes')
+        .limit(1);
+      if (error) throw error;
+      ultimoChequeoBase = { momento: Date.now(), ok: true };
+    } catch (error) {
+      console.error('❌ Health check: la base de datos no respondió:', error);
+      ultimoChequeoBase = { momento: Date.now(), ok: false };
+    }
+  }
+  if (ultimoChequeoBase.ok) {
+    return res.json({ status: 'ok', db: 'ok' });
+  }
+  return res.status(503).json({ status: 'error', db: 'error' });
 });
 
 // LOGIN - Endpoint seguro
