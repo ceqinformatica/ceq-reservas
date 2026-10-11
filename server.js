@@ -1215,6 +1215,12 @@ app.post('/api/bloqueos', verifyAdminToken, verificarCSRF, async (req, res) => {
       return res.status(400).json({ error: 'Fecha inválida' });
     }
 
+    // VAL-003: un bloqueo en una fecha que ya pasó (en Paraguay) no tiene efecto y solo
+    // ensucia la lista de bloqueos del panel. Hoy sí se permite.
+    if (new Date(fecha + 'T00:00:00Z') < hoyEnAsuncion()) {
+      return res.status(400).json({ error: 'No se puede bloquear una fecha que ya pasó' });
+    }
+
     // Acepta HH:MM o HH:MM:SS (el bloqueo de día completo manda "00:00:00"/"23:59:00" con segundos)
     if (!/^\d{2}:\d{2}(:\d{2})?$/.test(hora_inicio) || !/^\d{2}:\d{2}(:\d{2})?$/.test(hora_fin)) {
       return res.status(400).json({ error: 'Formato de hora inválido' });
