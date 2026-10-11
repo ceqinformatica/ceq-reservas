@@ -108,7 +108,7 @@ El admin normal no ve la pestaña Avanzado, y el servidor le rechaza esas accion
 
 - **Recordatorio 2 días antes:** a las 08:00 del día en que todavía se puede cancelar gratis, llega un correo con un botón **Cancelar mi reserva** (no hace falta el código). Para el Frente dice que es el último día para cancelar gratis. No se manda a las reservas de prioridad ni a las hechas en las últimas 12 horas.
 - **Enlace para cancelar:** el correo de confirmación y el recordatorio traen un enlace firmado que cancela esa reserva (con las mismas reglas que el código). Si se cambia `JWT_SECRET`, los enlaces viejos dejan de andar; el código sigue sirviendo.
-- **Lista de espera:** si un día está lleno, la página muestra "Ya no hay reservas disponibles" y la persona puede dejar su correo eligiendo los turnos que le interesan. Si alguien cancela uno de esos turnos (con código, con enlace o desde el panel), se avisa a todos los anotados a la vez con un enlace directo al día; el lugar es de quien reserve primero. Cada inscripción se avisa una sola vez, hay un máximo de 10 inscripciones pendientes por correo y de 60 avisos por día, y las de días pasados se borran solas.
+- **Lista de espera (general):** cuando en un espacio ya no queda ningún lugar libre en los meses habilitados, la página muestra "Ya no hay reservas disponibles" y la persona puede dejar su correo. Si después alguien cancela cualquier reserva de ese espacio (con código, con enlace o desde el panel), se avisa a todos los anotados a la vez, con el día y turno que se liberó y un enlace directo; el lugar es de quien reserve primero. Cada inscripción se avisa una sola vez (para otro aviso hay que volver a anotarse); hay un máximo de 60 avisos por día, y las inscripciones sin avisar se borran a los 60 días.
 
 ### Planilla de Google Sheets (se actualiza sola)
 
@@ -139,12 +139,15 @@ Si falla la actualización automática, Google manda un correo a la cuenta. La c
 |---|---|---|
 | Espacios que se pueden reservar desde la página | Solo Frente (3). Altillo (1) se gestiona con planilla. | Panel → Avanzado → Espacios (admin supremo). Se guarda en la columna `publico` de la tabla `espacios` (ver sección 7). |
 | Turnos del Frente | Desayuno 07–10, Almuerzo 10–13, Merienda 14–18 | Panel → Avanzado → Configuración (admin supremo). Se guarda en la tabla `configuracion`. |
+| Motivo en el Frente | Se elige de una lista: Actividad Personal; Recaudación - Asociación Estudiantil; Recaudación - Secretaría CEQ; Recaudación - Padrinaje; Recaudación - Congreso o Evento Académico. En el Altillo el motivo es libre. | `MOTIVOS_FRENTE` en `server.js` (la página la toma de ahí) |
+| Horario del Altillo | Bloques de 1 hora de 08:00 a 20:00 (el último empieza a las 19:00), de 1 a 2 horas por reserva. Hoy se puede tomar el bloque en curso mientras no haya terminado (a las 11:30, el de las 11:00 sí; a las 12:00, ya no). | `ALTILLO_HORA_DESDE`, `ALTILLO_HORA_HASTA` y `ALTILLO_MAX_HORAS` en `server.js` (la página los toma de ahí) |
+| Acompañantes | Solo en el Altillo (en el Frente no se piden). Opcional, hasta 4 por reserva, con nombre y celular. Se ven en el panel, el Excel, la planilla y los correos; nunca en la página pública. | `MAX_ACOMPANANTES` en `server.js` y el límite `reservas_acompanantes_validos` de la base |
 | Días | Lunes a viernes, desde hoy, solo en meses habilitados | `server.js` (`POST /api/reservas`) |
 | Límite por persona | 2 reservas activas por mes y por espacio (se reconoce a la persona por correo o por celular) | Panel → Avanzado → Configuración (admin supremo) |
 | Cancelación con código o enlace (Frente) | Hasta 2 días antes; después, por WhatsApp | `cancelarComoUsuario()` en `server.js` |
 | Límites por IP | Crear 30/hora, cancelar 20/hora, reportes 10/hora, consultas 1200 cada 5 min, login 5 intentos fallidos cada 15 min | Los `rateLimit` en `server.js` |
 | Contacto del Frente | Correo y WhatsApp de la persona encargada | Panel → Avanzado → Configuración (admin supremo): se actualiza en los correos y en las páginas. Si cambia la persona, cambiar también `EMAIL_MODERADOR_FRENTE` en Render (avisos internos). |
-| Límites de la lista de espera | 15 inscripciones por hora por IP, 10 pendientes por correo, 60 avisos por día | `listaEsperaLimiter`, `MAX_INSCRIPCIONES_POR_CORREO` y `MAX_AVISOS_LISTA_ESPERA_POR_DIA` en `server.js` |
+| Límites de la lista de espera | 15 inscripciones por hora por IP, una por correo y espacio, 60 avisos por día, vigencia de 60 días | `listaEsperaLimiter`, `MAX_AVISOS_LISTA_ESPERA_POR_DIA` y `DIAS_VIGENCIA_LISTA_ESPERA` en `server.js` |
 | Versión que se muestra | `v2.5a-34` | Pie de las tres páginas |
 
 ## 7. Reactivar el Altillo
@@ -153,7 +156,7 @@ Ya no hace falta tocar código:
 
 1. Entrar al panel con la contraseña del **admin supremo** → pestaña **Avanzado** → **Espacios**.
 2. En la tarjeta del Altillo, marcar **Se puede reservar desde la página** y tocar **Guardar**.
-3. Abrir la página (o recargarla) y hacer una reserva de prueba en el Altillo (horario libre de 1 a 3 horas, entre 08:00 y 18:00). Después cancelarla y, si se quiere, eliminarla desde Avanzado.
+3. Abrir la página (o recargarla) y hacer una reserva de prueba en el Altillo (de 1 a 2 horas, entre 08:00 y 20:00). Después cancelarla y, si se quiere, eliminarla desde Avanzado.
 
 Para volver a cerrarlo: desmarcar la casilla, escribir el aviso que tiene que ver la gente y **Guardar**. Lo mismo sirve para cerrar el Frente por un tiempo (por ejemplo, en vacaciones). La página muestra el aviso una vez por visita y el botón del espacio dice "No disponible"; el servidor rechaza cualquier reserva en un espacio cerrado.
 
@@ -181,9 +184,9 @@ Para volver a cerrarlo: desmarcar la casilla, escribir el aviso que tiene que ve
 
 ## 10. Base de datos
 
-La estructura completa está en [`esquema-base-de-datos.sql`](esquema-base-de-datos.sql): 9 tablas (`espacios`, `reservas`, `bloqueos`, `meses_habilitados`, `reportes_errores`, `registro_actividad`, `configuracion`, `lista_espera` y `cancelaciones`, que está en desuso). Los cambios que se le hicieron a una base ya existente quedan como archivos `migracion-*.sql` ([`migracion-admin-supremo.sql`](migracion-admin-supremo.sql) y [`migracion-funciones-octubre.sql`](migracion-funciones-octubre.sql), aplicadas el 11/10/2026); `esquema-base-de-datos.sql` ya los incluye.
+La estructura completa está en [`esquema-base-de-datos.sql`](esquema-base-de-datos.sql): 9 tablas (`espacios`, `reservas`, `bloqueos`, `meses_habilitados`, `reportes_errores`, `registro_actividad`, `configuracion`, `lista_espera` y `cancelaciones`, que está en desuso). Los cambios que se le hicieron a una base ya existente quedan como archivos `migracion-*.sql` ([`migracion-admin-supremo.sql`](migracion-admin-supremo.sql), [`migracion-funciones-octubre.sql`](migracion-funciones-octubre.sql) y [`migracion-acompanantes-y-lista-espera.sql`](migracion-acompanantes-y-lista-espera.sql), del 11/10/2026); `esquema-base-de-datos.sql` ya los incluye.
 
-**Tareas automáticas:** cada 5 minutos el servidor abre los meses programados, manda los recordatorios del día, borra la lista de espera de días pasados, relee la configuración y manda las alertas pendientes (ver `tareasPeriodicas()` en `server.js`). Funciona porque UptimeRobot mantiene el servidor despierto.
+**Tareas automáticas:** cada 5 minutos el servidor abre los meses programados, manda los recordatorios del día, limpia la lista de espera vieja, relee la configuración y manda las alertas pendientes (ver `tareasPeriodicas()` en `server.js`). Funciona porque UptimeRobot mantiene el servidor despierto.
 
 Protecciones que viven en la base (además de las del servidor):
 - **`no_solapamiento_activo`:** dos reservas activas del mismo espacio no pueden superponerse, aunque lleguen al mismo instante.

@@ -27,9 +27,9 @@ const DIAS_SEMANA = ['Domingo', 'Lunes', 'Martes', 'Miércoles', 'Jueves', 'Vier
 const MESES = ['Enero', 'Febrero', 'Marzo', 'Abril', 'Mayo', 'Junio', 'Julio', 'Agosto', 'Septiembre', 'Octubre', 'Noviembre', 'Diciembre'];
 const PATRON_HOJA_MES = new RegExp('^(' + MESES.join('|') + ') \\d{4}$'); // "Octubre 2026"
 const COLUMNAS = ['N°', 'Fecha', 'Día', 'Espacio', 'Turno', 'Inicio', 'Fin', 'Nombre', 'Celular', 'Email', 'Motivo',
-  'Estado', 'Prioridad', 'Asistencia', 'Creada', 'Cancelada', 'Cancelada por', 'Motivo de cancelación'];
+  'Acompañantes', 'Estado', 'Prioridad', 'Asistencia', 'Creada', 'Cancelada', 'Cancelada por', 'Motivo de cancelación'];
 const COL_FECHA = 2;
-const COL_FECHA_HORA = [15, 16];
+const COL_FECHA_HORA = [16, 17];
 
 // ---------- Menú ----------
 function onOpen() {
@@ -141,6 +141,7 @@ function armarFilasReservas(reservas, fechaDesdeTexto, fechaHoraDesdeIso) {
     comoTexto(r.celular),
     comoTexto(r.email),
     comoTexto(r.motivo),
+    comoTexto(r.acompanantes), // "Ana Pérez (0981 111 222), ..." (vacío si no hay)
     r.estado === 'cancelada' ? 'Cancelada' : 'Activa',
     r.prioridad ? 'Sí' : 'No',
     r.asistencia === 'vino' ? 'Vino' : r.asistencia === 'no_vino' ? 'No vino' : '',

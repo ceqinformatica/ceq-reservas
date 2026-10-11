@@ -218,6 +218,39 @@ async function cargarConfiguracion() {
   config = nueva;
 }
 
+// Motivos del Frente: la persona elige uno de la lista (en el Altillo el motivo sigue siendo libre)
+const MOTIVOS_FRENTE = [
+  'Actividad Personal',
+  'Recaudación - Asociación Estudiantil',
+  'Recaudación - Secretaría CEQ',
+  'Recaudación - Padrinaje',
+  'Recaudación - Congreso o Evento Académico'
+];
+
+// Altillo: bloques de 1 hora entre las 08:00 y las 20:00, de 1 a 2 horas por reserva
+const ALTILLO_HORA_DESDE = 8;
+const ALTILLO_HORA_HASTA = 20;
+const ALTILLO_MAX_HORAS = 2;
+
+// Acompañantes (opcional, hasta 4, solo en el Altillo): [{ nombre, celular }]. Devuelve la lista limpia o lanza un
+// Error con el mensaje para la persona.
+const MAX_ACOMPANANTES = 4;
+function validarAcompanantes(valor) {
+  if (valor === undefined || valor === null) return [];
+  if (!Array.isArray(valor) || valor.length > MAX_ACOMPANANTES) throw new Error(`Se pueden anotar hasta ${MAX_ACOMPANANTES} acompañantes`);
+  return valor.map((a, i) => {
+    const nombre = String(a && a.nombre || '').trim();
+    const celular = String(a && a.celular || '').trim();
+    if (nombre.length < 2 || nombre.length > 100) throw new Error(`Escribí el nombre del acompañante ${i + 1}`);
+    if (celular.length > 30 || celular.replace(/\D/g, '').length < 6) throw new Error(`Escribí un celular válido para el acompañante ${i + 1}`);
+    return { nombre, celular };
+  });
+}
+
+function acompanantesTexto(lista) {
+  return (Array.isArray(lista) ? lista : []).map(a => `${a.nombre} (${a.celular})`).join(', ');
+}
+
 // Nombre del turno del Frente para un horario ("Desayuno"), o '' si no coincide con ninguno
 function nombreTurnoFrente(horaInicioHHMM, horaFinHHMM) {
   const turno = config.turnos_frente.find(t => t.inicio === horaInicioHHMM && t.fin === horaFinHHMM);
@@ -932,7 +965,10 @@ app.get('/api/configuracion', lecturaPublicaLimiter, (req, res) => {
   res.json({
     turnos_frente: config.turnos_frente,
     max_reservas_por_persona_mes: config.max_reservas_por_persona_mes,
-    contacto_frente: { email: config.contacto_email_frente, whatsapp: config.contacto_whatsapp_frente }
+    contacto_frente: { email: config.contacto_email_frente, whatsapp: config.contacto_whatsapp_frente },
+    motivos_frente: MOTIVOS_FRENTE,
+    altillo: { hora_desde: ALTILLO_HORA_DESDE, hora_hasta: ALTILLO_HORA_HASTA, max_horas: ALTILLO_MAX_HORAS },
+    max_acompanantes: MAX_ACOMPANANTES
   });
 });
 
@@ -1008,17 +1044,30 @@ app.post('/api/reservas', crearReservaLimiter, async (req, res) => {
       if (!nombreTurnoFrente(hora_inicio, hora_fin)) {
         return res.status(400).json({ error: `Turno inválido para Frente. Los turnos son: ${listaTurnosFrenteTexto()}` });
       }
+      if (!MOTIVOS_FRENTE.includes(String(motivo).trim())) {
+        return res.status(400).json({ error: 'Elegí el motivo de la lista' });
+      }
     } else {
-      // Altillo: selección libre de horas dentro del rango, entre 1 y 3 horas
+      // Altillo: bloques de 1 hora entre las 08:00 y las 20:00, de 1 a 2 horas
       const duracionHoras = (finMin - inicioMin) / 60;
-      if (duracionHoras < 1 || duracionHoras > 3) {
-        return res.status(400).json({ error: 'La duración debe ser entre 1 y 3 horas' });
+      if (duracionHoras < 1 || duracionHoras > ALTILLO_MAX_HORAS) {
+        return res.status(400).json({ error: `La duración debe ser entre 1 y ${ALTILLO_MAX_HORAS} horas` });
       }
 
-      const horaMinimaPermitida = 8;
-      if (horaIniH < horaMinimaPermitida || horaFinH > 18 || (horaFinH === 18 && horaFinM > 0)) {
-        return res.status(400).json({ error: `Horario fuera de rango (${horaMinimaPermitida}:00-18:00)` });
+      if (inicioMin < ALTILLO_HORA_DESDE * 60 || finMin > ALTILLO_HORA_HASTA * 60) {
+        return res.status(400).json({ error: `Horario fuera de rango (${String(ALTILLO_HORA_DESDE).padStart(2, '0')}:00-${ALTILLO_HORA_HASTA}:00)` });
       }
+    }
+
+    // Acompañantes: solo en el Altillo
+    let acompanantes;
+    try {
+      acompanantes = validarAcompanantes(req.body.acompanantes);
+    } catch (err) {
+      return res.status(400).json({ error: err.message });
+    }
+    if (espacioIdNum !== 1 && acompanantes.length > 0) {
+      return res.status(400).json({ error: 'Los acompañantes se anotan solo en las reservas del Altillo' });
     }
 
     // La fecha no puede ser pasada ni caer en fin de semana. El límite superior ya
@@ -1081,10 +1130,13 @@ app.post('/api/reservas', crearReservaLimiter, async (req, res) => {
       }
     }
 
-    // VAL-001: si la reserva es para hoy, el horario de inicio no puede ya haber pasado
+    // VAL-001: si la reserva es para hoy, el horario no puede haber pasado. En el Frente, el
+    // turno no puede haber empezado; en el Altillo, el primer bloque de 1 hora no puede haber
+    // terminado (a las 11:30 todavía se puede tomar el bloque de las 11:00, a las 12:00 ya no).
     if (fechaReserva.getTime() === hoy.getTime()) {
       const minutosActuales = horaActualEnAsuncionEnMinutos();
-      if (inicioMin <= minutosActuales) {
+      const limite = espacioIdNum === 3 ? inicioMin : inicioMin + 60;
+      if (limite <= minutosActuales) {
         return res.status(400).json({ error: 'No se puede reservar un horario que ya pasó' });
       }
     }
@@ -1129,8 +1181,9 @@ app.post('/api/reservas', crearReservaLimiter, async (req, res) => {
         hora_inicio: hora_inicio + ':00',
         hora_fin: hora_fin + ':00',
         estado: 'activa',
-        motivo: motivo || '',
-        codigo_cancelacion_hash: codigoHash
+        motivo: String(motivo || '').trim(),
+        codigo_cancelacion_hash: codigoHash,
+        acompanantes
       }])
       .select();
     
@@ -1190,7 +1243,8 @@ app.post('/api/reservas', crearReservaLimiter, async (req, res) => {
             <li><strong>Espacio:</strong> ${nombreEspacio}</li>
             <li><strong>Fecha:</strong> ${fecha}</li>
             <li><strong>Horario:</strong> ${descripcionHorario(espacioIdNum, hora_inicio, hora_fin)}</li>
-            <li><strong>Motivo:</strong> ${motivoSeguro || 'Sin especificar'}</li>
+            <li><strong>Motivo:</strong> ${motivoSeguro || 'Sin especificar'}</li>${acompanantes.length ? `
+            <li><strong>Acompañantes:</strong> ${escapeHtml(acompanantesTexto(acompanantes))}</li>` : ''}
             <li><strong>Código de cancelación:</strong> ${codigo}</li>
           </ul>
           <p>Si necesitas cancelar, usa tu código en: <a href="https://reservas.ceq-una.com/cancelar.html">Cancelar Reserva</a>, o directamente este enlace: <a href="${enlaceCancelacion(reservaId)}">Cancelar mi reserva</a></p>
@@ -1215,7 +1269,8 @@ app.post('/api/reservas', crearReservaLimiter, async (req, res) => {
           <li><strong>Espacio:</strong> ${nombreEspacio}</li>
           <li><strong>Fecha:</strong> ${fecha}</li>
           <li><strong>Horario:</strong> ${descripcionHorario(espacioIdNum, hora_inicio, hora_fin)}</li>
-          <li><strong>Motivo:</strong> ${motivoSeguro || 'Sin especificar'}</li>
+          <li><strong>Motivo:</strong> ${motivoSeguro || 'Sin especificar'}</li>${acompanantes.length ? `
+            <li><strong>Acompañantes:</strong> ${escapeHtml(acompanantesTexto(acompanantes))}</li>` : ''}
           <li><strong>Código:</strong> ${codigo}</li>
         </ul>
       `
@@ -1431,13 +1486,14 @@ app.post('/api/cancelar-por-enlace', cancelarLimiter, async (req, res) => {
   }
 });
 
-// ========== LISTA DE ESPERA ==========
-// Si un día está lleno, la persona deja su correo y elige los turnos que le interesan. Si alguien
-// cancela uno de esos turnos, se avisa a todos los anotados a la vez (el lugar es de quien
-// reserve primero). Cada inscripción se avisa una sola vez. Un día completo (Altillo) se guarda
-// como 00:00-23:59, igual que en bloqueos. Las inscripciones de días pasados se borran solas.
-const MAX_INSCRIPCIONES_POR_CORREO = 10;
+// ========== LISTA DE ESPERA (general, por espacio) ==========
+// Cuando en un espacio ya no queda ningún lugar libre en los meses habilitados, la página muestra
+// "Ya no hay reservas disponibles" y la persona puede dejar su correo. Si después alguien cancela
+// cualquier reserva de ese espacio (de un horario que todavía no empezó), se avisa a todos los
+// anotados a la vez, diciendo qué día y turno se liberó (el lugar es de quien reserve primero).
+// Cada inscripción se avisa una sola vez; para otro aviso hay que volver a anotarse.
 const MAX_AVISOS_LISTA_ESPERA_POR_DIA = 60; // dentro de los 300 correos diarios de Brevo
+const DIAS_VIGENCIA_LISTA_ESPERA = 60; // las inscripciones sin avisar más viejas se borran solas
 let avisosListaEsperaHoy = { dia: '', cantidad: 0 };
 
 function puedeAvisarListaEspera() {
@@ -1458,7 +1514,7 @@ function horarioYaEmpezo(fechaISO, horaInicioHHMM) {
 
 app.post('/api/lista-espera', listaEsperaLimiter, async (req, res) => {
   try {
-    const { espacio_id, fecha, turnos, email } = req.body || {};
+    const { espacio_id, email } = req.body || {};
     const correo = String(email || '').trim().toLowerCase();
     if (!EMAIL_REGEX.test(correo) || correo.length > 100) {
       return res.status(400).json({ error: 'Escribí un correo válido' });
@@ -1467,11 +1523,6 @@ app.post('/api/lista-espera', listaEsperaLimiter, async (req, res) => {
     if (![1, 3].includes(espacioIdNum)) {
       return res.status(400).json({ error: 'Espacio inválido' });
     }
-    const fechaObj = new Date(String(fecha) + 'T00:00:00Z');
-    if (typeof fecha !== 'string' || !/^\d{4}-\d{2}-\d{2}$/.test(fecha) || isNaN(fechaObj.getTime()) ||
-        diferenciaEnDiasCalendario(fecha) < 0 || fechaObj.getUTCDay() === 0 || fechaObj.getUTCDay() === 6) {
-      return res.status(400).json({ error: 'Fecha inválida' });
-    }
 
     const { data: espacioData, error: errorEspacio } = await supabase
       .from('espacios').select('publico').eq('id', espacioIdNum).maybeSingle();
@@ -1479,65 +1530,15 @@ app.post('/api/lista-espera', listaEsperaLimiter, async (req, res) => {
     if (!espacioData || !espacioData.publico) {
       return res.status(400).json({ error: 'Ese espacio no se puede reservar por el momento' });
     }
-    const { data: mesData, error: errorMes } = await supabase
-      .from('meses_habilitados').select('habilitado, abrir_en')
-      .eq('anio', fechaObj.getUTCFullYear()).eq('mes', fechaObj.getUTCMonth() + 1).maybeSingle();
-    if (errorMes) throw errorMes;
-    if (!mesEstaAbierto(mesData)) {
-      return res.status(400).json({ error: 'Ese mes todavía no está habilitado para reservas' });
-    }
 
-    let horarios;
-    if (espacioIdNum === 3) {
-      if (!Array.isArray(turnos) || turnos.length === 0 || turnos.length > 5) {
-        return res.status(400).json({ error: 'Elegí al menos un turno' });
-      }
-      horarios = [];
-      for (const t of turnos) {
-        const inicio = String(t && t.inicio || ''), fin = String(t && t.fin || '');
-        const nombre = nombreTurnoFrente(inicio, fin);
-        if (!nombre) return res.status(400).json({ error: 'Turno inválido' });
-        if (!horarios.some(h => h.inicio === inicio)) horarios.push({ inicio, fin, nombre });
-      }
-      // Cada turno tiene que estar tomado por una reserva: si está libre, conviene reservarlo
-      const { data: ocupadas, error: errorOcupadas } = await supabase
-        .from('reservas').select('hora_inicio, hora_fin')
-        .eq('espacio_id', 3).eq('fecha', fecha).eq('estado', 'activa');
-      if (errorOcupadas) throw errorOcupadas;
-      for (const h of horarios) {
-        if (horarioYaEmpezo(fecha, h.inicio)) {
-          return res.status(400).json({ error: `El turno ${h.nombre} ya empezó` });
-        }
-        const tomado = (ocupadas || []).some(o => o.hora_inicio.substring(0, 5) === h.inicio && o.hora_fin.substring(0, 5) === h.fin);
-        if (!tomado) {
-          return res.status(409).json({ error: `El turno ${h.nombre} está libre: podés reservarlo ahora` });
-        }
-      }
-    } else {
-      horarios = [{ inicio: '00:00', fin: '23:59' }];
-    }
-
-    const { data: pendientes, error: errorPendientes } = await supabase
-      .from('lista_espera').select('id')
-      .eq('email', correo).is('avisado_en', null)
-      .gte('fecha', hoyEnAsuncion().toISOString().slice(0, 10))
-      .limit(MAX_INSCRIPCIONES_POR_CORREO + 5);
-    if (errorPendientes) throw errorPendientes;
-    if ((pendientes || []).length + horarios.length > MAX_INSCRIPCIONES_POR_CORREO) {
-      return res.status(400).json({ error: `Ya tenés muchas inscripciones en lista de espera con ese correo (máximo ${MAX_INSCRIPCIONES_POR_CORREO})` });
-    }
-
-    // Si ya estaba anotado (por ejemplo, lo avisaron antes y el turno se volvió a llenar), se
-    // reactiva la inscripción
+    // Si ya estaba anotado (por ejemplo, lo avisaron antes y se volvió a llenar), se reactiva
     const { error: errorGuardar } = await supabase
       .from('lista_espera')
-      .upsert(horarios.map(h => ({
-        espacio_id: espacioIdNum, fecha, hora_inicio: h.inicio + ':00', hora_fin: h.fin + ':00',
-        email: correo, creado_en: new Date().toISOString(), avisado_en: null
-      })), { onConflict: 'espacio_id,fecha,hora_inicio,hora_fin,email' });
+      .upsert({ espacio_id: espacioIdNum, email: correo, creado_en: new Date().toISOString(), avisado_en: null },
+        { onConflict: 'espacio_id,email' });
     if (errorGuardar) throw errorGuardar;
 
-    res.status(201).json({ mensaje: 'Listo: si se libera un lugar, te avisamos por correo.', inscripciones: horarios.length });
+    res.status(201).json({ mensaje: 'Listo: si se libera un lugar, te avisamos por correo.' });
   } catch (error) {
     manejarError(res, error);
   }
@@ -1550,40 +1551,31 @@ async function avisarListaEspera(reserva) {
     const fin = reserva.hora_fin.substring(0, 5);
     if (horarioYaEmpezo(reserva.fecha, inicio)) return;
 
-    const { data, error } = await supabase
-      .from('lista_espera').select('id, hora_inicio, hora_fin')
-      .eq('espacio_id', reserva.espacio_id).eq('fecha', reserva.fecha).is('avisado_en', null);
-    if (error) throw error;
-    const ids = (data || []).filter(e => {
-      const eIni = e.hora_inicio.substring(0, 5), eFin = e.hora_fin.substring(0, 5);
-      return (eIni === inicio && eFin === fin) || (eIni === '00:00' && eFin === '23:59');
-    }).map(e => e.id);
-    if (ids.length === 0) return;
-
     // Se marcan como avisadas ANTES de mandar: si llegan dos cancelaciones juntas, nadie
     // recibe dos avisos por la misma inscripción
-    const { data: tomadas, error: errorTomar } = await supabase
+    const { data: tomadas, error } = await supabase
       .from('lista_espera').update({ avisado_en: new Date().toISOString() })
-      .in('id', ids).is('avisado_en', null).select('email');
-    if (errorTomar) throw errorTomar;
+      .eq('espacio_id', reserva.espacio_id).is('avisado_en', null).select('email');
+    if (error) throw error;
+    if (!tomadas || tomadas.length === 0) return;
 
     const espacio = getEspacioNombre(reserva.espacio_id);
     const horario = descripcionHorario(reserva.espacio_id, inicio, fin);
     const enlace = `https://reservas.ceq-una.com/?fecha=${reserva.fecha}&espacio=${Number(reserva.espacio_id)}`;
-    for (const correo of [...new Set((tomadas || []).map(x => x.email))]) {
+    for (const correo of [...new Set(tomadas.map(x => x.email))]) {
       if (!puedeAvisarListaEspera()) {
         console.warn('⚠️ Se alcanzó el tope diario de avisos de lista de espera');
         break;
       }
       enviarEmail({
         to: correo,
-        subject: `🔔 Se liberó un lugar: ${espacio}, ${fechaLarga(reserva.fecha)} - CEQ`,
+        subject: `🔔 Se liberó un lugar en el ${espacio} - CEQ`,
         html: `
           <h2>¡Se liberó un lugar!</h2>
           <p>Alguien canceló su reserva del <strong>${espacio}</strong> para el <strong>${fechaLarga(reserva.fecha)}</strong>, <strong>${horario}</strong>.</p>
-          <p>Si todavía lo querés, reservalo cuanto antes: el lugar es de quien reserve primero.</p>
+          <p>Si te sirve, reservalo cuanto antes: el lugar es de quien reserve primero.</p>
           <p><a href="${enlace}" style="display:inline-block;background:#1F3A68;color:#ffffff;padding:10px 18px;border-radius:6px;text-decoration:none;font-weight:bold">Reservar ahora</a></p>
-          <p style="color:#888;font-size:12px;">Te escribimos porque te anotaste en la lista de espera de ese turno. Este es el único aviso por esa inscripción.</p>
+          <p style="color:#888;font-size:12px;">Te escribimos porque te anotaste para que te avisemos cuando hubiera un lugar libre en el ${espacio}. Este es el único aviso: si querés otro, volvé a anotarte en la página.</p>
           <p>Centro de Estudiantes de Química</p>
         `
       });
@@ -2583,7 +2575,7 @@ app.get('/api/sincronizacion/reservas', sincronizacionLimiter, async (req, res) 
   try {
     const filas = await leerTodasLasFilas(() => supabase
       .from('reservas')
-      .select('id, espacio_id, fecha, hora_inicio, hora_fin, nombre_solicitante, contacto, motivo, estado, reservado_por_admin, created_at, cancelada_en, cancelada_por, motivo_cancelacion, asistencia')
+      .select('id, espacio_id, fecha, hora_inicio, hora_fin, nombre_solicitante, contacto, motivo, estado, reservado_por_admin, created_at, cancelada_en, cancelada_por, motivo_cancelacion, asistencia, acompanantes')
       .order('fecha', { ascending: true })
       .order('hora_inicio', { ascending: true })
       .order('id', { ascending: true }));
@@ -2606,6 +2598,7 @@ app.get('/api/sincronizacion/reservas', sincronizacionLimiter, async (req, res) 
         estado: r.estado,
         prioridad: r.reservado_por_admin === true,
         asistencia: r.asistencia || '',
+        acompanantes: acompanantesTexto(r.acompanantes),
         creada_en: aIsoUtc(r.created_at),
         cancelada_en: aIsoUtc(r.cancelada_en),
         cancelada_por: r.cancelada_por || '',
@@ -2731,13 +2724,15 @@ async function enviarRecordatorios() {
   }
 }
 
-// Las inscripciones a la lista de espera de días que ya pasaron no sirven más: se borran
+// Lista de espera: se borran las inscripciones ya avisadas hace más de 7 días y las que siguen
+// sin avisar después de DIAS_VIGENCIA_LISTA_ESPERA días
 async function limpiarListaEspera() {
-  const { error } = await supabase
-    .from('lista_espera')
-    .delete()
-    .lt('fecha', hoyEnAsuncion().toISOString().slice(0, 10));
+  const haceDias = d => new Date(Date.now() - d * 86400000).toISOString();
+  const { error } = await supabase.from('lista_espera').delete().lt('avisado_en', haceDias(7));
   if (error) throw error;
+  const { error: error2 } = await supabase.from('lista_espera').delete()
+    .is('avisado_en', null).lt('creado_en', haceDias(DIAS_VIGENCIA_LISTA_ESPERA));
+  if (error2) throw error2;
 }
 
 // Correo de alerta (admin supremo > Configuración > correo de alertas) si hubo errores del

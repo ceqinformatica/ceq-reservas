@@ -2,8 +2,8 @@
 -- Sistema de Reservas del CEQ - Estructura de la base de datos (Supabase / PostgreSQL 17)
 -- =====================================================================
 -- Exportado del proyecto de producción el 11/10/2026 (DB-001 de la auditoría técnica),
--- actualizado con las migraciones del mismo día (migracion-admin-supremo.sql y
--- migracion-funciones-octubre.sql).
+-- actualizado con las migraciones del mismo día (migracion-admin-supremo.sql,
+-- migracion-funciones-octubre.sql y migracion-acompanantes-y-lista-espera.sql).
 -- Contiene SOLO la estructura (tablas, reglas, triggers y seguridad) y los 3 espacios.
 -- No contiene reservas ni datos personales.
 --
@@ -47,6 +47,7 @@ create table public.espacios (
 --   'admin supremo') y por qué se canceló. Vacías en las canceladas antes del 11/10/2026.
 -- recordatorio_enviado_en: cuándo se mandó el recordatorio de 2 días antes (una sola vez).
 -- asistencia: 'vino' o 'no_vino', lo marca un moderador en el panel (vacía = sin marcar).
+-- acompanantes: hasta 4, solo en el Altillo, [{"nombre","celular"}]; no se muestran en el calendario público.
 -- ---------------------------------------------------------------------
 create table public.reservas (
   id                      bigint generated always as identity primary key,
@@ -69,8 +70,11 @@ create table public.reservas (
   motivo_cancelacion      text,
   recordatorio_enviado_en timestamptz,
   asistencia              text,
+  acompanantes            jsonb not null default '[]'::jsonb,
 
   constraint reservas_asistencia_valida check (asistencia is null or asistencia in ('vino', 'no_vino')),
+  constraint reservas_acompanantes_validos check (jsonb_typeof(acompanantes) = 'array' and jsonb_array_length(acompanantes) <= 4
+                                                   and (espacio_id = 1 or jsonb_array_length(acompanantes) = 0)),
 
   -- Garantía principal del sistema: dos reservas ACTIVAS del mismo espacio no pueden
   -- superponerse en el tiempo. La base lo rechaza aunque lleguen al mismo instante
@@ -139,22 +143,18 @@ create table public.meses_habilitados (
 );
 
 -- ---------------------------------------------------------------------
--- LISTA DE ESPERA: correos para avisar si se libera un turno que estaba lleno.
--- Un día completo (Altillo) se guarda como 00:00-23:59, igual que en bloqueos.
+-- LISTA DE ESPERA (general, por espacio): correos para avisar si se libera cualquier lugar
+-- cuando el espacio ya no tenía ninguno. Una inscripción por correo y espacio.
 -- avisado_en: cuándo se avisó (cada inscripción se avisa una sola vez).
 -- ---------------------------------------------------------------------
 create table public.lista_espera (
   id          bigint generated always as identity primary key,
   espacio_id  bigint not null references public.espacios(id),
-  fecha       date not null,
-  hora_inicio time not null,
-  hora_fin    time not null,
   email       text not null,
   creado_en   timestamptz not null default now(),
   avisado_en  timestamptz,
-  unique (espacio_id, fecha, hora_inicio, hora_fin, email)
+  unique (espacio_id, email)
 );
-create index idx_lista_espera_dia on public.lista_espera (espacio_id, fecha);
 
 -- ---------------------------------------------------------------------
 -- REGISTRO DE ACTIVIDAD del panel (admin supremo > Avanzado > Actividad), sin datos personales
