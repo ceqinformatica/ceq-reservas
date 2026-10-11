@@ -38,7 +38,20 @@ function escapeHtml(texto) {
 // No exponer error.message crudo: puede filtrar nombres de tablas/columnas/constraints de Supabase.
 function manejarError(res, error, mensajePublico = 'Error interno del servidor', status = 500) {
   console.error('❌ Error interno:', error);
+  if (status >= 500) {
+    const ruta = res.req ? `${res.req.method} ${res.req.originalUrl.split('?')[0]}` : '';
+    anotarAlerta('error', `${ruta}: ${(error && (error.message || error.code)) || error}`);
+  }
   res.status(status).json({ error: mensajePublico });
+}
+
+// Errores 500 y bloqueos 429 que todavía no se avisaron por correo (ver enviarAlertas, que
+// manda como máximo un correo por hora y solo si pasó algo). Viven en memoria: si el servidor
+// se reinicia se pierden, pero eso no pasa seguido y los registros de Render los tienen igual.
+const alertasPendientes = { errores: [], bloqueos429: [] };
+function anotarAlerta(tipo, detalle) {
+  const lista = tipo === '429' ? alertasPendientes.bloqueos429 : alertasPendientes.errores;
+  if (lista.length < 200) lista.push({ momento: new Date(), detalle: String(detalle).slice(0, 300) });
 }
 
 // Valida que un valor sea un entero positivo (para IDs de path params) (API-003)
@@ -123,15 +136,107 @@ function getEmailModerador(espacio_id) {
   return [EMAIL_MODERADOR];
 }
 
-// Contacto público que se muestra al reservante para consultas sobre Frente
-const CONTACTO_EMAIL_FRENTE = 'Monsegonza511@gmail.com';
-const CONTACTO_WHATSAPP_FRENTE = '595972753471'; // formato wa.me: código de país + número, sin +, espacios ni guiones
+// ========== CONFIGURACIÓN EDITABLE (admin supremo > Avanzado > Configuración) ==========
+// Turnos del Frente, límite por persona, contacto del Frente y correo de alertas. Antes estaban
+// fijos en el código. Estos son los valores por defecto (los de siempre): si en la tabla
+// configuracion hay otro valor guardado desde el panel, se usa ese. Se guarda en memoria (el
+// servidor corre en una sola instancia) y se recarga al guardar desde el panel y cada 5 minutos.
+const CONFIG_POR_DEFECTO = {
+  turnos_frente: [
+    { nombre: 'Desayuno', inicio: '07:00', fin: '10:00' },
+    { nombre: 'Almuerzo', inicio: '10:00', fin: '13:00' },
+    { nombre: 'Merienda', inicio: '14:00', fin: '18:00' }
+  ],
+  max_reservas_por_persona_mes: 2,
+  contacto_email_frente: 'Monsegonza511@gmail.com',
+  contacto_whatsapp_frente: '595972753471', // formato wa.me: código de país + número, sin +, espacios ni guiones
+  email_alertas: EMAIL_MODERADOR
+};
+let config = { ...CONFIG_POR_DEFECTO };
+
+// Valida cada valor de configuración. Devuelve el valor normalizado o lanza un Error con un
+// mensaje para mostrar en el panel. Se usa al guardar desde el panel y al leer de la base.
+const EMAIL_REGEX = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+const VALIDADORES_CONFIG = {
+  turnos_frente(valor) {
+    if (!Array.isArray(valor) || valor.length < 1 || valor.length > 5) throw new Error('Tiene que haber entre 1 y 5 turnos');
+    const turnos = valor.map(t => ({
+      nombre: String(t && t.nombre || '').trim(),
+      inicio: String(t && t.inicio || ''),
+      fin: String(t && t.fin || '')
+    }));
+    const minutos = hhmm => { const [h, m] = hhmm.split(':').map(Number); return h * 60 + m; };
+    turnos.forEach(t => {
+      if (!t.nombre || t.nombre.length > 20) throw new Error('Cada turno necesita un nombre de hasta 20 caracteres');
+      if (!/^([01]\d|2[0-3]):[0-5]\d$/.test(t.inicio) || !/^([01]\d|2[0-3]):[0-5]\d$/.test(t.fin)) throw new Error(`Horario inválido en "${t.nombre}" (usá HH:MM)`);
+      if (minutos(t.inicio) < 6 * 60 || minutos(t.fin) > 22 * 60) throw new Error(`"${t.nombre}" tiene que estar entre las 06:00 y las 22:00`);
+      if (minutos(t.inicio) >= minutos(t.fin)) throw new Error(`En "${t.nombre}" la hora de inicio tiene que ser anterior a la de fin`);
+    });
+    turnos.sort((a, b) => minutos(a.inicio) - minutos(b.inicio));
+    turnos.forEach((t, i) => {
+      if (i > 0 && minutos(t.inicio) < minutos(turnos[i - 1].fin)) throw new Error(`"${turnos[i - 1].nombre}" y "${t.nombre}" se superponen`);
+    });
+    if (new Set(turnos.map(t => t.nombre.toLowerCase())).size !== turnos.length) throw new Error('Dos turnos no pueden tener el mismo nombre');
+    return turnos;
+  },
+  max_reservas_por_persona_mes(valor) {
+    const n = Number(valor);
+    if (!Number.isInteger(n) || n < 1 || n > 20) throw new Error('El límite por persona tiene que ser un número entre 1 y 20');
+    return n;
+  },
+  contacto_email_frente(valor) {
+    const email = String(valor || '').trim();
+    if (!EMAIL_REGEX.test(email) || email.length > 100) throw new Error('El correo de contacto del Frente no es válido');
+    return email;
+  },
+  contacto_whatsapp_frente(valor) {
+    const numero = String(valor || '').replace(/\D/g, '');
+    if (numero.length < 8 || numero.length > 15) throw new Error('El WhatsApp tiene que ser el número con código de país, por ejemplo 595981123456');
+    return numero;
+  },
+  email_alertas(valor) {
+    const email = String(valor || '').trim();
+    if (!EMAIL_REGEX.test(email) || email.length > 100) throw new Error('El correo para las alertas no es válido');
+    return email;
+  }
+};
+
+async function cargarConfiguracion() {
+  const { data, error } = await supabase
+    .from('configuracion')
+    .select('clave, valor')
+    .in('clave', Object.keys(VALIDADORES_CONFIG));
+  if (error) throw error;
+  const nueva = { ...CONFIG_POR_DEFECTO };
+  (data || []).forEach(({ clave, valor }) => {
+    try {
+      nueva[clave] = VALIDADORES_CONFIG[clave](clave === 'turnos_frente' ? JSON.parse(valor) : valor);
+    } catch (err) {
+      console.error(`⚠️ Configuración "${clave}" inválida en la base, se usa el valor por defecto:`, err.message);
+    }
+  });
+  config = nueva;
+}
+
+// Nombre del turno del Frente para un horario ("Desayuno"), o '' si no coincide con ninguno
+function nombreTurnoFrente(horaInicioHHMM, horaFinHHMM) {
+  const turno = config.turnos_frente.find(t => t.inicio === horaInicioHHMM && t.fin === horaFinHHMM);
+  return turno ? turno.nombre : '';
+}
+
+function listaTurnosFrenteTexto() {
+  return config.turnos_frente.map(t => `${t.nombre} (${t.inicio}-${t.fin})`).join(', ');
+}
+
+function enlaceWhatsappFrente() {
+  return `https://wa.me/${config.contacto_whatsapp_frente}`;
+}
 
 // Devuelve el HTML de la línea de contacto a mostrarle al usuario según el espacio.
 // Frente: email de contacto + WhatsApp. Altillo: solo el email general del moderador.
 function getContactoLineaHtml(espacio_id) {
-  if (espacio_id === 3) {
-    return `${CONTACTO_EMAIL_FRENTE} o por <a href="https://wa.me/${CONTACTO_WHATSAPP_FRENTE}">WhatsApp</a>`;
+  if (Number(espacio_id) === 3) {
+    return `${escapeHtml(config.contacto_email_frente)} o por <a href="${enlaceWhatsappFrente()}">WhatsApp</a>`;
   }
   return `${EMAIL_MODERADOR}`;
 }
@@ -232,6 +337,7 @@ function obtenerIpCliente(req) {
 // señal de que Render dejó de mandar cf-connecting-ip y hay que revisar obtenerIpCliente().
 function registrar429(req, res, next, options) {
   console.warn(`⚠️ 429 rate limit: IP ${obtenerIpCliente(req)} en ${req.method} ${req.originalUrl}`);
+  anotarAlerta('429', `${obtenerIpCliente(req)}|${req.method} ${req.originalUrl.split('?')[0]}`);
   res.status(options.statusCode).json(options.message);
 }
 
@@ -277,6 +383,16 @@ const reportesLimiter = rateLimit({
   standardHeaders: true,
   legacyHeaders: false,
   message: { error: 'Demasiados reportes enviados. Probá de nuevo más tarde.' }
+});
+
+const listaEsperaLimiter = rateLimit({
+  windowMs: 60 * 60 * 1000,
+  max: 15,
+  keyGenerator: obtenerIpCliente,
+  handler: registrar429,
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { error: 'Demasiadas inscripciones seguidas. Probá de nuevo más tarde.' }
 });
 
 // Límite genérico para endpoints públicos de solo lectura (más permisivo, pero
@@ -339,8 +455,8 @@ function aIsoUtc(valor) {
   return isNaN(fecha) ? null : fecha.toISOString();
 }
 
-// Máximo de reservas activas por persona por mes (formulario público)
-const MAX_RESERVAS_POR_PERSONA_MES = 2;
+// El máximo de reservas activas por persona por mes (formulario público) ahora está en
+// config.max_reservas_por_persona_mes (se cambia desde el panel del admin supremo).
 
 // Emails exentos del límite anterior (ej. el de quien hace pruebas del sistema).
 // Se configuran en Render como variable de entorno, separados por coma:
@@ -374,17 +490,13 @@ function getEspacioNombre(id) {
 // horario libre como Altillo. En vez de mostrar solo el rango crudo "07:00 - 10:00" en
 // emails y en el detalle del día, se muestra el nombre del turno junto con el rango, para
 // que quede claro qué momento del día y qué horario exacto puede usar la persona.
-// Recibe horaInicio/horaFin ya recortadas a "HH:MM" (sin segundos).
-const NOMBRES_TURNOS_FRENTE = {
-  '07:00-10:00': 'Desayuno',
-  '10:00-13:00': 'Almuerzo',
-  '14:00-18:00': 'Merienda'
-};
-
+// Recibe horaInicio/horaFin ya recortadas a "HH:MM" (sin segundos). Los turnos salen de la
+// configuración (config.turnos_frente); una reserva hecha con un turno que después se cambió
+// se muestra solo con su rango horario.
 function descripcionHorario(espacioId, horaInicioHHMM, horaFinHHMM) {
   const rango = `${horaInicioHHMM} - ${horaFinHHMM}`;
   if (Number(espacioId) === 3) {
-    const nombreTurno = NOMBRES_TURNOS_FRENTE[`${horaInicioHHMM}-${horaFinHHMM}`];
+    const nombreTurno = nombreTurnoFrente(horaInicioHHMM, horaFinHHMM);
     if (nombreTurno) return `${nombreTurno} (${rango})`;
   }
   return rango;
@@ -395,7 +507,7 @@ function descripcionHorario(espacioId, horaInicioHHMM, horaFinHHMM) {
 // Antes la gente se enteraba recién cuando intentaba cancelar y el sistema no la dejaba.
 function reglaCancelacionHtml(espacioId, fecha) {
   if (Number(espacioId) !== 3) return '';
-  const whatsapp = `<a href="https://wa.me/${CONTACTO_WHATSAPP_FRENTE}">WhatsApp</a>`;
+  const whatsapp = `<a href="${enlaceWhatsappFrente()}">WhatsApp</a>`;
   if (diferenciaEnDiasCalendario(fecha) < 2) {
     return `<p>Como faltan menos de 2 días, esta reserva ya no se puede cancelar con el código. Si necesitás cancelarla, escribinos por ${whatsapp}.</p>`;
   }
@@ -418,6 +530,37 @@ function enlaceGoogleCalendar(espacioId, fecha, horaInicioHHMM, horaFinHHMM) {
     location: 'Centro de Estudiantes de Química - Facultad de Ciencias Químicas (UNA)'
   });
   return 'https://calendar.google.com/calendar/render?' + params.toString();
+}
+
+// ========== ENLACES PARA CANCELAR SIN EL CÓDIGO ==========
+// Los correos (confirmación y recordatorio) traen un enlace que cancela la reserva sin tener
+// que escribir el código: el código no se puede volver a mostrar porque solo se guarda cifrado
+// (SEC-005). El enlace lleva una firma HMAC del número de reserva con una clave derivada de
+// JWT_SECRET: no se puede fabricar para otra reserva. Si se cambia JWT_SECRET, los enlaces
+// viejos dejan de andar (el código sigue sirviendo). Cancelar por enlace sigue las mismas
+// reglas que con el código (Frente: hasta 2 días antes).
+const CLAVE_ENLACES = crypto.createHmac('sha256', JWT_SECRET).update('enlaces-de-cancelacion-v1').digest();
+
+function tokenCancelacion(reservaId) {
+  return crypto.createHmac('sha256', CLAVE_ENLACES).update(`cancelar:${Number(reservaId)}`).digest('base64url').slice(0, 32);
+}
+
+function tokenCancelacionValido(reservaId, token) {
+  if (!esIdValido(reservaId) || typeof token !== 'string' || token.length !== 32) return false;
+  const esperado = Buffer.from(tokenCancelacion(reservaId));
+  const recibido = Buffer.from(token);
+  return esperado.length === recibido.length && crypto.timingSafeEqual(esperado, recibido);
+}
+
+function enlaceCancelacion(reservaId) {
+  return `https://reservas.ceq-una.com/cancelar.html?r=${Number(reservaId)}&t=${tokenCancelacion(reservaId)}`;
+}
+
+// "jueves 16/10/2026" para los correos
+function fechaLarga(fechaISO) {
+  const [a, m, d] = fechaISO.split('-').map(Number);
+  const dia = ['domingo', 'lunes', 'martes', 'miércoles', 'jueves', 'viernes', 'sábado'][new Date(Date.UTC(a, m - 1, d)).getUTCDay()];
+  return `${dia} ${String(d).padStart(2, '0')}/${String(m).padStart(2, '0')}/${a}`;
 }
 
 // Middleware de autenticación JWT (AUTH-002: el token viaja en una cookie httpOnly,
@@ -496,7 +639,7 @@ async function registrarActividad(rol, accion, detalle = '') {
   }
 }
 
-const NOMBRES_ROL = { admin: 'Admin', superadmin: 'Admin supremo' };
+const NOMBRES_ROL = { admin: 'Admin', superadmin: 'Admin supremo', sistema: 'Sistema' };
 
 // Fecha 'YYYY-MM-DD' -> 'DD/MM/YYYY' para los textos del registro de actividad
 function fechaDMY(fechaISO) {
@@ -729,12 +872,18 @@ app.get('/api/bloqueos', lecturaPublicaLimiter, async (req, res) => {
 // que el calendario público sepa qué meses puede mostrar/permitir navegar. No expone
 // nada sensible: es la misma información que ya se ve reflejada en qué días quedan
 // clickeables en el calendario.
+// Un mes cuenta como habilitado si un moderador lo habilitó, o si tenía una apertura programada
+// y esa hora ya llegó. Así se abre a la hora exacta, sin esperar a que la tarea periódica lo
+// marque como habilitado en la base (ver abrirMesesProgramados).
+function mesEstaAbierto(fila, ahora = new Date()) {
+  return !!fila && (fila.habilitado === true || (!!fila.abrir_en && new Date(fila.abrir_en) <= ahora));
+}
+
 app.get('/api/meses-habilitados', lecturaPublicaLimiter, async (req, res) => {
   try {
     const { data, error } = await supabase
       .from('meses_habilitados')
-      .select('anio, mes')
-      .eq('habilitado', true)
+      .select('anio, mes, habilitado, abrir_en')
       .order('anio', { ascending: true })
       .order('mes', { ascending: true });
 
@@ -745,10 +894,46 @@ app.get('/api/meses-habilitados', lecturaPublicaLimiter, async (req, res) => {
     // hacían aparecer el botón "Anterior" hacia meses muertos.
     const hoy = hoyEnAsuncion();
     const valorMesActual = hoy.getUTCFullYear() * 12 + (hoy.getUTCMonth() + 1);
-    res.json((data || []).filter(m => m.anio * 12 + m.mes >= valorMesActual));
+    const ahora = new Date();
+    res.json((data || [])
+      .filter(m => mesEstaAbierto(m, ahora) && m.anio * 12 + m.mes >= valorMesActual)
+      .map(m => ({ anio: m.anio, mes: m.mes })));
   } catch (error) {
     manejarError(res, error);
   }
+});
+
+// Próximas aperturas programadas, para la cuenta regresiva de la página. Manda también la hora
+// del servidor, para que la cuenta no dependa de si el reloj de cada celular está bien.
+app.get('/api/aperturas-programadas', lecturaPublicaLimiter, async (req, res) => {
+  try {
+    const ahora = new Date();
+    const { data, error } = await supabase
+      .from('meses_habilitados')
+      .select('anio, mes, abrir_en')
+      .eq('habilitado', false)
+      .gt('abrir_en', ahora.toISOString())
+      .order('abrir_en', { ascending: true });
+
+    if (error) throw error;
+    res.set('Cache-Control', 'no-store');
+    res.json({
+      ahora: ahora.toISOString(),
+      aperturas: (data || []).map(m => ({ anio: m.anio, mes: m.mes, abrir_en: new Date(m.abrir_en).toISOString() }))
+    });
+  } catch (error) {
+    manejarError(res, error);
+  }
+});
+
+// Configuración que necesitan las páginas (turnos del Frente, límite por persona y contacto
+// del Frente). Es información pública: ya se ve en la página y en los correos.
+app.get('/api/configuracion', lecturaPublicaLimiter, (req, res) => {
+  res.json({
+    turnos_frente: config.turnos_frente,
+    max_reservas_por_persona_mes: config.max_reservas_por_persona_mes,
+    contacto_frente: { email: config.contacto_email_frente, whatsapp: config.contacto_whatsapp_frente }
+  });
 });
 
 app.post('/api/reservas', crearReservaLimiter, async (req, res) => {
@@ -818,16 +1003,10 @@ app.post('/api/reservas', crearReservaLimiter, async (req, res) => {
     }
 
     if (espacioIdNum === 3) {
-      // Frente: solo se permiten los 3 turnos fijos (Desayuno, Almuerzo, Merienda).
-      // No es una duración libre: Merienda dura 4hs, por eso no se valida como rango 1-3h.
-      const turnosValidosFrente = [
-        { inicio: '07:00', fin: '10:00' },
-        { inicio: '10:00', fin: '13:00' },
-        { inicio: '14:00', fin: '18:00' }
-      ];
-      const esTurnoValido = turnosValidosFrente.some(t => t.inicio === hora_inicio && t.fin === hora_fin);
-      if (!esTurnoValido) {
-        return res.status(400).json({ error: 'Turno inválido para Frente. Debe ser Desayuno (07-10), Almuerzo (10-13) o Merienda (14-18)' });
+      // Frente: solo se permiten los turnos fijos de la configuración (por defecto Desayuno,
+      // Almuerzo y Merienda). No es una duración libre, por eso no se valida como rango 1-3h.
+      if (!nombreTurnoFrente(hora_inicio, hora_fin)) {
+        return res.status(400).json({ error: `Turno inválido para Frente. Los turnos son: ${listaTurnosFrenteTexto()}` });
       }
     } else {
       // Altillo: selección libre de horas dentro del rango, entre 1 y 3 horas
@@ -861,14 +1040,13 @@ app.post('/api/reservas', crearReservaLimiter, async (req, res) => {
     const mesReserva = fechaReserva.getUTCMonth() + 1;
     const { data: mesHabilitadoData, error: errorMesHabilitado } = await supabase
       .from('meses_habilitados')
-      .select('habilitado')
+      .select('habilitado, abrir_en')
       .eq('anio', anioReserva)
       .eq('mes', mesReserva)
-      .eq('habilitado', true)
       .maybeSingle();
 
     if (errorMesHabilitado) throw errorMesHabilitado;
-    if (!mesHabilitadoData) {
+    if (!mesEstaAbierto(mesHabilitadoData)) {
       return res.status(400).json({ error: 'Ese mes todavía no está habilitado para reservas' });
     }
 
@@ -896,9 +1074,9 @@ app.post('/api/reservas', crearReservaLimiter, async (req, res) => {
                (persona.celular && otra.celular === persona.celular);
       }).length;
 
-      if (cantidad >= MAX_RESERVAS_POR_PERSONA_MES) {
+      if (cantidad >= config.max_reservas_por_persona_mes) {
         return res.status(400).json({
-          error: `Ya tenés ${cantidad} reservas activas en ${getEspacioNombre(espacioIdNum)} para ese mes. El máximo es ${MAX_RESERVAS_POR_PERSONA_MES} por persona. Si necesitás otro turno, cancelá una de tus reservas anteriores.`
+          error: `Ya tenés ${cantidad} reservas activas en ${getEspacioNombre(espacioIdNum)} para ese mes. El máximo es ${config.max_reservas_por_persona_mes} por persona. Si necesitás otro turno, cancelá una de tus reservas anteriores.`
         });
       }
     }
@@ -1015,7 +1193,7 @@ app.post('/api/reservas', crearReservaLimiter, async (req, res) => {
             <li><strong>Motivo:</strong> ${motivoSeguro || 'Sin especificar'}</li>
             <li><strong>Código de cancelación:</strong> ${codigo}</li>
           </ul>
-          <p>Si necesitas cancelar, usa tu código en: <a href="https://reservas.ceq-una.com/cancelar.html">Cancelar Reserva</a></p>
+          <p>Si necesitas cancelar, usa tu código en: <a href="https://reservas.ceq-una.com/cancelar.html">Cancelar Reserva</a>, o directamente este enlace: <a href="${enlaceCancelacion(reservaId)}">Cancelar mi reserva</a></p>
           ${reglaCancelacionHtml(espacioIdNum, fecha)}
           <p><a href="${escapeHtml(enlaceGoogleCalendar(espacioIdNum, fecha, hora_inicio, hora_fin))}">📅 Agregar a Google Calendar</a></p>
           ${contactoLinea}
@@ -1070,119 +1248,350 @@ app.post('/api/cancelar-por-codigo', cancelarLimiter, async (req, res) => {
     }
 
     const reserva = data[0];
-    // BUG-006: antes se comparaban milisegundos crudos entre `new Date(reserva.fecha)`
-    // (medianoche UTC de esa fecha) y `new Date()` (hora exacta actual del servidor,
-    // en UTC), y se hacía Math.floor. Eso significaba que el resultado dependía de la
-    // hora del día en que se hacía la petición, no solo de la fecha calendario: una
-    // reserva "a 2 días" podía calcularse como "a 1 día" simplemente por hacer el
-    // pedido de tarde en vez de la mañana (hora Paraguay). Ahora se compara día
-    // calendario contra día calendario, fijo en huso horario de Paraguay.
-    const diferenciaDias = diferenciaEnDiasCalendario(reserva.fecha);
+    await cancelarComoUsuario(reserva, res);
+  } catch (error) {
+    manejarError(res, error);
+  }
+});
 
-    // Validar período de cancelación para Frente (2 días)
-    if (reserva.espacio_id === 3 && diferenciaDias < 2) {
-      const emailUsuario = reserva.contacto.split('|')[1]?.trim();
-      if (emailUsuario) {
-        enviarEmail({
-          to: emailUsuario,
-          subject: `Período de Cancelación Gratuita Finalizado - CEQ #${reserva.id}`,
-          html: `
-            <h2>El período de cancelación gratuita ha finalizado</h2>
-            <p>Intentaste cancelar tu reserva de <strong>${getEspacioNombre(reserva.espacio_id)}</strong>, pero el período de cancelación gratuita ya venció.</p>
-            <p><strong>Detalles de la Reserva:</strong></p>
-            <ul>
-              <li>Fecha: ${reserva.fecha}</li>
-              <li>Horario: ${descripcionHorario(reserva.espacio_id, reserva.hora_inicio.substring(0,5), reserva.hora_fin.substring(0,5))}</li>
-            </ul>
-            <p>Si de todas formas deseás realizar la cancelación, contactate por WhatsApp: <a href="https://wa.me/595972753471">Contactar por WhatsApp</a></p>
-          `
-        });
-      }
+// Cancelación hecha por la propia persona, con el código o con el enlace de los correos.
+// Las dos formas siguen exactamente las mismas reglas. `reserva` es la fila completa.
+async function cancelarComoUsuario(reserva, res) {
+  // BUG-006: antes se comparaban milisegundos crudos entre `new Date(reserva.fecha)`
+  // (medianoche UTC de esa fecha) y `new Date()` (hora exacta actual del servidor,
+  // en UTC), y se hacía Math.floor. Eso significaba que el resultado dependía de la
+  // hora del día en que se hacía la petición, no solo de la fecha calendario: una
+  // reserva "a 2 días" podía calcularse como "a 1 día" simplemente por hacer el
+  // pedido de tarde en vez de la mañana (hora Paraguay). Ahora se compara día
+  // calendario contra día calendario, fijo en huso horario de Paraguay.
+  const diferenciaDias = diferenciaEnDiasCalendario(reserva.fecha);
 
-      // Aviso al moderador: hubo un intento de cancelación fuera del período gratuito
+  if (diferenciaDias < 0) {
+    return res.status(400).json({ error: 'Esa reserva ya pasó: no se puede cancelar' });
+  }
+
+  // Validar período de cancelación para Frente (2 días)
+  if (Number(reserva.espacio_id) === 3 && diferenciaDias < 2) {
+    const emailUsuario = reserva.contacto.split('|')[1]?.trim();
+    if (emailUsuario) {
       enviarEmail({
-        to: getEmailModerador(reserva.espacio_id),
-        subject: `Intento de Cancelación Fuera de Plazo - CEQ #${reserva.id}`,
+        to: emailUsuario,
+        subject: `Período de Cancelación Gratuita Finalizado - CEQ #${reserva.id}`,
         html: `
-          <h2>Intento de Cancelación (Período Vencido)</h2>
-          <p><strong>Usuario:</strong> ${escapeHtml(reserva.nombre_solicitante)}</p>
-          <p><strong>Contacto:</strong> ${escapeHtml(reserva.contacto)}</p>
-          <p><strong>Espacio:</strong> ${getEspacioNombre(reserva.espacio_id)}</p>
-          <p><strong>Fecha de la reserva:</strong> ${reserva.fecha}</p>
-          <p><strong>Horario:</strong> ${descripcionHorario(reserva.espacio_id, reserva.hora_inicio.substring(0,5), reserva.hora_fin.substring(0,5))}</p>
-          <p>El usuario intentó cancelar esta reserva, pero el período de cancelación gratuita ya había vencido. La reserva sigue activa.</p>
-        `
-      });
-
-      return res.status(403).json({ 
-        error: 'EL PERIODO DE CANCELACION GRATUITA HA FINALIZADO. SI DESEA REALIZAR LA CANCELACION CONTACTESE CON ceq.informatica@gmail.com' 
-      });
-    }
-    
-    // Actualizar estado de forma condicional y atómica (BUG-005): solo transiciona si
-    // seguía activa en ese instante. Si otra petición concurrente ya la canceló,
-    // updateData viene vacío y respondemos de forma idempotente sin reenviar emails.
-    const { data: updateData, error: updateError } = await supabase
-      .from('reservas')
-      .update({ estado: 'cancelada', cancelada_en: new Date().toISOString(), cancelada_por: 'usuario' })
-      .eq('codigo_cancelacion_hash', codigoHashBuscado)
-      .eq('estado', 'activa')
-      .select();
-    
-    if (updateError) throw updateError;
-
-    if (!updateData || updateData.length === 0) {
-      return res.json({ mensaje: 'La reserva ya se encontraba cancelada' });
-    }
-
-    // Enviar emails (PRIV-002 corregido: el contacto de Frente ya no se copia en
-    // el email del propio usuario; solo se le muestra como texto de contacto)
-    const email = reserva.contacto.split('|')[1]?.trim();
-    if (email) {
-      enviarEmail({
-        to: email,
-        subject: `Cancelación Confirmada - CEQ Reservas #${reserva.id}`,
-        html: `
-          <h2>¡Has cancelado correctamente tu reserva!</h2>
-          <p><strong>Detalles:</strong></p>
+          <h2>El período de cancelación gratuita ha finalizado</h2>
+          <p>Intentaste cancelar tu reserva de <strong>${getEspacioNombre(reserva.espacio_id)}</strong>, pero el período de cancelación gratuita ya venció.</p>
+          <p><strong>Detalles de la Reserva:</strong></p>
           <ul>
             <li>Fecha: ${reserva.fecha}</li>
-            <li>Espacio: ${getEspacioNombre(reserva.espacio_id)}</li>
             <li>Horario: ${descripcionHorario(reserva.espacio_id, reserva.hora_inicio.substring(0,5), reserva.hora_fin.substring(0,5))}</li>
           </ul>
-          <p>Si tienes dudas, contacta con: ${getContactoLineaHtml(reserva.espacio_id)}</p>
+          <p>Si de todas formas deseás realizar la cancelación, contactate por WhatsApp: <a href="${enlaceWhatsappFrente()}">Contactar por WhatsApp</a></p>
         `
       });
     }
 
-    // Email al moderador. Antes solo se mandaba para Frente; ahora se manda siempre —
-    // getEmailModerador() ya se encarga de que a Altillo le llegue solo a ceq.informatica,
-    // y a Frente le siga llegando también a Monse, sin tocar nada más.
-    {
-      enviarEmail({
-        to: getEmailModerador(reserva.espacio_id),
-        subject: `Cancelación de Reserva - CEQ #${reserva.id}`,
-        html: `
-          <h2>Reserva Cancelada por Usuario</h2>
-          <p><strong>Usuario:</strong> ${escapeHtml(reserva.nombre_solicitante)}</p>
-          <p><strong>Contacto:</strong> ${escapeHtml(reserva.contacto)}</p>
-          <p><strong>Espacio:</strong> ${getEspacioNombre(reserva.espacio_id)}</p>
-          <p><strong>Fecha:</strong> ${reserva.fecha}</p>
-          <p><strong>Horario:</strong> ${descripcionHorario(reserva.espacio_id, reserva.hora_inicio.substring(0,5), reserva.hora_fin.substring(0,5))}</p>
-        `
-      });
-    }
+    // Aviso al moderador: hubo un intento de cancelación fuera del período gratuito
+    enviarEmail({
+      to: getEmailModerador(reserva.espacio_id),
+      subject: `Intento de Cancelación Fuera de Plazo - CEQ #${reserva.id}`,
+      html: `
+        <h2>Intento de Cancelación (Período Vencido)</h2>
+        <p><strong>Usuario:</strong> ${escapeHtml(reserva.nombre_solicitante)}</p>
+        <p><strong>Contacto:</strong> ${escapeHtml(reserva.contacto)}</p>
+        <p><strong>Espacio:</strong> ${getEspacioNombre(reserva.espacio_id)}</p>
+        <p><strong>Fecha de la reserva:</strong> ${reserva.fecha}</p>
+        <p><strong>Horario:</strong> ${descripcionHorario(reserva.espacio_id, reserva.hora_inicio.substring(0,5), reserva.hora_fin.substring(0,5))}</p>
+        <p>El usuario intentó cancelar esta reserva, pero el período de cancelación gratuita ya había vencido. La reserva sigue activa.</p>
+      `
+    });
 
-    res.json({ 
-      mensaje: 'Reserva cancelada correctamente',
-      reserva_id: reserva.id,
-      espacio_id: reserva.espacio_id,
-      fecha: reserva.fecha
+    return res.status(403).json({
+      error: 'EL PERIODO DE CANCELACION GRATUITA HA FINALIZADO. SI DESEA REALIZAR LA CANCELACION CONTACTESE CON ceq.informatica@gmail.com'
+    });
+  }
+
+  // Actualizar estado de forma condicional y atómica (BUG-005): solo transiciona si
+  // seguía activa en ese instante. Si otra petición concurrente ya la canceló,
+  // updateData viene vacío y respondemos de forma idempotente sin reenviar emails.
+  const { data: updateData, error: updateError } = await supabase
+    .from('reservas')
+    .update({ estado: 'cancelada', cancelada_en: new Date().toISOString(), cancelada_por: 'usuario' })
+    .eq('id', reserva.id)
+    .eq('estado', 'activa')
+    .select();
+
+  if (updateError) throw updateError;
+
+  if (!updateData || updateData.length === 0) {
+    return res.json({ mensaje: 'La reserva ya se encontraba cancelada' });
+  }
+
+  // Enviar emails (PRIV-002 corregido: el contacto de Frente ya no se copia en
+  // el email del propio usuario; solo se le muestra como texto de contacto)
+  const email = reserva.contacto.split('|')[1]?.trim();
+  if (email) {
+    enviarEmail({
+      to: email,
+      subject: `Cancelación Confirmada - CEQ Reservas #${reserva.id}`,
+      html: `
+        <h2>¡Has cancelado correctamente tu reserva!</h2>
+        <p><strong>Detalles:</strong></p>
+        <ul>
+          <li>Fecha: ${reserva.fecha}</li>
+          <li>Espacio: ${getEspacioNombre(reserva.espacio_id)}</li>
+          <li>Horario: ${descripcionHorario(reserva.espacio_id, reserva.hora_inicio.substring(0,5), reserva.hora_fin.substring(0,5))}</li>
+        </ul>
+        <p>Si tienes dudas, contacta con: ${getContactoLineaHtml(reserva.espacio_id)}</p>
+      `
+    });
+  }
+
+  // Email al moderador. Antes solo se mandaba para Frente; ahora se manda siempre —
+  // getEmailModerador() ya se encarga de que a Altillo le llegue solo a ceq.informatica,
+  // y a Frente le siga llegando también a Monse, sin tocar nada más.
+  enviarEmail({
+    to: getEmailModerador(reserva.espacio_id),
+    subject: `Cancelación de Reserva - CEQ #${reserva.id}`,
+    html: `
+      <h2>Reserva Cancelada por Usuario</h2>
+      <p><strong>Usuario:</strong> ${escapeHtml(reserva.nombre_solicitante)}</p>
+      <p><strong>Contacto:</strong> ${escapeHtml(reserva.contacto)}</p>
+      <p><strong>Espacio:</strong> ${getEspacioNombre(reserva.espacio_id)}</p>
+      <p><strong>Fecha:</strong> ${reserva.fecha}</p>
+      <p><strong>Horario:</strong> ${descripcionHorario(reserva.espacio_id, reserva.hora_inicio.substring(0,5), reserva.hora_fin.substring(0,5))}</p>
+    `
+  });
+
+  res.json({
+    mensaje: 'Reserva cancelada correctamente',
+    reserva_id: reserva.id,
+    espacio_id: reserva.espacio_id,
+    fecha: reserva.fecha
+  });
+
+  // Se liberó un lugar: avisar a quienes estaban en la lista de espera (en segundo plano)
+  avisarListaEspera(reserva);
+}
+
+// ========== CANCELAR CON EL ENLACE DE LOS CORREOS ==========
+// GET: datos mínimos para mostrar en cancelar.html antes de confirmar (sin datos personales).
+// POST: cancela. Las dos exigen la firma del enlace (ver tokenCancelacion).
+async function reservaDelEnlace(res, r, t) {
+  if (!tokenCancelacionValido(r, t)) {
+    res.status(404).json({ error: 'El enlace no es válido. Podés cancelar con el código que te llegó en el correo de confirmación.' });
+    return null;
+  }
+  const { data, error } = await supabase
+    .from('reservas')
+    .select('*')
+    .eq('id', Number(r))
+    .maybeSingle();
+  if (error) throw error;
+  if (!data) {
+    res.status(404).json({ error: 'Esa reserva ya no existe' });
+    return null;
+  }
+  return data;
+}
+
+app.get('/api/cancelar-por-enlace', cancelarLimiter, async (req, res) => {
+  try {
+    const reserva = await reservaDelEnlace(res, req.query.r, req.query.t);
+    if (!reserva) return;
+    const dias = diferenciaEnDiasCalendario(reserva.fecha);
+    const plazoVencido = Number(reserva.espacio_id) === 3 && dias < 2;
+    res.set('Cache-Control', 'no-store');
+    res.json({
+      id: reserva.id,
+      espacio: getEspacioNombre(reserva.espacio_id),
+      fecha_larga: fechaLarga(reserva.fecha),
+      horario: descripcionHorario(reserva.espacio_id, reserva.hora_inicio.substring(0, 5), reserva.hora_fin.substring(0, 5)),
+      estado: reserva.estado,
+      ya_paso: dias < 0,
+      se_puede_cancelar: reserva.estado === 'activa' && dias >= 0 && !plazoVencido,
+      plazo_vencido: reserva.estado === 'activa' && dias >= 0 && plazoVencido,
+      whatsapp: Number(reserva.espacio_id) === 3 ? config.contacto_whatsapp_frente : null
     });
   } catch (error) {
     manejarError(res, error);
   }
 });
+
+app.post('/api/cancelar-por-enlace', cancelarLimiter, async (req, res) => {
+  try {
+    const { r, t } = req.body || {};
+    const reserva = await reservaDelEnlace(res, r, t);
+    if (!reserva) return;
+    if (reserva.estado !== 'activa') {
+      return res.json({ mensaje: 'La reserva ya se encontraba cancelada' });
+    }
+    await cancelarComoUsuario(reserva, res);
+  } catch (error) {
+    manejarError(res, error);
+  }
+});
+
+// ========== LISTA DE ESPERA ==========
+// Si un día está lleno, la persona deja su correo y elige los turnos que le interesan. Si alguien
+// cancela uno de esos turnos, se avisa a todos los anotados a la vez (el lugar es de quien
+// reserve primero). Cada inscripción se avisa una sola vez. Un día completo (Altillo) se guarda
+// como 00:00-23:59, igual que en bloqueos. Las inscripciones de días pasados se borran solas.
+const MAX_INSCRIPCIONES_POR_CORREO = 10;
+const MAX_AVISOS_LISTA_ESPERA_POR_DIA = 60; // dentro de los 300 correos diarios de Brevo
+let avisosListaEsperaHoy = { dia: '', cantidad: 0 };
+
+function puedeAvisarListaEspera() {
+  const dia = hoyEnAsuncion().toISOString().slice(0, 10);
+  if (avisosListaEsperaHoy.dia !== dia) avisosListaEsperaHoy = { dia, cantidad: 0 };
+  if (avisosListaEsperaHoy.cantidad >= MAX_AVISOS_LISTA_ESPERA_POR_DIA) return false;
+  avisosListaEsperaHoy.cantidad++;
+  return true;
+}
+
+// true si ese horario ya empezó (o el día ya pasó), en hora de Paraguay
+function horarioYaEmpezo(fechaISO, horaInicioHHMM) {
+  const dias = diferenciaEnDiasCalendario(fechaISO);
+  if (dias !== 0) return dias < 0;
+  const [h, m] = horaInicioHHMM.split(':').map(Number);
+  return h * 60 + m <= horaActualEnAsuncionEnMinutos();
+}
+
+app.post('/api/lista-espera', listaEsperaLimiter, async (req, res) => {
+  try {
+    const { espacio_id, fecha, turnos, email } = req.body || {};
+    const correo = String(email || '').trim().toLowerCase();
+    if (!EMAIL_REGEX.test(correo) || correo.length > 100) {
+      return res.status(400).json({ error: 'Escribí un correo válido' });
+    }
+    const espacioIdNum = Number(espacio_id);
+    if (![1, 3].includes(espacioIdNum)) {
+      return res.status(400).json({ error: 'Espacio inválido' });
+    }
+    const fechaObj = new Date(String(fecha) + 'T00:00:00Z');
+    if (typeof fecha !== 'string' || !/^\d{4}-\d{2}-\d{2}$/.test(fecha) || isNaN(fechaObj.getTime()) ||
+        diferenciaEnDiasCalendario(fecha) < 0 || fechaObj.getUTCDay() === 0 || fechaObj.getUTCDay() === 6) {
+      return res.status(400).json({ error: 'Fecha inválida' });
+    }
+
+    const { data: espacioData, error: errorEspacio } = await supabase
+      .from('espacios').select('publico').eq('id', espacioIdNum).maybeSingle();
+    if (errorEspacio) throw errorEspacio;
+    if (!espacioData || !espacioData.publico) {
+      return res.status(400).json({ error: 'Ese espacio no se puede reservar por el momento' });
+    }
+    const { data: mesData, error: errorMes } = await supabase
+      .from('meses_habilitados').select('habilitado, abrir_en')
+      .eq('anio', fechaObj.getUTCFullYear()).eq('mes', fechaObj.getUTCMonth() + 1).maybeSingle();
+    if (errorMes) throw errorMes;
+    if (!mesEstaAbierto(mesData)) {
+      return res.status(400).json({ error: 'Ese mes todavía no está habilitado para reservas' });
+    }
+
+    let horarios;
+    if (espacioIdNum === 3) {
+      if (!Array.isArray(turnos) || turnos.length === 0 || turnos.length > 5) {
+        return res.status(400).json({ error: 'Elegí al menos un turno' });
+      }
+      horarios = [];
+      for (const t of turnos) {
+        const inicio = String(t && t.inicio || ''), fin = String(t && t.fin || '');
+        const nombre = nombreTurnoFrente(inicio, fin);
+        if (!nombre) return res.status(400).json({ error: 'Turno inválido' });
+        if (!horarios.some(h => h.inicio === inicio)) horarios.push({ inicio, fin, nombre });
+      }
+      // Cada turno tiene que estar tomado por una reserva: si está libre, conviene reservarlo
+      const { data: ocupadas, error: errorOcupadas } = await supabase
+        .from('reservas').select('hora_inicio, hora_fin')
+        .eq('espacio_id', 3).eq('fecha', fecha).eq('estado', 'activa');
+      if (errorOcupadas) throw errorOcupadas;
+      for (const h of horarios) {
+        if (horarioYaEmpezo(fecha, h.inicio)) {
+          return res.status(400).json({ error: `El turno ${h.nombre} ya empezó` });
+        }
+        const tomado = (ocupadas || []).some(o => o.hora_inicio.substring(0, 5) === h.inicio && o.hora_fin.substring(0, 5) === h.fin);
+        if (!tomado) {
+          return res.status(409).json({ error: `El turno ${h.nombre} está libre: podés reservarlo ahora` });
+        }
+      }
+    } else {
+      horarios = [{ inicio: '00:00', fin: '23:59' }];
+    }
+
+    const { data: pendientes, error: errorPendientes } = await supabase
+      .from('lista_espera').select('id')
+      .eq('email', correo).is('avisado_en', null)
+      .gte('fecha', hoyEnAsuncion().toISOString().slice(0, 10))
+      .limit(MAX_INSCRIPCIONES_POR_CORREO + 5);
+    if (errorPendientes) throw errorPendientes;
+    if ((pendientes || []).length + horarios.length > MAX_INSCRIPCIONES_POR_CORREO) {
+      return res.status(400).json({ error: `Ya tenés muchas inscripciones en lista de espera con ese correo (máximo ${MAX_INSCRIPCIONES_POR_CORREO})` });
+    }
+
+    // Si ya estaba anotado (por ejemplo, lo avisaron antes y el turno se volvió a llenar), se
+    // reactiva la inscripción
+    const { error: errorGuardar } = await supabase
+      .from('lista_espera')
+      .upsert(horarios.map(h => ({
+        espacio_id: espacioIdNum, fecha, hora_inicio: h.inicio + ':00', hora_fin: h.fin + ':00',
+        email: correo, creado_en: new Date().toISOString(), avisado_en: null
+      })), { onConflict: 'espacio_id,fecha,hora_inicio,hora_fin,email' });
+    if (errorGuardar) throw errorGuardar;
+
+    res.status(201).json({ mensaje: 'Listo: si se libera un lugar, te avisamos por correo.', inscripciones: horarios.length });
+  } catch (error) {
+    manejarError(res, error);
+  }
+});
+
+// Se llama (sin await) cada vez que se cancela una reserva. Nunca lanza error.
+async function avisarListaEspera(reserva) {
+  try {
+    const inicio = reserva.hora_inicio.substring(0, 5);
+    const fin = reserva.hora_fin.substring(0, 5);
+    if (horarioYaEmpezo(reserva.fecha, inicio)) return;
+
+    const { data, error } = await supabase
+      .from('lista_espera').select('id, hora_inicio, hora_fin')
+      .eq('espacio_id', reserva.espacio_id).eq('fecha', reserva.fecha).is('avisado_en', null);
+    if (error) throw error;
+    const ids = (data || []).filter(e => {
+      const eIni = e.hora_inicio.substring(0, 5), eFin = e.hora_fin.substring(0, 5);
+      return (eIni === inicio && eFin === fin) || (eIni === '00:00' && eFin === '23:59');
+    }).map(e => e.id);
+    if (ids.length === 0) return;
+
+    // Se marcan como avisadas ANTES de mandar: si llegan dos cancelaciones juntas, nadie
+    // recibe dos avisos por la misma inscripción
+    const { data: tomadas, error: errorTomar } = await supabase
+      .from('lista_espera').update({ avisado_en: new Date().toISOString() })
+      .in('id', ids).is('avisado_en', null).select('email');
+    if (errorTomar) throw errorTomar;
+
+    const espacio = getEspacioNombre(reserva.espacio_id);
+    const horario = descripcionHorario(reserva.espacio_id, inicio, fin);
+    const enlace = `https://reservas.ceq-una.com/?fecha=${reserva.fecha}&espacio=${Number(reserva.espacio_id)}`;
+    for (const correo of [...new Set((tomadas || []).map(x => x.email))]) {
+      if (!puedeAvisarListaEspera()) {
+        console.warn('⚠️ Se alcanzó el tope diario de avisos de lista de espera');
+        break;
+      }
+      enviarEmail({
+        to: correo,
+        subject: `🔔 Se liberó un lugar: ${espacio}, ${fechaLarga(reserva.fecha)} - CEQ`,
+        html: `
+          <h2>¡Se liberó un lugar!</h2>
+          <p>Alguien canceló su reserva del <strong>${espacio}</strong> para el <strong>${fechaLarga(reserva.fecha)}</strong>, <strong>${horario}</strong>.</p>
+          <p>Si todavía lo querés, reservalo cuanto antes: el lugar es de quien reserve primero.</p>
+          <p><a href="${enlace}" style="display:inline-block;background:#1F3A68;color:#ffffff;padding:10px 18px;border-radius:6px;text-decoration:none;font-weight:bold">Reservar ahora</a></p>
+          <p style="color:#888;font-size:12px;">Te escribimos porque te anotaste en la lista de espera de ese turno. Este es el único aviso por esa inscripción.</p>
+          <p>Centro de Estudiantes de Química</p>
+        `
+      });
+    }
+  } catch (err) {
+    console.error('⚠️ No se pudo avisar a la lista de espera:', err);
+  }
+}
 
 // Cada reporte nuevo se avisa por email al moderador general, para enterarse en el
 // momento (antes solo quedaban guardados y uno se enteraba recién al abrir el panel).
@@ -1293,12 +1702,20 @@ app.get('/api/admin/meses-habilitados', verifyAdminToken, async (req, res) => {
   try {
     const { data, error } = await supabase
       .from('meses_habilitados')
-      .select('anio, mes, habilitado')
+      .select('anio, mes, habilitado, abrir_en')
       .order('anio', { ascending: true })
       .order('mes', { ascending: true });
 
     if (error) throw error;
-    res.json(data || []);
+    // Una apertura programada cuya hora ya llegó se muestra como habilitada, aunque la tarea
+    // periódica todavía no la haya marcado en la base
+    const ahora = new Date();
+    res.json((data || []).map(m => ({
+      anio: m.anio,
+      mes: m.mes,
+      habilitado: mesEstaAbierto(m, ahora),
+      abrir_en: m.abrir_en && !mesEstaAbierto(m, ahora) ? new Date(m.abrir_en).toISOString() : null
+    })));
   } catch (error) {
     manejarError(res, error);
   }
@@ -1327,13 +1744,14 @@ app.post('/api/admin/meses-habilitados', verifyAdminToken, verificarCSRF, async 
     // ANTES de guardar, y se rechaza si dejaría un hueco (ej: julio + septiembre sin agosto).
     const { data: actuales, error: errorActuales } = await supabase
       .from('meses_habilitados')
-      .select('anio, mes')
-      .eq('habilitado', true);
+      .select('anio, mes, habilitado, abrir_en');
 
     if (errorActuales) throw errorActuales;
 
     const valorNuevo = anioNum * 12 + mesNum;
+    const ahora = new Date();
     const valoresResultantes = (actuales || [])
+      .filter(m => mesEstaAbierto(m, ahora))
       .map(m => m.anio * 12 + m.mes)
       .filter(v => v !== valorNuevo);
 
@@ -1350,16 +1768,103 @@ app.post('/api/admin/meses-habilitados', verifyAdminToken, verificarCSRF, async 
       });
     }
 
+    // Habilitar o deshabilitar a mano cancela cualquier apertura programada de ese mes
     const { error } = await supabase
       .from('meses_habilitados')
       .upsert(
-        { anio: anioNum, mes: mesNum, habilitado, updated_at: new Date().toISOString() },
+        { anio: anioNum, mes: mesNum, habilitado, abrir_en: null, updated_at: new Date().toISOString() },
         { onConflict: 'anio,mes' }
       );
 
     if (error) throw error;
     registrarActividad(req.admin.rol, habilitado ? 'Habilitó un mes' : 'Deshabilitó un mes', `${String(mesNum).padStart(2, '0')}/${anioNum}`);
     res.json({ mensaje: 'Actualizado correctamente' });
+  } catch (error) {
+    manejarError(res, error);
+  }
+});
+
+// "dd/mm/aaaa HH:MM" en hora de Paraguay (para el registro de actividad y los correos)
+function fechaHoraAsuncionTexto(fecha) {
+  const p = Object.fromEntries(new Intl.DateTimeFormat('en-GB', {
+    timeZone: 'America/Asuncion', day: '2-digit', month: '2-digit', year: 'numeric',
+    hour: '2-digit', minute: '2-digit', hourCycle: 'h23'
+  }).formatToParts(fecha).map(x => [x.type, x.value]));
+  return `${p.day}/${p.month}/${p.year} ${p.hour}:${p.minute}`;
+}
+
+// POST programar (o cancelar, con abrir_en: null) la apertura automática de un mes.
+// A esa hora exacta el mes empieza a contar como habilitado (ver mesEstaAbierto).
+app.post('/api/admin/meses-habilitados/programar', verifyAdminToken, verificarCSRF, async (req, res) => {
+  try {
+    const { anio, mes, abrir_en } = req.body || {};
+    const anioNum = parseInt(anio);
+    const mesNum = parseInt(mes);
+    if (!Number.isInteger(anioNum) || anioNum < 2020 || anioNum > 2100) {
+      return res.status(400).json({ error: 'Año inválido' });
+    }
+    if (!Number.isInteger(mesNum) || mesNum < 1 || mesNum > 12) {
+      return res.status(400).json({ error: 'Mes inválido' });
+    }
+    const etiquetaMes = `${String(mesNum).padStart(2, '0')}/${anioNum}`;
+
+    if (abrir_en === null) {
+      const { error } = await supabase
+        .from('meses_habilitados')
+        .update({ abrir_en: null, updated_at: new Date().toISOString() })
+        .eq('anio', anioNum).eq('mes', mesNum).eq('habilitado', false);
+      if (error) throw error;
+      registrarActividad(req.admin.rol, 'Canceló la apertura programada de un mes', etiquetaMes);
+      return res.json({ mensaje: 'Apertura programada cancelada' });
+    }
+
+    const momento = new Date(abrir_en);
+    if (typeof abrir_en !== 'string' || isNaN(momento.getTime())) {
+      return res.status(400).json({ error: 'Fecha y hora inválidas' });
+    }
+    const ahora = new Date();
+    if (momento.getTime() <= ahora.getTime() + 60 * 1000) {
+      return res.status(400).json({ error: 'Elegí una fecha y hora que todavía no haya pasado' });
+    }
+    if (momento.getTime() > ahora.getTime() + 183 * 24 * 60 * 60 * 1000) {
+      return res.status(400).json({ error: 'La apertura tiene que ser dentro de los próximos 6 meses' });
+    }
+    const hoy = hoyEnAsuncion();
+    const valorNuevo = anioNum * 12 + mesNum;
+    if (valorNuevo < hoy.getUTCFullYear() * 12 + hoy.getUTCMonth() + 1) {
+      return res.status(400).json({ error: 'Ese mes ya pasó' });
+    }
+
+    const { data: actuales, error: errorActuales } = await supabase
+      .from('meses_habilitados')
+      .select('anio, mes, habilitado, abrir_en');
+    if (errorActuales) throw errorActuales;
+    if ((actuales || []).some(m => m.anio === anioNum && m.mes === mesNum && mesEstaAbierto(m, ahora))) {
+      return res.status(400).json({ error: 'Ese mes ya está habilitado' });
+    }
+
+    // Mismo control que al habilitar a mano: cuando se abra, los meses habilitados tienen que
+    // quedar seguidos (se mira cómo están ahora)
+    const valores = (actuales || [])
+      .filter(m => mesEstaAbierto(m, ahora))
+      .map(m => m.anio * 12 + m.mes)
+      .concat(valorNuevo)
+      .sort((a, b) => a - b);
+    if (!valores.every((v, i) => i === 0 || v - valores[i - 1] === 1)) {
+      return res.status(400).json({
+        error: 'Cuando se abra, los meses habilitados tienen que quedar seguidos. Programá el mes que sigue al último habilitado.'
+      });
+    }
+
+    const { error } = await supabase
+      .from('meses_habilitados')
+      .upsert(
+        { anio: anioNum, mes: mesNum, habilitado: false, abrir_en: momento.toISOString(), updated_at: ahora.toISOString() },
+        { onConflict: 'anio,mes' }
+      );
+    if (error) throw error;
+    registrarActividad(req.admin.rol, 'Programó la apertura de un mes', `${etiquetaMes} · se abre el ${fechaHoraAsuncionTexto(momento)}`);
+    res.json({ mensaje: 'Apertura programada', abrir_en: momento.toISOString() });
   } catch (error) {
     manejarError(res, error);
   }
@@ -1553,14 +2058,8 @@ app.post('/api/admin/reservas', verifyAdminToken, verificarCSRF, async (req, res
       return res.status(400).json({ error: 'La hora de inicio debe ser anterior a la hora de fin' });
     }
 
-    const turnosValidosFrente = [
-      { inicio: '07:00', fin: '10:00' },
-      { inicio: '10:00', fin: '13:00' },
-      { inicio: '14:00', fin: '18:00' }
-    ];
-    const esTurnoValido = turnosValidosFrente.some(t => t.inicio === hora_inicio && t.fin === hora_fin);
-    if (!esTurnoValido) {
-      return res.status(400).json({ error: 'Turno inválido. Debe ser Desayuno (07-10), Almuerzo (10-13) o Merienda (14-18)' });
+    if (!nombreTurnoFrente(hora_inicio, hora_fin)) {
+      return res.status(400).json({ error: `Turno inválido. Los turnos son: ${listaTurnosFrenteTexto()}` });
     }
 
     // A diferencia del endpoint público, acá NO se chequea meses_habilitados — es
@@ -1652,7 +2151,7 @@ app.post('/api/admin/reservas', verifyAdminToken, verificarCSRF, async (req, res
           <li><strong>Motivo:</strong> ${escapeHtml(motivo) || 'Sin especificar'}</li>
           <li><strong>Código de cancelación:</strong> ${codigo}</li>
         </ul>
-        <p>Si necesitas cancelar, usa tu código en: <a href="https://reservas.ceq-una.com/cancelar.html">Cancelar Reserva</a></p>
+        <p>Si necesitas cancelar, usa tu código en: <a href="https://reservas.ceq-una.com/cancelar.html">Cancelar Reserva</a>, o directamente este enlace: <a href="${enlaceCancelacion(nuevaReserva[0].id)}">Cancelar mi reserva</a></p>
         ${reglaCancelacionHtml(espacioIdNum, fecha)}
         <p><a href="${escapeHtml(enlaceGoogleCalendar(espacioIdNum, fecha, hora_inicio, hora_fin))}">📅 Agregar a Google Calendar</a></p>
         <p>Ante cualquier consulta, contactate con: ${getContactoLineaHtml(espacioIdNum)}</p>
@@ -1741,8 +2240,8 @@ app.post('/api/admin/cancelar/:reserva_id', verifyAdminToken, verificarCSRF, asy
     // Avisar a los moderadores correspondientes cuando se cancela una reserva desde
     // el panel admin: Altillo solo a ceq.informatica; Frente a ambos (ceq.informatica + Monse),
     // así se enteran cruzadamente de las cancelaciones que hace el otro moderador.
-    const destinatariosAviso = reserva.espacio_id === 3
-      ? [...new Set([EMAIL_MODERADOR, CONTACTO_EMAIL_FRENTE])]
+    const destinatariosAviso = Number(reserva.espacio_id) === 3
+      ? [...new Set([EMAIL_MODERADOR, config.contacto_email_frente])]
       : [EMAIL_MODERADOR];
 
     enviarEmail({
@@ -1766,6 +2265,51 @@ app.post('/api/admin/cancelar/:reserva_id', verifyAdminToken, verificarCSRF, asy
     registrarActividad(req.admin.rol, 'Canceló una reserva',
       `#${reserva.id} · ${getEspacioNombre(reserva.espacio_id)}, ${fechaDMY(reserva.fecha)}, ${descripcionHorario(reserva.espacio_id, reserva.hora_inicio.substring(0, 5), reserva.hora_fin.substring(0, 5))}`);
     res.json({ mensaje: 'Reserva cancelada por admin' });
+    avisarListaEspera(reserva); // se liberó un lugar (en segundo plano)
+  } catch (error) {
+    manejarError(res, error);
+  }
+});
+
+// POST marcar si la persona vino o no vino (null = borrar la marca). Solo reservas activas
+// cuyo día ya llegó (hoy o antes).
+app.post('/api/admin/reservas/:id/asistencia', verifyAdminToken, verificarCSRF, async (req, res) => {
+  try {
+    const { id } = req.params;
+    if (!esIdValido(id)) {
+      return res.status(400).json({ error: 'ID inválido' });
+    }
+    const { asistencia } = req.body || {};
+    if (asistencia !== null && asistencia !== 'vino' && asistencia !== 'no_vino') {
+      return res.status(400).json({ error: 'La asistencia tiene que ser "vino", "no_vino" o vacía' });
+    }
+
+    const { data: reserva, error: errorReserva } = await supabase
+      .from('reservas')
+      .select('id, estado, fecha, espacio_id, hora_inicio, hora_fin')
+      .eq('id', Number(id))
+      .maybeSingle();
+    if (errorReserva) throw errorReserva;
+    if (!reserva) {
+      return res.status(404).json({ error: 'Reserva no encontrada' });
+    }
+    if (reserva.estado !== 'activa') {
+      return res.status(400).json({ error: 'Solo se marca la asistencia de reservas activas' });
+    }
+    if (diferenciaEnDiasCalendario(reserva.fecha) > 0) {
+      return res.status(400).json({ error: 'Todavía no llegó el día de esa reserva' });
+    }
+
+    const { error } = await supabase
+      .from('reservas')
+      .update({ asistencia })
+      .eq('id', reserva.id);
+    if (error) throw error;
+
+    const textos = { vino: 'Vino', no_vino: 'No vino' };
+    registrarActividad(req.admin.rol, asistencia ? 'Marcó la asistencia de una reserva' : 'Borró la asistencia de una reserva',
+      `#${reserva.id}${asistencia ? ' · ' + textos[asistencia] : ''} · ${getEspacioNombre(reserva.espacio_id)}, ${fechaDMY(reserva.fecha)}`);
+    res.json({ mensaje: 'Asistencia guardada', asistencia });
   } catch (error) {
     manejarError(res, error);
   }
@@ -1946,6 +2490,51 @@ app.get('/api/superadmin/actividad', verifyAdminToken, verifySuperAdmin, async (
   }
 });
 
+// Configuración editable (turnos del Frente, límite por persona, contacto del Frente y correo
+// de alertas). Al guardar se valida todo (ver VALIDADORES_CONFIG) y se aplica al instante.
+const NOMBRES_CONFIG = {
+  turnos_frente: 'turnos del Frente',
+  max_reservas_por_persona_mes: 'límite por persona',
+  contacto_email_frente: 'correo de contacto del Frente',
+  contacto_whatsapp_frente: 'WhatsApp del Frente',
+  email_alertas: 'correo de alertas'
+};
+
+app.get('/api/superadmin/configuracion', verifyAdminToken, verifySuperAdmin, (req, res) => {
+  res.json(config);
+});
+
+app.post('/api/superadmin/configuracion', verifyAdminToken, verifySuperAdmin, verificarCSRF, async (req, res) => {
+  try {
+    const cambios = req.body || {};
+    const claves = Object.keys(cambios).filter(k => Object.prototype.hasOwnProperty.call(VALIDADORES_CONFIG, k));
+    if (claves.length === 0) {
+      return res.status(400).json({ error: 'No hay nada para guardar' });
+    }
+    const comoTexto = (clave, valor) => clave === 'turnos_frente' ? JSON.stringify(valor) : String(valor);
+    const filas = [];
+    for (const clave of claves) {
+      let valor;
+      try {
+        valor = VALIDADORES_CONFIG[clave](cambios[clave]);
+      } catch (err) {
+        return res.status(400).json({ error: err.message });
+      }
+      filas.push({ clave, valor: comoTexto(clave, valor) });
+    }
+    const cambiadas = filas.filter(f => f.valor !== comoTexto(f.clave, config[f.clave]));
+    if (cambiadas.length > 0) {
+      const { error } = await supabase.from('configuracion').upsert(cambiadas, { onConflict: 'clave' });
+      if (error) throw error;
+      await cargarConfiguracion();
+      registrarActividad(req.admin.rol, 'Cambió la configuración', cambiadas.map(f => NOMBRES_CONFIG[f.clave]).join(', '));
+    }
+    res.json({ mensaje: cambiadas.length > 0 ? 'Configuración guardada' : 'No había cambios', config });
+  } catch (error) {
+    manejarError(res, error);
+  }
+});
+
 // Cerrar todas las sesiones del panel (incluida la propia): sirve si la contraseña se
 // filtró o alguien dejó la sesión abierta en una computadora ajena. Conviene cambiar
 // también la contraseña en Render si se sospecha que alguien la conoce.
@@ -1994,7 +2583,7 @@ app.get('/api/sincronizacion/reservas', sincronizacionLimiter, async (req, res) 
   try {
     const filas = await leerTodasLasFilas(() => supabase
       .from('reservas')
-      .select('id, espacio_id, fecha, hora_inicio, hora_fin, nombre_solicitante, contacto, motivo, estado, reservado_por_admin, created_at, cancelada_en, cancelada_por, motivo_cancelacion')
+      .select('id, espacio_id, fecha, hora_inicio, hora_fin, nombre_solicitante, contacto, motivo, estado, reservado_por_admin, created_at, cancelada_en, cancelada_por, motivo_cancelacion, asistencia')
       .order('fecha', { ascending: true })
       .order('hora_inicio', { ascending: true })
       .order('id', { ascending: true }));
@@ -2009,13 +2598,14 @@ app.get('/api/sincronizacion/reservas', sincronizacionLimiter, async (req, res) 
         fecha: r.fecha,
         hora_inicio: inicio,
         hora_fin: fin,
-        turno: Number(r.espacio_id) === 3 ? (NOMBRES_TURNOS_FRENTE[`${inicio}-${fin}`] || '') : '',
+        turno: Number(r.espacio_id) === 3 ? nombreTurnoFrente(inicio, fin) : '',
         nombre: r.nombre_solicitante || '',
         celular,
         email,
         motivo: (r.motivo || '').trim(),
         estado: r.estado,
         prioridad: r.reservado_por_admin === true,
+        asistencia: r.asistencia || '',
         creada_en: aIsoUtc(r.created_at),
         cancelada_en: aIsoUtc(r.cancelada_en),
         cancelada_por: r.cancelada_por || '',
@@ -2055,7 +2645,165 @@ app.get('/api/estadisticas', lecturaPublicaLimiter, async (req, res) => {
   }
 });
 
+// ========== TAREAS PERIÓDICAS (cada 5 minutos) ==========
+// Render no tiene tareas programadas en el plan gratuito, pero el servidor nunca se duerme
+// (UptimeRobot lo consulta cada 5 minutos), así que alcanza con un temporizador. Todo lo que
+// hacen estas tareas queda guardado en la base, así que si el servidor se reinicia no se
+// repite ni se pierde nada (salvo las alertas pendientes, que viven en memoria).
+const INTERVALO_TAREAS_MS = Number(process.env.INTERVALO_TAREAS_MS) || 5 * 60 * 1000;
+
+// Marca como habilitados los meses cuya apertura programada ya llegó. Para la página ya
+// estaban abiertos desde el segundo exacto (mesEstaAbierto); esto deja la base prolija.
+async function abrirMesesProgramados() {
+  const ahora = new Date().toISOString();
+  const { data, error } = await supabase
+    .from('meses_habilitados')
+    .update({ habilitado: true, abrir_en: null, updated_at: ahora })
+    .eq('habilitado', false)
+    .lte('abrir_en', ahora)
+    .select('anio, mes');
+  if (error) throw error;
+  (data || []).forEach(m => registrarActividad('sistema', 'Se abrió un mes programado', `${String(m.mes).padStart(2, '0')}/${m.anio}`));
+}
+
+// Recordatorio 2 días antes de la reserva, entre las 08:00 y las 21:00 de ese día. Para el
+// Frente es el último día en que se puede cancelar gratis, así que el correo trae el botón
+// para cancelar. No se manda a las reservas de prioridad ni a las hechas en las últimas
+// 12 horas (esas personas acaban de recibir la confirmación).
+const MAX_RECORDATORIOS_POR_TANDA = 40;
+
+function htmlRecordatorio(r) {
+  const inicio = r.hora_inicio.substring(0, 5);
+  const fin = r.hora_fin.substring(0, 5);
+  const esFrente = Number(r.espacio_id) === 3;
+  return `
+    <h2>Te recordamos tu reserva</h2>
+    <p>Hola ${escapeHtml(r.nombre_solicitante)},</p>
+    <p>Tenés reservado el <strong>${getEspacioNombre(r.espacio_id)}</strong> el <strong>${fechaLarga(r.fecha)}</strong>, <strong>${descripcionHorario(r.espacio_id, inicio, fin)}</strong>.</p>
+    <p>Si la vas a usar, no tenés que hacer nada. ¡Te esperamos!</p>
+    <p>¿Ya no la vas a usar? Cancelala, así otra persona puede aprovechar el lugar:</p>
+    <p><a href="${enlaceCancelacion(r.id)}" style="display:inline-block;background:#1F3A68;color:#ffffff;padding:10px 18px;border-radius:6px;text-decoration:none;font-weight:bold">Cancelar mi reserva</a></p>
+    ${esFrente ? `<p><strong>Hoy es el último día para cancelar gratis.</strong> Desde mañana, la cancelación solo se gestiona por <a href="${enlaceWhatsappFrente()}">WhatsApp</a>.</p>` : ''}
+    <p><a href="${escapeHtml(enlaceGoogleCalendar(r.espacio_id, r.fecha, inicio, fin))}">📅 Agregar a Google Calendar</a></p>
+    <p>Ante cualquier consulta, contactate con: ${getContactoLineaHtml(r.espacio_id)}</p>
+    <p>Centro de Estudiantes de Química</p>
+  `;
+}
+
+async function enviarRecordatorios() {
+  const minutos = horaActualEnAsuncionEnMinutos();
+  if (minutos < 8 * 60 || minutos >= 21 * 60) return;
+  const objetivo = hoyEnAsuncion();
+  objetivo.setUTCDate(objetivo.getUTCDate() + 2);
+  const hace12Horas = new Date(Date.now() - 12 * 60 * 60 * 1000).toISOString();
+
+  const { data, error } = await supabase
+    .from('reservas')
+    .select('id, espacio_id, fecha, hora_inicio, hora_fin, nombre_solicitante, contacto')
+    .eq('estado', 'activa')
+    .eq('fecha', objetivo.toISOString().slice(0, 10))
+    .eq('reservado_por_admin', false)
+    .is('recordatorio_enviado_en', null)
+    .lt('created_at', hace12Horas)
+    .limit(MAX_RECORDATORIOS_POR_TANDA);
+  if (error) throw error;
+
+  for (const r of data || []) {
+    const email = String(r.contacto || '').split('|')[1]?.trim();
+    // Se marca ANTES de mandar, así un reinicio a mitad de camino no manda dos veces
+    const { data: tomada, error: errorTomar } = await supabase
+      .from('reservas')
+      .update({ recordatorio_enviado_en: new Date().toISOString() })
+      .eq('id', r.id).eq('estado', 'activa').is('recordatorio_enviado_en', null)
+      .select('id');
+    if (errorTomar) throw errorTomar;
+    if (!tomada || tomada.length === 0 || !email) continue;
+
+    const enviado = await enviarEmail({
+      to: email,
+      subject: `⏰ Recordatorio: ${getEspacioNombre(r.espacio_id)}, ${fechaLarga(r.fecha)} - CEQ #${r.id}`,
+      html: htmlRecordatorio(r)
+    });
+    if (!enviado) {
+      // Si Brevo falló, se desmarca para reintentar en la próxima vuelta
+      await supabase.from('reservas').update({ recordatorio_enviado_en: null }).eq('id', r.id);
+    }
+  }
+}
+
+// Las inscripciones a la lista de espera de días que ya pasaron no sirven más: se borran
+async function limpiarListaEspera() {
+  const { error } = await supabase
+    .from('lista_espera')
+    .delete()
+    .lt('fecha', hoyEnAsuncion().toISOString().slice(0, 10));
+  if (error) throw error;
+}
+
+// Correo de alerta (admin supremo > Configuración > correo de alertas) si hubo errores del
+// servidor o bloqueos 429. Como máximo uno por hora, y solo si pasó algo.
+const INTERVALO_ALERTAS_MS = 60 * 60 * 1000;
+let ultimaAlertaEnviada = 0;
+
+async function enviarAlertas() {
+  const { errores, bloqueos429 } = alertasPendientes;
+  if (errores.length === 0 && bloqueos429.length === 0) return;
+  if (Date.now() - ultimaAlertaEnviada < INTERVALO_ALERTAS_MS) return;
+
+  const listaErrores = errores.splice(0);
+  const lista429 = bloqueos429.splice(0);
+  const porIp = {};
+  lista429.forEach(b => { const ip = b.detalle.split('|')[0]; porIp[ip] = (porIp[ip] || 0) + 1; });
+  const ips = Object.entries(porIp).sort((a, b) => b[1] - a[1]).slice(0, 10);
+  const item = texto => `<li>${escapeHtml(texto)}</li>`;
+
+  const enviado = await enviarEmail({
+    to: config.email_alertas,
+    subject: `⚠️ Alerta del sistema de reservas: ${listaErrores.length} error(es), ${lista429.length} bloqueo(s) 429`,
+    html: `
+      <h2>Alerta del sistema de reservas</h2>
+      <p>Desde el último aviso hubo:</p>
+      <ul>
+        <li><strong>${listaErrores.length}</strong> error(es) del servidor</li>
+        <li><strong>${lista429.length}</strong> bloqueo(s) por exceso de pedidos (429)</li>
+      </ul>
+      ${listaErrores.length ? `<h3>Errores (los últimos 10)</h3><ul>${listaErrores.slice(-10).map(e => item(`${fechaHoraAsuncionTexto(e.momento)} · ${e.detalle}`)).join('')}</ul>` : ''}
+      ${lista429.length ? `<h3>Bloqueos 429 por IP</h3><ul>${ips.map(([ip, n]) => item(`${ip}: ${n} vez/veces`)).join('')}</ul>
+        <p>Si son muchas IP distintas a la misma hora (por ejemplo, al abrir un mes), es mucha gente a la vez. Si las IP empiezan con 10., hay que revisar obtenerIpCliente() en server.js.</p>` : ''}
+      <p>Más detalle en Render → servicio ceq-reservas → Logs. Este correo sale como máximo una vez por hora.</p>
+    `
+  });
+  if (enviado) {
+    ultimaAlertaEnviada = Date.now();
+  } else {
+    // Si el correo falló, se devuelven a la lista para el próximo intento
+    alertasPendientes.errores.unshift(...listaErrores.slice(-100));
+    alertasPendientes.bloqueos429.unshift(...lista429.slice(-100));
+  }
+}
+
+async function tareasPeriodicas() {
+  const tareas = [
+    ['configuración', cargarConfiguracion],
+    ['aperturas programadas', abrirMesesProgramados],
+    ['recordatorios', enviarRecordatorios],
+    ['lista de espera', limpiarListaEspera],
+    ['alertas', enviarAlertas]
+  ];
+  for (const [nombre, tarea] of tareas) {
+    try {
+      await tarea();
+    } catch (error) {
+      console.error(`⚠️ La tarea periódica "${nombre}" falló:`, error);
+    }
+  }
+}
+
 // ========== INICIAR SERVIDOR ==========
+
+cargarConfiguracion().catch(error => console.error('⚠️ No se pudo leer la configuración, se usan los valores por defecto:', error));
+setInterval(tareasPeriodicas, INTERVALO_TAREAS_MS);
+setTimeout(tareasPeriodicas, Math.min(20 * 1000, INTERVALO_TAREAS_MS));
 
 app.listen(PORT, () => {
   console.log(`✅ Servidor corriendo en puerto ${PORT}`);

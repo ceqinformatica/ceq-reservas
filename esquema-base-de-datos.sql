@@ -2,7 +2,8 @@
 -- Sistema de Reservas del CEQ - Estructura de la base de datos (Supabase / PostgreSQL 17)
 -- =====================================================================
 -- Exportado del proyecto de producción el 11/10/2026 (DB-001 de la auditoría técnica),
--- actualizado con la migración "admin supremo" del mismo día (migracion-admin-supremo.sql).
+-- actualizado con las migraciones del mismo día (migracion-admin-supremo.sql y
+-- migracion-funciones-octubre.sql).
 -- Contiene SOLO la estructura (tablas, reglas, triggers y seguridad) y los 3 espacios.
 -- No contiene reservas ni datos personales.
 --
@@ -44,6 +45,8 @@ create table public.espacios (
 -- reservado_por_admin: true en las reservas de prioridad creadas desde el panel.
 -- cancelada_en / cancelada_por / motivo_cancelacion: cuándo, quién ('usuario', 'moderador' o
 --   'admin supremo') y por qué se canceló. Vacías en las canceladas antes del 11/10/2026.
+-- recordatorio_enviado_en: cuándo se mandó el recordatorio de 2 días antes (una sola vez).
+-- asistencia: 'vino' o 'no_vino', lo marca un moderador en el panel (vacía = sin marcar).
 -- ---------------------------------------------------------------------
 create table public.reservas (
   id                      bigint generated always as identity primary key,
@@ -64,6 +67,10 @@ create table public.reservas (
   cancelada_en            timestamptz,
   cancelada_por           text,
   motivo_cancelacion      text,
+  recordatorio_enviado_en timestamptz,
+  asistencia              text,
+
+  constraint reservas_asistencia_valida check (asistencia is null or asistencia in ('vino', 'no_vino')),
 
   -- Garantía principal del sistema: dos reservas ACTIVAS del mismo espacio no pueden
   -- superponerse en el tiempo. La base lo rechaza aunque lleguen al mismo instante
@@ -118,6 +125,7 @@ create table public.reportes_errores (
 -- ---------------------------------------------------------------------
 -- MESES HABILITADOS: qué meses se pueden reservar desde la página pública
 -- (se manejan desde el panel de admin > Meses; tienen que quedar consecutivos)
+-- abrir_en: apertura programada; desde esa hora el mes cuenta como habilitado
 -- ---------------------------------------------------------------------
 create table public.meses_habilitados (
   id         bigint generated always as identity primary key,
@@ -126,8 +134,27 @@ create table public.meses_habilitados (
   habilitado boolean not null default true,
   created_at timestamp default now(),
   updated_at timestamp default now(),
+  abrir_en   timestamptz,
   unique (anio, mes)
 );
+
+-- ---------------------------------------------------------------------
+-- LISTA DE ESPERA: correos para avisar si se libera un turno que estaba lleno.
+-- Un día completo (Altillo) se guarda como 00:00-23:59, igual que en bloqueos.
+-- avisado_en: cuándo se avisó (cada inscripción se avisa una sola vez).
+-- ---------------------------------------------------------------------
+create table public.lista_espera (
+  id          bigint generated always as identity primary key,
+  espacio_id  bigint not null references public.espacios(id),
+  fecha       date not null,
+  hora_inicio time not null,
+  hora_fin    time not null,
+  email       text not null,
+  creado_en   timestamptz not null default now(),
+  avisado_en  timestamptz,
+  unique (espacio_id, fecha, hora_inicio, hora_fin, email)
+);
+create index idx_lista_espera_dia on public.lista_espera (espacio_id, fecha);
 
 -- ---------------------------------------------------------------------
 -- REGISTRO DE ACTIVIDAD del panel (admin supremo > Avanzado > Actividad), sin datos personales
@@ -142,7 +169,9 @@ create table public.registro_actividad (
 
 -- ---------------------------------------------------------------------
 -- CONFIGURACIÓN general. version_sesiones: al subirla ("Cerrar todas las sesiones"),
--- todas las sesiones abiertas del panel dejan de valer.
+-- todas las sesiones abiertas del panel dejan de valer. El resto (turnos del Frente, límite
+-- por persona, contacto del Frente, correo de alertas) se edita en admin supremo >
+-- Avanzado > Configuración.
 -- ---------------------------------------------------------------------
 create table public.configuracion (
   clave text primary key,
@@ -245,6 +274,7 @@ alter table public.reportes_errores  enable row level security;
 alter table public.meses_habilitados enable row level security;
 alter table public.registro_actividad enable row level security;
 alter table public.configuracion     enable row level security;
+alter table public.lista_espera      enable row level security;
 
 -- ---------------------------------------------------------------------
 -- DATOS INICIALES: los 3 espacios con sus números fijos (solo el Frente abierto al público)
@@ -257,7 +287,13 @@ Para reservar este espacio, anotate en la planilla correspondiente. Cuando se re
   (2, 'Sala de Reuniones', 'Sala principal', false, null),
   (3, 'Frente', 'Espacio frente', true, null);
 
-insert into public.configuracion (clave, valor) values ('version_sesiones', '1');
+insert into public.configuracion (clave, valor) values
+  ('version_sesiones', '1'),
+  ('turnos_frente', '[{"nombre":"Desayuno","inicio":"07:00","fin":"10:00"},{"nombre":"Almuerzo","inicio":"10:00","fin":"13:00"},{"nombre":"Merienda","inicio":"14:00","fin":"18:00"}]'),
+  ('max_reservas_por_persona_mes', '2'),
+  ('contacto_email_frente', 'Monsegonza511@gmail.com'),
+  ('contacto_whatsapp_frente', '595972753471'),
+  ('email_alertas', 'ceq.informatica@gmail.com');
 
 -- Para que un espacio nuevo agregado a mano reciba el número 4 y no choque con los anteriores
 select setval(pg_get_serial_sequence('public.espacios', 'id'), 3);

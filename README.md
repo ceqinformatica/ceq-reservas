@@ -77,6 +77,9 @@ Si falta una obligatoria, el servidor no arranca y lo dice en los Logs de Render
 | Tarea | Dónde | Notas |
 |---|---|---|
 | Habilitar un mes | Meses | Los meses habilitados tienen que quedar **seguidos** (no se puede habilitar septiembre y noviembre sin octubre). Conviene habilitar el mes siguiente unos días antes de que termine el actual. |
+| **Programar la apertura de un mes** | Meses → Programar la apertura de un mes | Se elige el mes (el que sigue al último habilitado) y la fecha y hora (de Paraguay). A esa hora exacta se abre solo, aunque nadie esté conectado, y la página muestra mientras tanto una cuenta regresiva. Se puede cancelar desde la misma pantalla. Habilitar o deshabilitar el mes a mano borra la programación. |
+| Buscar a una persona | Reservas → "Buscar persona" | Por nombre (sin importar tildes), email o celular (con o sin espacios). Muestra un resumen: próximas, pasadas, canceladas y asistencia. |
+| Marcar asistencia | Reservas → botones **✓ Vino / ✗ No vino** | Aparecen en las reservas activas cuyo día ya llegó (también en el detalle del calendario). Tocar la opción marcada la borra. Sale en el Excel y en la planilla. |
 | Bloquear un día u horario | Bloqueos | No se puede bloquear una fecha pasada ni un horario con reservas activas: primero hay que cancelarlas. |
 | Reserva de prioridad (Comisión Directiva) | Prioridad | Solo Frente. Se puede hacer aunque el mes no esté habilitado y no cuenta para el límite por persona. Le llega la confirmación al correo que se cargue. |
 | Cancelar una reserva | Reservas → Cancelar | Pide un motivo; se avisa por correo a quien reservó y a los moderadores. Así se ayuda a quien perdió su código. |
@@ -96,8 +99,16 @@ Se entra al mismo panel, pero con la contraseña del admin supremo (`SUPERADMIN_
 | Eliminar reportes | Avanzado → Eliminar reportes de errores | Definitivo. |
 | Ver qué se hizo en el panel | Avanzado → Registro de actividad | Últimos 300 movimientos: inicios de sesión (también los fallidos), cancelaciones, bloqueos, meses, reservas de prioridad, reportes leídos, espacios y eliminaciones, con fecha, hora y si fue el admin o el admin supremo. No guarda datos personales. |
 | Cerrar todas las sesiones | Avanzado → Seguridad | Saca del panel a todos, incluido quien lo usa. Si se sospecha que alguien conoce una contraseña, cambiala también (sección 11). |
+| Cambiar turnos, límite por persona, contacto del Frente y correo de alertas | Avanzado → Configuración | Se aplica al instante en la página, el servidor y los correos. Hasta 5 turnos, entre las 06:00 y las 22:00, sin superponerse. Cambiar un turno no toca las reservas que ya existen (se siguen mostrando con su horario). |
+| Alertas por correo | Automático | Si hay errores del servidor o bloqueos 429, llega un correo al "correo de alertas" de la Configuración: como máximo uno por hora, y solo si pasó algo. |
 
 El admin normal no ve la pestaña Avanzado, y el servidor le rechaza esas acciones aunque intente hacerlas por otro lado.
+
+### Correos automáticos y lista de espera
+
+- **Recordatorio 2 días antes:** a las 08:00 del día en que todavía se puede cancelar gratis, llega un correo con un botón **Cancelar mi reserva** (no hace falta el código). Para el Frente dice que es el último día para cancelar gratis. No se manda a las reservas de prioridad ni a las hechas en las últimas 12 horas.
+- **Enlace para cancelar:** el correo de confirmación y el recordatorio traen un enlace firmado que cancela esa reserva (con las mismas reglas que el código). Si se cambia `JWT_SECRET`, los enlaces viejos dejan de andar; el código sigue sirviendo.
+- **Lista de espera:** si un día está lleno, la página muestra "Ya no hay reservas disponibles" y la persona puede dejar su correo eligiendo los turnos que le interesan. Si alguien cancela uno de esos turnos (con código, con enlace o desde el panel), se avisa a todos los anotados a la vez con un enlace directo al día; el lugar es de quien reserve primero. Cada inscripción se avisa una sola vez, hay un máximo de 10 inscripciones pendientes por correo y de 60 avisos por día, y las de días pasados se borran solas.
 
 ### Planilla de Google Sheets (se actualiza sola)
 
@@ -127,12 +138,13 @@ Si falla la actualización automática, Google manda un correo a la cuenta. La c
 | Regla | Valor actual | Dónde |
 |---|---|---|
 | Espacios que se pueden reservar desde la página | Solo Frente (3). Altillo (1) se gestiona con planilla. | Panel → Avanzado → Espacios (admin supremo). Se guarda en la columna `publico` de la tabla `espacios` (ver sección 7). |
-| Turnos del Frente | Desayuno 07–10, Almuerzo 10–13, Merienda 14–18 | `turnosValidosFrente` y `NOMBRES_TURNOS_FRENTE` en `server.js`, y los turnos en `index.html` |
+| Turnos del Frente | Desayuno 07–10, Almuerzo 10–13, Merienda 14–18 | Panel → Avanzado → Configuración (admin supremo). Se guarda en la tabla `configuracion`. |
 | Días | Lunes a viernes, desde hoy, solo en meses habilitados | `server.js` (`POST /api/reservas`) |
-| Límite por persona | 2 reservas activas por mes y por espacio (se reconoce a la persona por correo o por celular) | `MAX_RESERVAS_POR_PERSONA_MES` en `server.js` |
-| Cancelación con código (Frente) | Hasta 2 días antes; después, por WhatsApp | `server.js` (`POST /api/cancelar-por-codigo`) |
+| Límite por persona | 2 reservas activas por mes y por espacio (se reconoce a la persona por correo o por celular) | Panel → Avanzado → Configuración (admin supremo) |
+| Cancelación con código o enlace (Frente) | Hasta 2 días antes; después, por WhatsApp | `cancelarComoUsuario()` en `server.js` |
 | Límites por IP | Crear 30/hora, cancelar 20/hora, reportes 10/hora, consultas 1200 cada 5 min, login 5 intentos fallidos cada 15 min | Los `rateLimit` en `server.js` |
-| Contacto del Frente | Correo y WhatsApp de la persona encargada | `CONTACTO_EMAIL_FRENTE` y `CONTACTO_WHATSAPP_FRENTE` en `server.js`, más el enlace `wa.me` del correo de cancelación fuera de plazo (`server.js`) y los dos enlaces de `cancelar.html`. Si cambia la persona, actualizar todos y `EMAIL_MODERADOR_FRENTE`. |
+| Contacto del Frente | Correo y WhatsApp de la persona encargada | Panel → Avanzado → Configuración (admin supremo): se actualiza en los correos y en las páginas. Si cambia la persona, cambiar también `EMAIL_MODERADOR_FRENTE` en Render (avisos internos). |
+| Límites de la lista de espera | 15 inscripciones por hora por IP, 10 pendientes por correo, 60 avisos por día | `listaEsperaLimiter`, `MAX_INSCRIPCIONES_POR_CORREO` y `MAX_AVISOS_LISTA_ESPERA_POR_DIA` en `server.js` |
 | Versión que se muestra | `v2.5a-34` | Pie de las tres páginas |
 
 ## 7. Reactivar el Altillo
@@ -162,14 +174,16 @@ Para volver a cerrarlo: desmarcar la casilla, escribir el aviso que tiene que ve
 |---|---|---|
 | Render | 750 horas por mes por cuenta; se duerme tras 15 min sin uso | El monitor lo mantiene despierto (unas 744 horas al mes). **No crear otro servicio gratuito en la misma cuenta**, porque no alcanzarían las horas. |
 | Supabase | Se pausa tras 7 días sin actividad; 500 MB; sin copias recuperables | El monitor evita la pausa. Exportar a Excel una vez por mes. |
-| Brevo | 300 correos por día en total | Cada reserva manda 2 o 3. Los avisos de reportes tienen un tope propio de 20 por día. |
+| Brevo | 300 correos por día en total | Cada reserva manda 2 o 3, más 1 recordatorio. Los avisos de reportes tienen un tope propio de 20 por día y los de lista de espera, de 60. |
 | UptimeRobot | Revisa cada 5 minutos | Una caída se detecta con hasta 5 minutos de demora. |
 | Google Apps Script | 20.000 consultas externas y 90 minutos de disparadores por día | La planilla usa 24 consultas por día y unos segundos cada vez. |
 | Supabase (API) | Máximo 1000 filas por pedido | El servidor pide de a 1000 hasta traer todas (panel y planilla). |
 
 ## 10. Base de datos
 
-La estructura completa está en [`esquema-base-de-datos.sql`](esquema-base-de-datos.sql): 8 tablas (`espacios`, `reservas`, `bloqueos`, `meses_habilitados`, `reportes_errores`, `registro_actividad`, `configuracion` y `cancelaciones`, que está en desuso). Los cambios que se le hicieron a una base ya existente quedan como archivos `migracion-*.sql` (por ejemplo, [`migracion-admin-supremo.sql`](migracion-admin-supremo.sql), aplicada el 11/10/2026); `esquema-base-de-datos.sql` ya los incluye.
+La estructura completa está en [`esquema-base-de-datos.sql`](esquema-base-de-datos.sql): 9 tablas (`espacios`, `reservas`, `bloqueos`, `meses_habilitados`, `reportes_errores`, `registro_actividad`, `configuracion`, `lista_espera` y `cancelaciones`, que está en desuso). Los cambios que se le hicieron a una base ya existente quedan como archivos `migracion-*.sql` ([`migracion-admin-supremo.sql`](migracion-admin-supremo.sql) y [`migracion-funciones-octubre.sql`](migracion-funciones-octubre.sql), aplicadas el 11/10/2026); `esquema-base-de-datos.sql` ya los incluye.
+
+**Tareas automáticas:** cada 5 minutos el servidor abre los meses programados, manda los recordatorios del día, borra la lista de espera de días pasados, relee la configuración y manda las alertas pendientes (ver `tareasPeriodicas()` en `server.js`). Funciona porque UptimeRobot mantiene el servidor despierto.
 
 Protecciones que viven en la base (además de las del servidor):
 - **`no_solapamiento_activo`:** dos reservas activas del mismo espacio no pueden superponerse, aunque lleguen al mismo instante.

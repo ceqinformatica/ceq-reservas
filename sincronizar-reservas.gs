@@ -27,9 +27,9 @@ const DIAS_SEMANA = ['Domingo', 'Lunes', 'Martes', 'Miércoles', 'Jueves', 'Vier
 const MESES = ['Enero', 'Febrero', 'Marzo', 'Abril', 'Mayo', 'Junio', 'Julio', 'Agosto', 'Septiembre', 'Octubre', 'Noviembre', 'Diciembre'];
 const PATRON_HOJA_MES = new RegExp('^(' + MESES.join('|') + ') \\d{4}$'); // "Octubre 2026"
 const COLUMNAS = ['N°', 'Fecha', 'Día', 'Espacio', 'Turno', 'Inicio', 'Fin', 'Nombre', 'Celular', 'Email', 'Motivo',
-  'Estado', 'Prioridad', 'Creada', 'Cancelada', 'Cancelada por', 'Motivo de cancelación'];
+  'Estado', 'Prioridad', 'Asistencia', 'Creada', 'Cancelada', 'Cancelada por', 'Motivo de cancelación'];
 const COL_FECHA = 2;
-const COL_FECHA_HORA = [14, 15];
+const COL_FECHA_HORA = [15, 16];
 
 // ---------- Menú ----------
 function onOpen() {
@@ -143,6 +143,7 @@ function armarFilasReservas(reservas, fechaDesdeTexto, fechaHoraDesdeIso) {
     comoTexto(r.motivo),
     r.estado === 'cancelada' ? 'Cancelada' : 'Activa',
     r.prioridad ? 'Sí' : 'No',
+    r.asistencia === 'vino' ? 'Vino' : r.asistencia === 'no_vino' ? 'No vino' : '',
     r.creada_en ? fechaHoraDesdeIso(r.creada_en) : '',
     r.estado === 'cancelada' && r.cancelada_en ? fechaHoraDesdeIso(r.cancelada_en) : '',
     r.estado === 'cancelada' ? (r.cancelada_por || (r.cancelada_en ? '' : 'sin datos')) : '',
@@ -177,10 +178,17 @@ function armarResumen(reservas) {
   porEspacio.push(['Total', activas.length, reservas.length - activas.length, reservas.length]);
   bloques.push(porEspacio);
 
+  // Los turnos salen de los datos (se pueden cambiar desde el panel), ordenados por hora
   const frente = activas.filter(r => r.espacio === 'Frente');
   if (frente.length > 0) {
-    bloques.push([['Frente por turno (activas)', 'Reservas']]
-      .concat(['Desayuno', 'Almuerzo', 'Merienda'].map(t => [t, contar(frente, r => r.turno === t)])));
+    const turnos = [];
+    frente.slice().sort((a, b) => a.hora_inicio < b.hora_inicio ? -1 : 1).forEach(r => {
+      if (r.turno && turnos.indexOf(r.turno) === -1) turnos.push(r.turno);
+    });
+    const filas = turnos.map(t => [t, contar(frente, r => r.turno === t)]);
+    const otros = contar(frente, r => !r.turno);
+    if (otros > 0) filas.push(['Otro horario (turnos anteriores)', otros]);
+    bloques.push([['Frente por turno (activas)', 'Reservas']].concat(filas));
   }
 
   bloques.push([['Por día de la semana (activas)', 'Reservas']]
@@ -197,7 +205,9 @@ function armarResumen(reservas) {
   const personas = new Set(activas.map(r => (r.email || '').toLowerCase() || (r.celular || '').replace(/\D/g, '')).filter(Boolean));
   bloques.push([
     ['Personas distintas con reservas activas', personas.size],
-    ['Reservas de prioridad (activas)', contar(activas, r => r.prioridad)]
+    ['Reservas de prioridad (activas)', contar(activas, r => r.prioridad)],
+    ['Asistencia marcada: vinieron', contar(activas, r => r.asistencia === 'vino')],
+    ['Asistencia marcada: no vinieron', contar(activas, r => r.asistencia === 'no_vino')]
   ]);
   return bloques;
 }
