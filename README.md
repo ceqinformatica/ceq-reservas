@@ -64,11 +64,12 @@ Si falta una obligatoria, el servidor no arranca y lo dice en los Logs de Render
 
 1. En GitHub, editá el archivo con el lápiz, o usá **Add file → Upload files** para reemplazar varios a la vez, y hacé **Commit**.
 2. Render (servidor) y Vercel (páginas) publican solos en 1 a 3 minutos.
-3. Verificá:
+3. **Pruebas automáticas:** con cada cambio, GitHub corre solo unas 300 pruebas (ver [`pruebas/`](pruebas/README.md)). En la página del repo, al lado del último cambio, aparece una ✅ (todo bien) o una ❌ (algo se rompió: entrá a **Actions** para ver qué). Si Render está configurado con **Auto-Deploy: After CI Checks Pass**, un cambio con ❌ ni siquiera se publica.
+4. Verificá:
    - Render → **Events**: el último deploy tiene que decir **Live**. En los registros de la compilación tiene que aparecer `Using Node.js version 24…`.
    - `https://api.ceq-una.com/api/health` tiene que responder `{"status":"ok","db":"ok"}`.
    - Abrí la página y probá lo que cambiaste.
-4. **Si algo salió mal:** en Render → Events, elegí el deploy anterior y usá **Rollback** para volver a la versión que andaba. En GitHub, el historial de cada archivo permite recuperar cualquier versión anterior.
+5. **Si algo salió mal:** en Render → Events, elegí el deploy anterior y usá **Rollback** para volver a la versión que andaba. En GitHub, el historial de cada archivo permite recuperar cualquier versión anterior.
 
 **Librerías:** `package-lock.json` fija las versiones exactas de las librerías del servidor, así cada deploy instala lo mismo que se probó. **No lo borres.** Para actualizarlas hace falta una computadora con Node.js 24: `npm update`, probar, y subir `package.json` y `package-lock.json` juntos. Si alguna vez Render avisa de vulnerabilidades por librerías viejas, usá **Manual Deploy → Clear build cache & deploy**.
 
@@ -109,6 +110,14 @@ El admin normal no ve la pestaña Avanzado, y el servidor le rechaza esas accion
 - **Recordatorio 2 días antes:** a las 08:00 del día en que todavía se puede cancelar gratis, llega un correo con un botón **Cancelar mi reserva** (no hace falta el código). Para el Frente dice que es el último día para cancelar gratis. No se manda a las reservas de prioridad ni a las hechas en las últimas 12 horas.
 - **Enlace para cancelar:** el correo de confirmación y el recordatorio traen un enlace firmado que cancela esa reserva (con las mismas reglas que el código). Si se cambia `JWT_SECRET`, los enlaces viejos dejan de andar; el código sigue sirviendo.
 - **Lista de espera (general):** cuando en un espacio ya no queda ningún lugar libre en los meses habilitados, la página muestra "Ya no hay reservas disponibles" y la persona puede dejar su correo. Si después alguien cancela cualquier reserva de ese espacio (con código, con enlace o desde el panel), se avisa a todos los anotados a la vez, con el día y turno que se liberó y un enlace directo; el lugar es de quien reserve primero. Cada inscripción se avisa una sola vez (para otro aviso hay que volver a anotarse); hay un máximo de 60 avisos por día, y las inscripciones sin avisar se borran a los 60 días.
+
+- **"Responder a":** los correos salen de `reservas@ceq-una.com`, que no tiene buzón. Por eso todos llevan un "Responder a": si la persona responde un correo del Frente, le llega al contacto del Frente (Configuración); si es del Altillo, a `ceq.informatica@gmail.com`. Si un moderador responde un aviso de reserva o cancelación, le escribe directo a la persona que reservó.
+
+### Copia de seguridad mensual (llega sola por correo)
+
+Supabase gratis no guarda copias que se puedan descargar. Por eso, el **día 1° de cada mes a las 08:00** el servidor manda al **correo de alertas** (Avanzado → Configuración) un archivo `reservas-ceq-AAAA-MM.csv` con **todas** las reservas y todos sus datos (también celulares, correos, acompañantes y cancelaciones). Se abre con Excel o Google Sheets.
+
+**Qué hacer cuando llega:** guardar el archivo en la carpeta de copias de Google Drive. Tiene datos personales: no reenviarlo. Si un mes no llega, revisar Render → Logs (buscar `copia mensual`). El mes ya enviado queda anotado en la tabla `configuracion` (clave `copia_mensual_enviada`): para que se vuelva a mandar, borrá esa fila.
 
 ### Planilla de Google Sheets (se actualiza sola)
 
@@ -178,7 +187,7 @@ Para volver a cerrarlo: desmarcar la casilla, escribir el aviso que tiene que ve
 | Servicio | Límite | Qué implica |
 |---|---|---|
 | Render | 750 horas por mes por cuenta; se duerme tras 15 min sin uso | El monitor lo mantiene despierto (unas 744 horas al mes). **No crear otro servicio gratuito en la misma cuenta**, porque no alcanzarían las horas. |
-| Supabase | Se pausa tras 7 días sin actividad; 500 MB; sin copias recuperables | El monitor evita la pausa. Exportar a Excel una vez por mes. |
+| Supabase | Se pausa tras 7 días sin actividad; 500 MB; sin copias recuperables | El monitor evita la pausa. La copia de seguridad llega sola por correo el 1° de cada mes. |
 | Brevo | 300 correos por día en total | Cada reserva manda 2 o 3, más 1 recordatorio. Los avisos de reportes tienen un tope propio de 20 por día y los de lista de espera, de 60. |
 | UptimeRobot | Revisa cada 5 minutos | Una caída se detecta con hasta 5 minutos de demora. |
 | Google Apps Script | 20.000 consultas externas y 90 minutos de disparadores por día | La planilla usa 24 consultas por día y unos segundos cada vez. |
@@ -188,7 +197,7 @@ Para volver a cerrarlo: desmarcar la casilla, escribir el aviso que tiene que ve
 
 La estructura completa está en [`esquema-base-de-datos.sql`](esquema-base-de-datos.sql): 9 tablas (`espacios`, `reservas`, `bloqueos`, `meses_habilitados`, `reportes_errores`, `registro_actividad`, `configuracion`, `lista_espera` y `cancelaciones`, que está en desuso). Los cambios que se le hicieron a una base ya existente quedan como archivos `migracion-*.sql` ([`migracion-admin-supremo.sql`](migracion-admin-supremo.sql), [`migracion-funciones-octubre.sql`](migracion-funciones-octubre.sql) y [`migracion-acompanantes-y-lista-espera.sql`](migracion-acompanantes-y-lista-espera.sql), del 11/10/2026); `esquema-base-de-datos.sql` ya los incluye.
 
-**Tareas automáticas:** cada 5 minutos el servidor abre los meses programados, manda los recordatorios del día, limpia la lista de espera vieja, relee la configuración y manda las alertas pendientes (ver `tareasPeriodicas()` en `server.js`). Funciona porque UptimeRobot mantiene el servidor despierto.
+**Tareas automáticas:** cada 5 minutos el servidor abre los meses programados, manda los recordatorios del día, limpia la lista de espera vieja, manda la copia de seguridad del mes (una vez por mes), relee la configuración y manda las alertas pendientes (ver `tareasPeriodicas()` en `server.js`). Funciona porque UptimeRobot mantiene el servidor despierto.
 
 Protecciones que viven en la base (además de las del servidor):
 - **`no_solapamiento_activo`:** dos reservas activas del mismo espacio no pueden superponerse, aunque lleguen al mismo instante.
@@ -215,7 +224,6 @@ Si se cambia la estructura en Supabase, actualizar también ese archivo.
 
 De la auditoría técnica del 24/07/2026 (la respuesta completa está en el Apéndice 1 del 6° informe de la Secretaría de Informática). Ninguno es un riesgo inmediato:
 
-- Pruebas automáticas que corran solas en GitHub (TEST-001).
 - Separar el JavaScript de las páginas y activar la política de seguridad CSP (SEC-004, ARCH-001).
 - Que los códigos de cancelación venzan (SEC-005) y poder cerrar una sesión puntual del panel (AUTH-002; hoy se cierran todas juntas desde Avanzado → Seguridad).
 - Evitar reservas duplicadas por reintentos con una clave de idempotencia (BUG-004).

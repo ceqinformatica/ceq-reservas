@@ -267,6 +267,17 @@ function enlaceWhatsappFrente() {
 
 // Devuelve el HTML de la línea de contacto a mostrarle al usuario según el espacio.
 // Frente: email de contacto + WhatsApp. Altillo: solo el email general del moderador.
+// A quién responde la persona que reservó: Frente -> su contacto (configurable); el resto -> correo general
+function correoRespuesta(espacio_id) {
+  return Number(espacio_id) === 3 ? config.contacto_email_frente : EMAIL_MODERADOR;
+}
+
+// Correo de la persona que reservó ("celular | email"), para que el moderador le responda directo
+function correoDeContacto(contacto) {
+  const email = String(contacto || '').split('|')[1]?.trim() || '';
+  return EMAIL_REGEX.test(email) ? email : undefined;
+}
+
 function getContactoLineaHtml(espacio_id) {
   if (Number(espacio_id) === 3) {
     return `${escapeHtml(config.contacto_email_frente)} o por <a href="${enlaceWhatsappFrente()}">WhatsApp</a>`;
@@ -278,7 +289,11 @@ function getContactoLineaHtml(espacio_id) {
 // Nunca lanza error (lo captura y lo loguea), así que se llama SIN await: los
 // endpoints responden al usuario de inmediato y el email sale en segundo plano,
 // en vez de hacer esperar al usuario varios segundos a que conteste Brevo.
-async function enviarEmail({ to, subject, html }) {
+// `text` (opcional): versión en texto simple que va junto al HTML.
+// `responderA` (opcional): a quién le llega si se toca "Responder". reservas@ceq-una.com no tiene
+// buzón (las respuestas rebotaban), así que por defecto las respuestas van al correo general.
+// `adjuntos` (opcional): [{ name, content }] con content en base64.
+async function enviarEmail({ to, subject, html, text, responderA, adjuntos }) {
   try {
     const destinatarios = Array.isArray(to) ? to : [to];
     const res = await fetch('https://api.brevo.com/v3/smtp/email', {
@@ -292,7 +307,10 @@ async function enviarEmail({ to, subject, html }) {
         sender: { name: 'CEQ Reservas', email: 'reservas@ceq-una.com' },
         to: destinatarios.map(email => ({ email })),
         subject,
-        htmlContent: html
+        htmlContent: html,
+        replyTo: { email: EMAIL_REGEX.test(String(responderA || '')) ? responderA : EMAIL_MODERADOR },
+        ...(text ? { textContent: text } : {}),
+        ...(adjuntos && adjuntos.length ? { attachment: adjuntos } : {})
       })
     });
 
@@ -1233,6 +1251,7 @@ app.post('/api/reservas', crearReservaLimiter, async (req, res) => {
       enviarEmail({
         to: email,
         subject: `✓ Confirmación de Reserva - CEQ #${reservaId}`,
+        responderA: correoRespuesta(espacioIdNum),
         html: `
           <h2>¡Reserva Confirmada!</h2>
           <p>Hola ${nombreSeguro},</p>
@@ -1260,6 +1279,7 @@ app.post('/api/reservas', crearReservaLimiter, async (req, res) => {
     enviarEmail({
       to: getEmailModerador(espacioIdNum),
       subject: `📌 Nueva Reserva (${nombreEspacio}) - CEQ #${reservaId}`,
+      responderA: correoDeContacto(contacto),
       html: `
         <h2>Nueva Reserva</h2>
         <p><strong>Usuario:</strong> ${nombreSeguro}</p>
@@ -1332,6 +1352,7 @@ async function cancelarComoUsuario(reserva, res) {
       enviarEmail({
         to: emailUsuario,
         subject: `Período de Cancelación Gratuita Finalizado - CEQ #${reserva.id}`,
+        responderA: correoRespuesta(reserva.espacio_id),
         html: `
           <h2>El período de cancelación gratuita ha finalizado</h2>
           <p>Intentaste cancelar tu reserva de <strong>${getEspacioNombre(reserva.espacio_id)}</strong>, pero el período de cancelación gratuita ya venció.</p>
@@ -1349,6 +1370,7 @@ async function cancelarComoUsuario(reserva, res) {
     enviarEmail({
       to: getEmailModerador(reserva.espacio_id),
       subject: `Intento de Cancelación Fuera de Plazo - CEQ #${reserva.id}`,
+      responderA: correoDeContacto(reserva.contacto),
       html: `
         <h2>Intento de Cancelación (Período Vencido)</h2>
         <p><strong>Usuario:</strong> ${escapeHtml(reserva.nombre_solicitante)}</p>
@@ -1388,6 +1410,7 @@ async function cancelarComoUsuario(reserva, res) {
     enviarEmail({
       to: email,
       subject: `Cancelación Confirmada - CEQ Reservas #${reserva.id}`,
+      responderA: correoRespuesta(reserva.espacio_id),
       html: `
         <h2>¡Has cancelado correctamente tu reserva!</h2>
         <p><strong>Detalles:</strong></p>
@@ -1407,6 +1430,7 @@ async function cancelarComoUsuario(reserva, res) {
   enviarEmail({
     to: getEmailModerador(reserva.espacio_id),
     subject: `Cancelación de Reserva - CEQ #${reserva.id}`,
+    responderA: correoDeContacto(reserva.contacto),
     html: `
       <h2>Reserva Cancelada por Usuario</h2>
       <p><strong>Usuario:</strong> ${escapeHtml(reserva.nombre_solicitante)}</p>
@@ -1567,17 +1591,23 @@ async function avisarListaEspera(reserva) {
         console.warn('⚠️ Se alcanzó el tope diario de avisos de lista de espera');
         break;
       }
+      // Correo simple, como de una persona (sin botón ni emoji), para que Gmail lo deje en
+      // "Principal" y no en "Promociones". El asunto lleva el día, el turno y el número de la
+      // reserva cancelada: cada aviso tiene un asunto distinto y Gmail no los agrupa.
+      const dia = fechaLarga(reserva.fecha);
       enviarEmail({
         to: correo,
-        subject: `🔔 Se liberó un lugar en el ${espacio} - CEQ`,
+        subject: `Se liberó un turno en el ${espacio}: ${dia}, ${horario} (aviso #${reserva.id})`,
+        responderA: correoRespuesta(reserva.espacio_id),
         html: `
-          <h2>¡Se liberó un lugar!</h2>
-          <p>Alguien canceló su reserva del <strong>${espacio}</strong> para el <strong>${fechaLarga(reserva.fecha)}</strong>, <strong>${horario}</strong>.</p>
-          <p>Si te sirve, reservalo cuanto antes: el lugar es de quien reserve primero.</p>
-          <p><a href="${enlace}" style="display:inline-block;background:#1F3A68;color:#ffffff;padding:10px 18px;border-radius:6px;text-decoration:none;font-weight:bold">Reservar ahora</a></p>
-          <p style="color:#888;font-size:12px;">Te escribimos porque te anotaste para que te avisemos cuando hubiera un lugar libre en el ${espacio}. Este es el único aviso: si querés otro, volvé a anotarte en la página.</p>
+          <p>Hola,</p>
+          <p>Se canceló una reserva del ${espacio} y quedó libre el <strong>${dia}, ${horario}</strong>.</p>
+          <p>Si te sirve, podés reservarlo acá: <a href="${enlace}">${enlace}</a></p>
+          <p>El turno es de quien reserve primero.</p>
+          <p>Te escribimos porque te anotaste en la lista de espera del ${espacio}. Este es el único aviso; si querés otro, volvé a anotarte en la página.</p>
           <p>Centro de Estudiantes de Química</p>
-        `
+        `,
+        text: `Hola,\n\nSe canceló una reserva del ${espacio} y quedó libre el ${dia}, ${horario}.\n\nSi te sirve, podés reservarlo acá: ${enlace}\n\nEl turno es de quien reserve primero.\n\nTe escribimos porque te anotaste en la lista de espera del ${espacio}. Este es el único aviso; si querés otro, volvé a anotarte en la página.\n\nCentro de Estudiantes de Química`
       });
     }
   } catch (err) {
@@ -2130,6 +2160,7 @@ app.post('/api/admin/reservas', verifyAdminToken, verificarCSRF, async (req, res
     enviarEmail({
       to: email,
       subject: `✓ Confirmación de Reserva - CEQ #${nuevaReserva[0].id}`,
+      responderA: correoRespuesta(espacioIdNum),
       html: `
         <h2>¡Reserva Confirmada!</h2>
         <p>Hola ${escapeHtml(nombre_solicitante)},</p>
@@ -2215,6 +2246,7 @@ app.post('/api/admin/cancelar/:reserva_id', verifyAdminToken, verificarCSRF, asy
       enviarEmail({
         to: email,
         subject: `Tu Reserva Fue Cancelada por el Moderador - CEQ #${reserva.id}`,
+        responderA: correoRespuesta(reserva.espacio_id),
         html: `
           <h2>Tu reserva fue cancelada por el moderador</h2>
           <p><strong>Motivo:</strong> ${escapeHtml(motivo) || 'No especificado'}</p>
@@ -2239,6 +2271,7 @@ app.post('/api/admin/cancelar/:reserva_id', verifyAdminToken, verificarCSRF, asy
     enviarEmail({
       to: destinatariosAviso,
       subject: `🔔 Un moderador canceló una reserva (${getEspacioNombre(reserva.espacio_id)}) - CEQ #${reserva.id}`,
+      responderA: correoDeContacto(reserva.contacto),
       html: `
         <h2>Cancelación realizada por un moderador</h2>
         <p>Un moderador canceló la siguiente reserva desde el panel de administración:</p>
@@ -2722,6 +2755,7 @@ async function enviarRecordatorios() {
     const enviado = await enviarEmail({
       to: email,
       subject: `⏰ Recordatorio: ${getEspacioNombre(r.espacio_id)}, ${fechaLarga(r.fecha)} - CEQ #${r.id}`,
+      responderA: correoRespuesta(r.espacio_id),
       html: htmlRecordatorio(r)
     });
     if (!enviado) {
@@ -2740,6 +2774,90 @@ async function limpiarListaEspera() {
   const { error: error2 } = await supabase.from('lista_espera').delete()
     .is('avisado_en', null).lt('creado_en', haceDias(DIAS_VIGENCIA_LISTA_ESPERA));
   if (error2) throw error2;
+}
+
+// ========== COPIA DE SEGURIDAD MENSUAL POR CORREO ==========
+// Supabase gratis no guarda copias que se puedan descargar, y la planilla de Google ya no tiene
+// los contactos. Por eso, una vez por mes (la primera vuelta después de las 08:00 de cada mes
+// nuevo), se manda al "correo de alertas" un archivo con TODAS las reservas y todos sus datos,
+// para guardarlo en Drive. El mes ya enviado se anota en la tabla configuracion
+// (clave copia_mensual_enviada), así no se repite aunque el servidor se reinicie.
+const CLAVE_COPIA_MENSUAL = 'copia_mensual_enviada';
+
+// Celda para CSV abierto con Excel: entre comillas, y si empieza con = + - @ se le antepone una
+// comilla simple para que Excel no lo tome como fórmula
+function celdaCsv(valor) {
+  let texto = String(valor == null ? '' : valor).replace(/\r?\n/g, ' ');
+  if (/^[=+\-@\t]/.test(texto)) texto = "'" + texto;
+  return `"${texto.replace(/"/g, '""')}"`;
+}
+
+async function armarCsvReservas() {
+  const filas = await leerTodasLasFilas(() => supabase
+    .from('reservas')
+    .select('id, espacio_id, fecha, hora_inicio, hora_fin, nombre_solicitante, contacto, motivo, acompanantes, estado, reservado_por_admin, asistencia, created_at, cancelada_en, cancelada_por, motivo_cancelacion')
+    .order('fecha', { ascending: true })
+    .order('hora_inicio', { ascending: true })
+    .order('id', { ascending: true }));
+  const fechaHora = valor => valor ? fechaHoraAsuncionTexto(new Date(aIsoUtc(valor))) : '';
+  const encabezado = ['N°', 'Fecha', 'Espacio', 'Turno', 'Inicio', 'Fin', 'Nombre', 'Celular', 'Email', 'Motivo',
+    'Acompañantes', 'Estado', 'Prioridad', 'Asistencia', 'Creada', 'Cancelada', 'Cancelada por', 'Motivo de cancelación'];
+  const lineas = [encabezado.map(celdaCsv).join(';')];
+  for (const r of filas) {
+    const [celular = '', email = ''] = String(r.contacto || '').split('|').map(p => p.trim());
+    const inicio = String(r.hora_inicio || '').substring(0, 5);
+    const fin = String(r.hora_fin || '').substring(0, 5);
+    lineas.push([
+      r.id, r.fecha, getEspacioNombre(r.espacio_id),
+      Number(r.espacio_id) === 3 ? nombreTurnoFrente(inicio, fin) : '',
+      inicio, fin, r.nombre_solicitante, celular, email, (r.motivo || '').trim(),
+      acompanantesTexto(r.acompanantes),
+      r.estado === 'cancelada' ? 'Cancelada' : 'Activa',
+      r.reservado_por_admin ? 'Sí' : 'No',
+      r.asistencia === 'vino' ? 'Vino' : r.asistencia === 'no_vino' ? 'No vino' : '',
+      fechaHora(r.created_at), fechaHora(r.cancelada_en), r.cancelada_por || '', r.motivo_cancelacion || ''
+    ].map(celdaCsv).join(';'));
+  }
+  // BOM: para que Excel muestre bien las tildes; ";" es el separador que usa Excel en español
+  return { csv: '﻿' + lineas.join('\r\n') + '\r\n', total: filas.length };
+}
+
+async function enviarCopiaMensual() {
+  if (horaActualEnAsuncionEnMinutos() < 8 * 60) return;
+  const mes = hoyEnAsuncion().toISOString().slice(0, 7); // "2026-11"
+  const { data, error } = await supabase
+    .from('configuracion').select('valor').eq('clave', CLAVE_COPIA_MENSUAL).maybeSingle();
+  if (error) throw error;
+  const anterior = data ? data.valor : null;
+  if (anterior === mes) return;
+
+  // Se anota ANTES de mandar (no se manda dos veces); si el envío falla, se vuelve atrás y se
+  // reintenta en la próxima vuelta
+  const marcar = valor => supabase.from('configuracion').upsert({ clave: CLAVE_COPIA_MENSUAL, valor }, { onConflict: 'clave' });
+  const { error: errorMarcar } = await marcar(mes);
+  if (errorMarcar) throw errorMarcar;
+
+  let enviado = false;
+  try {
+    const { csv, total } = await armarCsvReservas();
+    const [anio, numeroMes] = mes.split('-');
+    const nombreMes = ['enero', 'febrero', 'marzo', 'abril', 'mayo', 'junio', 'julio', 'agosto', 'septiembre', 'octubre', 'noviembre', 'diciembre'][Number(numeroMes) - 1];
+    enviado = await enviarEmail({
+      to: config.email_alertas,
+      subject: `Copia de seguridad de las reservas: ${nombreMes} ${anio} (${total} reservas)`,
+      html: `
+        <p>Hola,</p>
+        <p>Te mandamos la copia de seguridad mensual del sistema de reservas: el archivo adjunto tiene las <strong>${total} reservas</strong> guardadas hasta hoy, con todos sus datos (también celulares, correos y cancelaciones).</p>
+        <p><strong>Qué hacer:</strong> guardá el archivo en la carpeta de copias de Google Drive. Se abre con Excel o con Google Sheets.</p>
+        <p>La base de datos gratuita no guarda copias que se puedan descargar: si algún día se perdiera, estas copias son la forma de recuperar las reservas.</p>
+        <p>El archivo tiene datos personales: no lo reenvíes ni lo compartas fuera de quienes administran el sistema.</p>
+        <p>Sistema de Reservas del CEQ</p>
+      `,
+      adjuntos: [{ name: `reservas-ceq-${mes}.csv`, content: Buffer.from(csv, 'utf8').toString('base64') }]
+    });
+  } finally {
+    if (!enviado) await marcar(anterior || '');
+  }
 }
 
 // Correo de alerta (admin supremo > Configuración > correo de alertas) si hubo errores del
@@ -2784,12 +2902,26 @@ async function enviarAlertas() {
   }
 }
 
+// Si una vuelta todavía no terminó (por ejemplo, Brevo o la base tardan), la siguiente no arranca:
+// así dos vueltas nunca mandan el mismo correo a la vez
+let tareasEnCurso = false;
 async function tareasPeriodicas() {
+  if (tareasEnCurso) return;
+  tareasEnCurso = true;
+  try {
+    await correrTareasPeriodicas();
+  } finally {
+    tareasEnCurso = false;
+  }
+}
+
+async function correrTareasPeriodicas() {
   const tareas = [
     ['configuración', cargarConfiguracion],
     ['aperturas programadas', abrirMesesProgramados],
     ['recordatorios', enviarRecordatorios],
     ['lista de espera', limpiarListaEspera],
+    ['copia mensual', enviarCopiaMensual],
     ['alertas', enviarAlertas]
   ];
   for (const [nombre, tarea] of tareas) {
