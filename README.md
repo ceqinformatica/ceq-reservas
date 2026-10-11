@@ -18,6 +18,7 @@ Este manual es para quien tenga que mantener el sistema. No hace falta saber pro
 Estudiante ──> Páginas (Vercel) ──> Servidor (Render) ──> Base de datos (Supabase)
                                          └──> Correos (Brevo)
 UptimeRobot ──> consulta el servidor cada 5 minutos
+Planilla de Google Sheets ──> pide las reservas al servidor cada hora
 ```
 
 | Parte | Dónde está | Qué hace |
@@ -27,6 +28,7 @@ UptimeRobot ──> consulta el servidor cada 5 minutos
 | Base de datos | **Supabase** (proyecto `reservas-ceq`, PostgreSQL 17, plan gratuito) | Guarda reservas, bloqueos, meses habilitados, reportes, qué espacios están abiertos y el registro de actividad del panel. Su estructura está en [`esquema-base-de-datos.sql`](esquema-base-de-datos.sql). |
 | Correos | **Brevo**, remitente `reservas@ceq-una.com` | Confirmaciones, cancelaciones y avisos a los moderadores. |
 | Monitoreo | **UptimeRobot**, cuenta `ceq.informatica@gmail.com` | Consulta `https://api.ceq-una.com/api/health` cada 5 minutos y avisa por correo si el sistema se cae. Además mantiene despiertos al servidor y a la base. |
+| Planilla | **Google Sheets**, cuenta `ceq.informatica@gmail.com`, con el script [`sincronizar-reservas.gs`](sincronizar-reservas.gs) | Copia de todas las reservas que se actualiza sola cada hora, con resumen y una copia fija por mes (sección 5). |
 | Dominio | `ceq-una.com` registrado en **Hosting PY**, DNS administrado en **Cloudflare** | Los registros `reservas` (Vercel) y `api` (Render) **no se tocan**. |
 
 ## 2. Accesos
@@ -51,6 +53,7 @@ Las contraseñas de estas cuentas se guardan en un documento privado de la Secre
 | `JWT_SECRET` | Sí | Texto secreto con el que se firman las sesiones del panel. Si se cambia, se cierran todas las sesiones abiertas. |
 | `ADMIN_PASSWORD_HASH` | Sí | La contraseña del panel (admin), cifrada (sección 11). |
 | `SUPERADMIN_PASSWORD_HASH` | No | La contraseña del **admin supremo**, cifrada (sección 11). Tiene que ser distinta de la del admin. Si no está, nadie puede entrar como admin supremo y el panel funciona igual que antes. |
+| `CLAVE_SINCRONIZACION` | No | Clave con la que la planilla de Google Sheets pide las reservas (sección 5). Al menos 32 caracteres al azar. Si no está, esa función queda apagada. Si se cambia, hay que guardarla de nuevo en la planilla. |
 | `EMAIL_MODERADOR` | No | Correo que recibe los avisos generales y los reportes. Por defecto, `ceq.informatica@gmail.com`. |
 | `EMAIL_MODERADOR_FRENTE` | No | Correo que además recibe los avisos del Frente. |
 | `EMAILS_SIN_LIMITE` | No | Correos que no tienen el límite de 2 reservas por mes (para hacer pruebas), separados por coma. |
@@ -78,7 +81,8 @@ Si falta una obligatoria, el servidor no arranca y lo dice en los Logs de Render
 | Reserva de prioridad (Comisión Directiva) | Prioridad | Solo Frente. Se puede hacer aunque el mes no esté habilitado y no cuenta para el límite por persona. Le llega la confirmación al correo que se cargue. |
 | Cancelar una reserva | Reservas → Cancelar | Pide un motivo; se avisa por correo a quien reservó y a los moderadores. Así se ayuda a quien perdió su código. |
 | Revisar reportes | Reportes | Cada reporte nuevo también llega por correo a `EMAIL_MODERADOR` (hasta 20 avisos por día). Marcalos como leídos. |
-| **Copia de seguridad** | Exportar | **Exportar a Excel una vez por mes.** El plan gratuito de Supabase no guarda copias que se puedan recuperar. |
+| Exportar a Excel | Exportar | Botones **Este mes**, **Mes pasado** y **Todo**, filtro por espacio y por estado. Trae una hoja **Resumen** (totales por espacio, turno, día de la semana y mes) y una hoja por espacio con todos los datos de cada reserva, con fechas reales y filtros. |
+| **Copia de seguridad** | Planilla de Google Sheets | El plan gratuito de Supabase no guarda copias que se puedan recuperar. La planilla guarda sola una copia fija por mes (pestañas "Copia AAAA-MM"). Revisá de vez en cuando que la hora de "Última actualización" sea reciente. Si la planilla no está funcionando, **exportá a Excel una vez por mes**. |
 
 ### Admin supremo
 
@@ -94,6 +98,28 @@ Se entra al mismo panel, pero con la contraseña del admin supremo (`SUPERADMIN_
 | Cerrar todas las sesiones | Avanzado → Seguridad | Saca del panel a todos, incluido quien lo usa. Si se sospecha que alguien conoce una contraseña, cambiala también (sección 11). |
 
 El admin normal no ve la pestaña Avanzado, y el servidor le rechaza esas acciones aunque intente hacerlas por otro lado.
+
+### Planilla de Google Sheets (se actualiza sola)
+
+Una planilla en la cuenta `ceq.informatica@gmail.com` tiene todas las reservas y se actualiza **cada hora** con el script [`sincronizar-reservas.gs`](sincronizar-reservas.gs). Pestañas:
+- **Resumen:** hora de la última actualización, estado (OK o el error) y totales por espacio, turno, día de la semana y mes.
+- **Reservas:** todas las reservas, una por fila, con filtros. Se reescribe en cada actualización: **no edites ahí**, porque se pierde. Para trabajar con los datos, copiá la pestaña.
+- **Copia AAAA-MM:** foto fija tomada en la primera actualización de cada mes. Es la copia de seguridad: no se vuelve a tocar. Se guardan las últimas 24.
+
+Tiene datos personales (nombre, celular, email): compartila **solo** con quienes administran el sistema, nunca con "cualquier persona con el enlace".
+
+**Cómo funciona:** el script pide los datos a `https://api.ceq-una.com/api/sincronizacion/reservas`, que solo responde si recibe la clave `CLAVE_SINCRONIZACION` (sección 3). Esa dirección es de solo lectura: la planilla no puede cambiar nada del sistema.
+
+**Armarla desde cero** (o si se pierde):
+1. Generar una clave al azar en una computadora con Node.js: `node -e "console.log(require('crypto').randomBytes(32).toString('hex'))"`. Ponerla en Render como `CLAVE_SINCRONIZACION` y guardar.
+2. Con la cuenta `ceq.informatica@gmail.com`, crear una planilla nueva en Google Sheets (por ejemplo, "Reservas CEQ").
+3. **Extensiones → Apps Script.** Borrar lo que haya, pegar todo `sincronizar-reservas.gs` y **Guardar**.
+4. Volver a la planilla y recargarla: aparece el menú **Reservas CEQ**.
+5. **Reservas CEQ → 1. Guardar clave de sincronización** y pegar la clave. La primera vez Google pide autorización: elegir la cuenta, después **Configuración avanzada → Ir a (nombre del proyecto)** y **Permitir**. El aviso de "app no verificada" es normal en scripts propios. Si después de autorizar no aparece el cuadro para pegar la clave, tocá de nuevo la opción del menú.
+6. **Reservas CEQ → Actualizar ahora**, para probar.
+7. **Reservas CEQ → 2. Activar actualización automática (cada hora).**
+
+Si falla la actualización automática, Google manda un correo a la cuenta. La causa más común es que la clave de Render y la de la planilla no coinciden: guardarla de nuevo con el paso 5.
 
 ## 6. Reglas del sistema y dónde se cambian
 
@@ -137,6 +163,8 @@ Para volver a cerrarlo: desmarcar la casilla, escribir el aviso que tiene que ve
 | Supabase | Se pausa tras 7 días sin actividad; 500 MB; sin copias recuperables | El monitor evita la pausa. Exportar a Excel una vez por mes. |
 | Brevo | 300 correos por día en total | Cada reserva manda 2 o 3. Los avisos de reportes tienen un tope propio de 20 por día. |
 | UptimeRobot | Revisa cada 5 minutos | Una caída se detecta con hasta 5 minutos de demora. |
+| Google Apps Script | 20.000 consultas externas y 90 minutos de disparadores por día | La planilla usa 24 consultas por día y unos segundos cada vez. |
+| Supabase (API) | Máximo 1000 filas por pedido | El servidor pide de a 1000 hasta traer todas (panel y planilla). |
 
 ## 10. Base de datos
 
@@ -173,4 +201,4 @@ De la auditoría técnica del 24/07/2026 (la respuesta completa está en el Apé
 - Evitar reservas duplicadas por reintentos con una clave de idempotencia (BUG-004).
 - Guardar celular y correo en columnas separadas (VAL-002).
 - Definir si se siguen mostrando los nombres en el calendario público (PRIV-001, decisión de la Comisión).
-- Paginación del panel cuando haya muchas reservas (PERF-001).
+- Paginación del panel cuando haya muchas reservas (PERF-001). Hoy el panel ya trae todas de a 1000; con varios miles convendría mostrarlas por páginas.

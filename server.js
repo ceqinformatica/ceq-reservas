@@ -176,6 +176,10 @@ const ADMIN_PASSWORD_HASH = process.env.ADMIN_PASSWORD_HASH;
 // Contraseña del admin supremo (opcional, también cifrada con bcrypt). Con ella se entra al
 // mismo panel, pero con la pestaña "Avanzado". Si no está configurada, solo existe el admin normal.
 const SUPERADMIN_PASSWORD_HASH = process.env.SUPERADMIN_PASSWORD_HASH || '';
+// Clave con la que la planilla de Google Sheets pide las reservas (GET /api/sincronizacion/reservas).
+// Opcional: si no está (o tiene menos de 32 caracteres), esa ruta queda desactivada.
+const CLAVE_SINCRONIZACION = process.env.CLAVE_SINCRONIZACION || '';
+const SINCRONIZACION_ACTIVA = CLAVE_SINCRONIZACION.length >= 32;
 
 // ========== MIDDLEWARE ==========
 
@@ -296,7 +300,44 @@ const lecturaPublicaLimiter = rateLimit({
   message: { error: 'Demasiadas solicitudes. Probá de nuevo en unos minutos.' }
 });
 
+// La planilla de Google Sheets se actualiza una vez por hora: 30 pedidos por hora deja margen
+// para "Actualizar ahora" a mano y corta cualquier intento de adivinar la clave
+const sincronizacionLimiter = rateLimit({
+  windowMs: 60 * 60 * 1000,
+  max: 30,
+  keyGenerator: obtenerIpCliente,
+  handler: registrar429,
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { error: 'Demasiadas solicitudes de sincronización. Probá de nuevo más tarde.' }
+});
+
 // ========== UTILIDADES ==========
+
+// Supabase entrega como máximo 1000 filas por pedido: esto pide de a 1000 hasta traer todas.
+// `armarConsulta` tiene que devolver una consulta nueva cada vez, con un orden que no cambie
+// entre páginas (por eso siempre se ordena también por id).
+async function leerTodasLasFilas(armarConsulta, maximo = 50000) {
+  const TAM_PAGINA = 1000;
+  const filas = [];
+  for (let desde = 0; desde < maximo; desde += TAM_PAGINA) {
+    const { data, error } = await armarConsulta().range(desde, desde + TAM_PAGINA - 1);
+    if (error) throw error;
+    filas.push(...(data || []));
+    if (!data || data.length < TAM_PAGINA) break;
+  }
+  return filas;
+}
+
+// Fecha y hora de la base -> texto ISO en UTC ("2026-10-11T08:41:05.123Z"). created_at no trae
+// zona (la base guarda en UTC); cancelada_en sí ("+00:00").
+function aIsoUtc(valor) {
+  if (!valor) return null;
+  let texto = String(valor).replace(' ', 'T').replace(/(\.\d{3})\d+/, '$1');
+  if (!/(Z|[+-]\d{2}:?\d{2})$/.test(texto)) texto += 'Z';
+  const fecha = new Date(texto);
+  return isNaN(fecha) ? null : fecha.toISOString();
+}
 
 // Máximo de reservas activas por persona por mes (formulario público)
 const MAX_RESERVAS_POR_PERSONA_MES = 2;
@@ -1213,14 +1254,15 @@ app.post('/api/reportes', reportesLimiter, async (req, res) => {
 // GET admin/reservas
 app.get('/api/admin/reservas', verifyAdminToken, async (req, res) => {
   try {
-    const { data, error } = await supabase
+    // Todas las reservas, de a 1000 (antes se pedían en un solo pedido y Supabase corta en 1000:
+    // al pasar ese número, el panel y el Excel iban a dejar de ver las más viejas sin avisar)
+    const data = await leerTodasLasFilas(() => supabase
       .from('reservas')
       .select('*')
       .order('fecha', { ascending: false })
-      .limit(2000); // tope de seguridad; si el volumen crece mucho, pasar a paginación real
-    
-    if (error) throw error;
-    res.json(data || []);
+      .order('id', { ascending: false }));
+
+    res.json(data);
   } catch (error) {
     manejarError(res, error);
   }
@@ -1927,6 +1969,66 @@ app.post('/api/superadmin/cerrar-sesiones', verifyAdminToken, verifySuperAdmin, 
   }
 });
 
+// ========== SINCRONIZACIÓN CON GOOGLE SHEETS ==========
+// La planilla de la Secretaría (cuenta ceq.informatica) pide acá todas las reservas una vez
+// por hora, con un script de Google (Apps Script). Es de solo lectura y trae datos personales,
+// por eso exige la clave CLAVE_SINCRONIZACION en el header X-Clave-Sincronizacion (nunca en
+// la dirección, para que no quede en ningún registro). Se compara en tiempo constante.
+function claveSincronizacionValida(recibida) {
+  if (!SINCRONIZACION_ACTIVA || typeof recibida !== 'string' || recibida.length === 0) return false;
+  const a = crypto.createHash('sha256').update(recibida).digest();
+  const b = crypto.createHash('sha256').update(CLAVE_SINCRONIZACION).digest();
+  return crypto.timingSafeEqual(a, b);
+}
+
+app.get('/api/sincronizacion/reservas', sincronizacionLimiter, async (req, res) => {
+  res.set('Cache-Control', 'no-store');
+  if (!SINCRONIZACION_ACTIVA) {
+    return res.status(503).json({ error: 'La sincronización no está configurada en el servidor' });
+  }
+  if (!claveSincronizacionValida(req.headers['x-clave-sincronizacion'])) {
+    console.warn(`⚠️ Sincronización rechazada (clave inválida) desde ${obtenerIpCliente(req)}`);
+    return res.status(401).json({ error: 'Clave de sincronización inválida' });
+  }
+
+  try {
+    const filas = await leerTodasLasFilas(() => supabase
+      .from('reservas')
+      .select('id, espacio_id, fecha, hora_inicio, hora_fin, nombre_solicitante, contacto, motivo, estado, reservado_por_admin, created_at, cancelada_en, cancelada_por, motivo_cancelacion')
+      .order('fecha', { ascending: true })
+      .order('hora_inicio', { ascending: true })
+      .order('id', { ascending: true }));
+
+    const reservas = filas.map(r => {
+      const [celular = '', email = ''] = String(r.contacto || '').split('|').map(p => p.trim());
+      const inicio = String(r.hora_inicio || '').substring(0, 5);
+      const fin = String(r.hora_fin || '').substring(0, 5);
+      return {
+        id: r.id,
+        espacio: getEspacioNombre(r.espacio_id),
+        fecha: r.fecha,
+        hora_inicio: inicio,
+        hora_fin: fin,
+        turno: Number(r.espacio_id) === 3 ? (NOMBRES_TURNOS_FRENTE[`${inicio}-${fin}`] || '') : '',
+        nombre: r.nombre_solicitante || '',
+        celular,
+        email,
+        motivo: (r.motivo || '').trim(),
+        estado: r.estado,
+        prioridad: r.reservado_por_admin === true,
+        creada_en: aIsoUtc(r.created_at),
+        cancelada_en: aIsoUtc(r.cancelada_en),
+        cancelada_por: r.cancelada_por || '',
+        motivo_cancelacion: r.motivo_cancelacion || ''
+      };
+    });
+
+    res.json({ generado_en: new Date().toISOString(), total: reservas.length, reservas });
+  } catch (error) {
+    manejarError(res, error);
+  }
+});
+
 // GET estadísticas
 app.get('/api/estadisticas', lecturaPublicaLimiter, async (req, res) => {
   try {
@@ -1958,4 +2060,5 @@ app.get('/api/estadisticas', lecturaPublicaLimiter, async (req, res) => {
 app.listen(PORT, () => {
   console.log(`✅ Servidor corriendo en puerto ${PORT}`);
   console.log(`🔒 Modo seguro: JWT, bcrypt y validaciones activadas`);
+  console.log(`📊 Sincronización con Google Sheets: ${SINCRONIZACION_ACTIVA ? 'activada' : 'desactivada (falta CLAVE_SINCRONIZACION)'}`);
 });
