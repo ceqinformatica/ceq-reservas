@@ -118,7 +118,9 @@ Una planilla en la cuenta `ceq.informatica@gmail.com` tiene todas las reservas y
 - **Una pestaña por mes** ("Noviembre 2026", "Octubre 2026", …), del más nuevo al más viejo: las reservas de ese mes, con el mismo formato. También se reescriben (no editar ahí). Cada mes nuevo aparece solo; si un mes se queda sin reservas, su pestaña se borra.
 - **Copia AAAA-MM:** foto fija tomada en la primera actualización de cada mes. Es la copia de seguridad: no se vuelve a tocar. Se guardan las últimas 24.
 
-Tiene datos personales (nombre, celular, email): compartila **solo** con quienes administran el sistema, nunca con "cualquier persona con el enlace".
+Columnas: N°, Fecha, Día, Espacio, Turno, Inicio, Fin, Nombre, Motivo, Acompañantes (solo nombres), Estado, Asistencia y Creada. **No trae celulares, correos, prioridad ni datos de cancelación**: el servidor ni siquiera se los manda (para eso están el panel y su Excel). Las "personas distintas" del Resumen se cuentan con un código anónimo que manda el servidor. Las copias guardadas antes de este cambio se limpiaron solas (se borraron esas columnas).
+
+Igual tiene nombres: compartila **solo** con quienes administran el sistema, nunca con "cualquier persona con el enlace".
 
 **Cómo funciona:** el script pide los datos a `https://api.ceq-una.com/api/sincronizacion/reservas`, que solo responde si recibe la clave `CLAVE_SINCRONIZACION` (sección 3). Esa dirección es de solo lectura: la planilla no puede cambiar nada del sistema.
 
@@ -141,7 +143,7 @@ Si falla la actualización automática, Google manda un correo a la cuenta. La c
 | Turnos del Frente | Desayuno 07–10, Almuerzo 10–13, Merienda 14–18 | Panel → Avanzado → Configuración (admin supremo). Se guarda en la tabla `configuracion`. |
 | Motivo en el Frente | Se elige de una lista: Actividad Personal; Recaudación - Asociación Estudiantil; Recaudación - Secretaría CEQ; Recaudación - Padrinaje; Recaudación - Congreso o Evento Académico. En el Altillo el motivo es libre. | `MOTIVOS_FRENTE` en `server.js` (la página la toma de ahí) |
 | Horario del Altillo | Bloques de 1 hora de 08:00 a 20:00 (el último empieza a las 19:00), de 1 a 2 horas por reserva. Hoy se puede tomar el bloque en curso mientras no haya terminado (a las 11:30, el de las 11:00 sí; a las 12:00, ya no). | `ALTILLO_HORA_DESDE`, `ALTILLO_HORA_HASTA` y `ALTILLO_MAX_HORAS` en `server.js` (la página los toma de ahí) |
-| Acompañantes | Solo en el Altillo (en el Frente no se piden). Opcional, hasta 4 por reserva, con nombre y celular. Se ven en el panel, el Excel, la planilla y los correos; nunca en la página pública. | `MAX_ACOMPANANTES` en `server.js` y el límite `reservas_acompanantes_validos` de la base |
+| Acompañantes | Solo en el Altillo (en el Frente no se piden). Opcional, hasta 4 por reserva, con nombre y celular. Se ven en el panel, el Excel y los correos (en la planilla, solo los nombres); nunca en la página pública. | `MAX_ACOMPANANTES` en `server.js` y el límite `reservas_acompanantes_validos` de la base |
 | Días | Lunes a viernes, desde hoy, solo en meses habilitados | `server.js` (`POST /api/reservas`) |
 | Límite por persona | 2 reservas activas por mes y por espacio (se reconoce a la persona por correo o por celular) | Panel → Avanzado → Configuración (admin supremo) |
 | Cancelación con código o enlace (Frente) | Hasta 2 días antes; después, por WhatsApp | `cancelarComoUsuario()` en `server.js` |

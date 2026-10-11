@@ -14,7 +14,8 @@
  *     "Reservas" (copia de seguridad: no se vuelve a tocar). Se conservan las últimas 24.
  *
  * La clave NO se escribe en este código: se guarda con el menú "Reservas CEQ > Guardar clave".
- * La planilla tiene datos personales: compartila solo con quienes administran el sistema.
+ * No trae celulares, correos ni datos de cancelación (esos se ven en el panel y en el Excel del
+ * panel). Igual tiene nombres: compartila solo con quienes administran el sistema.
  */
 
 const URL_RESERVAS = 'https://api.ceq-una.com/api/sincronizacion/reservas';
@@ -26,10 +27,13 @@ const COPIAS_A_CONSERVAR = 24;
 const DIAS_SEMANA = ['Domingo', 'Lunes', 'Martes', 'Miércoles', 'Jueves', 'Viernes', 'Sábado'];
 const MESES = ['Enero', 'Febrero', 'Marzo', 'Abril', 'Mayo', 'Junio', 'Julio', 'Agosto', 'Septiembre', 'Octubre', 'Noviembre', 'Diciembre'];
 const PATRON_HOJA_MES = new RegExp('^(' + MESES.join('|') + ') \\d{4}$'); // "Octubre 2026"
-const COLUMNAS = ['N°', 'Fecha', 'Día', 'Espacio', 'Turno', 'Inicio', 'Fin', 'Nombre', 'Celular', 'Email', 'Motivo',
-  'Acompañantes', 'Estado', 'Prioridad', 'Asistencia', 'Creada', 'Cancelada', 'Cancelada por', 'Motivo de cancelación'];
+// Sin celulares, correos, prioridad ni datos de cancelación (no se muestran en la planilla)
+const COLUMNAS = ['N°', 'Fecha', 'Día', 'Espacio', 'Turno', 'Inicio', 'Fin', 'Nombre', 'Motivo',
+  'Acompañantes', 'Estado', 'Asistencia', 'Creada'];
 const COL_FECHA = 2;
-const COL_FECHA_HORA = [16, 17];
+const COL_FECHA_HORA = [13];
+// Columnas de versiones anteriores que se borran de las copias mensuales ya guardadas
+const COLUMNAS_QUITADAS = ['Celular', 'Email', 'Prioridad', 'Cancelada', 'Cancelada por', 'Motivo de cancelación'];
 
 // ---------- Menú ----------
 function onOpen() {
@@ -138,22 +142,16 @@ function armarFilasReservas(reservas, fechaDesdeTexto, fechaHoraDesdeIso) {
     comoTexto(r.hora_inicio), // si no, Google lo convierte en hora y muestra "7:00" en vez de "07:00"
     comoTexto(r.hora_fin),
     comoTexto(r.nombre),
-    comoTexto(r.celular),
-    comoTexto(r.email),
     comoTexto(r.motivo),
-    comoTexto(r.acompanantes), // "Ana Pérez (0981 111 222), ..." (vacío si no hay)
+    comoTexto(r.acompanantes), // solo nombres: "Ana Pérez, Luis Gómez" (vacío si no hay)
     r.estado === 'cancelada' ? 'Cancelada' : 'Activa',
-    r.prioridad ? 'Sí' : 'No',
     r.asistencia === 'vino' ? 'Vino' : r.asistencia === 'no_vino' ? 'No vino' : '',
-    r.creada_en ? fechaHoraDesdeIso(r.creada_en) : '',
-    r.estado === 'cancelada' && r.cancelada_en ? fechaHoraDesdeIso(r.cancelada_en) : '',
-    r.estado === 'cancelada' ? (r.cancelada_por || (r.cancelada_en ? '' : 'sin datos')) : '',
-    comoTexto(r.motivo_cancelacion)
+    r.creada_en ? fechaHoraDesdeIso(r.creada_en) : ''
   ]);
 }
 
-// Lo que escribe la gente nunca se interpreta como fórmula ni como número (un celular
-// "0981..." perdería el 0). La comilla inicial no se ve en la celda.
+// Lo que escribe la gente nunca se interpreta como fórmula ni como número. La comilla inicial
+// no se ve en la celda.
 function comoTexto(valor) {
   const texto = String(valor == null ? '' : valor);
   return texto === '' ? '' : "'" + texto;
@@ -203,10 +201,10 @@ function armarResumen(reservas) {
     return [comoTexto(`${MESES[Number(mes.slice(5, 7)) - 1]} ${mes.slice(0, 4)}`), act, del.length - act];
   })));
 
-  const personas = new Set(activas.map(r => (r.email || '').toLowerCase() || (r.celular || '').replace(/\D/g, '')).filter(Boolean));
+  // `persona` es un código anónimo que manda el servidor (mismo correo o celular = mismo código)
+  const personas = new Set(activas.map(r => r.persona).filter(Boolean));
   bloques.push([
     ['Personas distintas con reservas activas', personas.size],
-    ['Reservas de prioridad (activas)', contar(activas, r => r.prioridad)],
     ['Asistencia marcada: vinieron', contar(activas, r => r.asistencia === 'vino')],
     ['Asistencia marcada: no vinieron', contar(activas, r => r.asistencia === 'no_vino')]
   ]);
@@ -309,6 +307,34 @@ function guardarCopiaMensual_(ss, hoja) {
   const copias = ss.getSheets().filter(h => h.getName().indexOf(PREFIJO_COPIA) === 0)
     .sort((a, b) => a.getName() < b.getName() ? -1 : 1);
   copias.slice(0, Math.max(copias.length - COPIAS_A_CONSERVAR, 0)).forEach(h => ss.deleteSheet(h));
+  copias.slice(Math.max(copias.length - COPIAS_A_CONSERVAR, 0)).forEach(limpiarCopiaVieja_);
+}
+
+// Las copias guardadas con la versión anterior tenían celulares, correos y otros datos que ya no
+// van: se borran esas columnas y se dejan solo los nombres de los acompañantes (sin el celular).
+// En las copias nuevas no hay nada que hacer.
+function limpiarCopiaVieja_(hoja) {
+  const ancho = hoja.getLastColumn();
+  if (ancho === 0) return;
+  const encabezado = hoja.getRange(1, 1, 1, ancho).getValues()[0];
+  for (let c = ancho; c >= 1; c--) {
+    if (COLUMNAS_QUITADAS.indexOf(encabezado[c - 1]) !== -1) hoja.deleteColumn(c);
+  }
+  const nuevo = hoja.getRange(1, 1, 1, hoja.getLastColumn()).getValues()[0];
+  const colAcomp = nuevo.indexOf('Acompañantes') + 1;
+  const filas = hoja.getLastRow() - 1;
+  if (colAcomp > 0 && filas > 0) {
+    const rango = hoja.getRange(2, colAcomp, filas, 1);
+    const valores = rango.getValues();
+    if (valores.some(f => /\(/.test(String(f[0])))) {
+      rango.setValues(valores.map(f => [f[0] === '' ? '' : comoTexto(quitarCelulares(String(f[0])))]));
+    }
+  }
+}
+
+// "Ana Pérez (0981 111 222), Luis (0982 333 444)" -> "Ana Pérez, Luis"
+function quitarCelulares(texto) {
+  return texto.replace(/\s*\([^)]*\)/g, '');
 }
 
 // La hoja vacía que trae toda planilla nueva ("Hoja 1"), si sigue vacía

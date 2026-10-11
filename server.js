@@ -2562,6 +2562,16 @@ function claveSincronizacionValida(recibida) {
   return crypto.timingSafeEqual(a, b);
 }
 
+// Código anónimo de la persona que reservó (mismo correo, o mismo celular si no hay correo = mismo
+// código). Es un HMAC con una clave derivada de JWT_SECRET: sin esa clave no se puede saber de quién es.
+const CLAVE_CODIGO_PERSONA = crypto.createHmac('sha256', JWT_SECRET).update('codigo-persona-planilla-v1').digest();
+function codigoPersona(contacto) {
+  const [celular = '', email = ''] = String(contacto || '').split('|').map(p => p.trim());
+  const identidad = email.toLowerCase() || celular.replace(/\D/g, '');
+  if (!identidad) return '';
+  return crypto.createHmac('sha256', CLAVE_CODIGO_PERSONA).update(identidad).digest('base64url').slice(0, 12);
+}
+
 app.get('/api/sincronizacion/reservas', sincronizacionLimiter, async (req, res) => {
   res.set('Cache-Control', 'no-store');
   if (!SINCRONIZACION_ACTIVA) {
@@ -2575,13 +2585,15 @@ app.get('/api/sincronizacion/reservas', sincronizacionLimiter, async (req, res) 
   try {
     const filas = await leerTodasLasFilas(() => supabase
       .from('reservas')
-      .select('id, espacio_id, fecha, hora_inicio, hora_fin, nombre_solicitante, contacto, motivo, estado, reservado_por_admin, created_at, cancelada_en, cancelada_por, motivo_cancelacion, asistencia, acompanantes')
+      .select('id, espacio_id, fecha, hora_inicio, hora_fin, nombre_solicitante, contacto, motivo, estado, created_at, asistencia, acompanantes')
       .order('fecha', { ascending: true })
       .order('hora_inicio', { ascending: true })
       .order('id', { ascending: true }));
 
+    // A la planilla NO van celulares, correos, prioridad ni datos de cancelación. Para contar
+    // personas distintas se manda un código anónimo por persona (no se puede volver al correo
+    // ni al celular). Los acompañantes van solo con el nombre.
     const reservas = filas.map(r => {
-      const [celular = '', email = ''] = String(r.contacto || '').split('|').map(p => p.trim());
       const inicio = String(r.hora_inicio || '').substring(0, 5);
       const fin = String(r.hora_fin || '').substring(0, 5);
       return {
@@ -2592,17 +2604,12 @@ app.get('/api/sincronizacion/reservas', sincronizacionLimiter, async (req, res) 
         hora_fin: fin,
         turno: Number(r.espacio_id) === 3 ? nombreTurnoFrente(inicio, fin) : '',
         nombre: r.nombre_solicitante || '',
-        celular,
-        email,
         motivo: (r.motivo || '').trim(),
+        acompanantes: (Array.isArray(r.acompanantes) ? r.acompanantes : []).map(a => a && a.nombre).filter(Boolean).join(', '),
         estado: r.estado,
-        prioridad: r.reservado_por_admin === true,
         asistencia: r.asistencia || '',
-        acompanantes: acompanantesTexto(r.acompanantes),
         creada_en: aIsoUtc(r.created_at),
-        cancelada_en: aIsoUtc(r.cancelada_en),
-        cancelada_por: r.cancelada_por || '',
-        motivo_cancelacion: r.motivo_cancelacion || ''
+        persona: codigoPersona(r.contacto)
       };
     });
 
