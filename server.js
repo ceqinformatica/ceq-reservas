@@ -1024,6 +1024,23 @@ app.post('/api/cancelar-por-codigo', cancelarLimiter, async (req, res) => {
   }
 });
 
+// Cada reporte nuevo se avisa por email al moderador general, para enterarse en el
+// momento (antes solo quedaban guardados y uno se enteraba recién al abrir el panel).
+// Tiene un tope diario: el plan gratuito de Brevo permite 300 emails por día EN TOTAL,
+// y alguien que mande reportes falsos desde muchas IPs no debe poder agotarlos y dejar
+// sin email de confirmación a las reservas. Pasado el tope, los reportes se siguen
+// guardando igual y se ven en el panel; solo deja de llegar el aviso hasta el día siguiente.
+const MAX_AVISOS_REPORTE_POR_DIA = 20;
+let avisosReporteHoy = { dia: '', cantidad: 0 };
+
+function puedeAvisarReporte() {
+  const dia = hoyEnAsuncion().toISOString().slice(0, 10);
+  if (avisosReporteHoy.dia !== dia) avisosReporteHoy = { dia, cantidad: 0 };
+  if (avisosReporteHoy.cantidad >= MAX_AVISOS_REPORTE_POR_DIA) return false;
+  avisosReporteHoy.cantidad++;
+  return true;
+}
+
 // Reportar error (público)
 app.post('/api/reportes', reportesLimiter, async (req, res) => {
   try {
@@ -1041,12 +1058,32 @@ app.post('/api/reportes', reportesLimiter, async (req, res) => {
       return res.status(400).json({ error: 'URL inválida' });
     }
     
-    const { error } = await supabase
+    const { data: reporteCreado, error } = await supabase
       .from('reportes_errores')
-      .insert([{ mensaje, url, navegador, leido: false }]);
-    
+      .insert([{ mensaje, url, navegador, leido: false }])
+      .select('id');
+
     if (error) throw error;
-    return res.status(201).json({ mensaje: 'Reporte enviado correctamente' });
+    res.status(201).json({ mensaje: 'Reporte enviado correctamente' });
+
+    // El email sale después de responder, igual que en las reservas (enviarEmail nunca lanza error)
+    if (puedeAvisarReporte()) {
+      const reporteId = reporteCreado?.[0]?.id;
+      enviarEmail({
+        to: EMAIL_MODERADOR,
+        subject: `⚠️ Nuevo reporte de error${reporteId ? ` #${reporteId}` : ''} - CEQ Reservas`,
+        html: `
+          <h2>Nuevo reporte de error</h2>
+          <p>Alguien envió un reporte desde la opción "Reportar un problema" de la página de reservas.</p>
+          <p><strong>Mensaje:</strong><br>${escapeHtml(mensaje).replace(/\n/g, '<br>')}</p>
+          <ul>
+            <li><strong>Página:</strong> ${escapeHtml(url) || 'No informada'}</li>
+            <li><strong>Navegador:</strong> ${escapeHtml(navegador) || 'No informado'}</li>
+          </ul>
+          <p>Podés verlo y marcarlo como leído en el <a href="https://reservas.ceq-una.com/admin.html">panel de administración</a>, pestaña Reportes.</p>
+        `
+      });
+    }
   } catch (error) {
     return manejarError(res, error);
   }
