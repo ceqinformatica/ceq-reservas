@@ -173,6 +173,9 @@ async function enviarEmail({ to, subject, html }) {
 // Configuración de seguridad
 const JWT_SECRET = process.env.JWT_SECRET;
 const ADMIN_PASSWORD_HASH = process.env.ADMIN_PASSWORD_HASH;
+// Contraseña del admin supremo (opcional, también cifrada con bcrypt). Con ella se entra al
+// mismo panel, pero con la pestaña "Avanzado". Si no está configurada, solo existe el admin normal.
+const SUPERADMIN_PASSWORD_HASH = process.env.SUPERADMIN_PASSWORD_HASH || '';
 
 // ========== MIDDLEWARE ==========
 
@@ -381,24 +384,83 @@ function enlaceGoogleCalendar(espacioId, fecha, horaInicioHHMM, horaFinHHMM) {
 // JavaScript del lado del cliente lea o robe el token, incluso si hubiera un XSS
 // que hoy no conocemos; antes, cualquier script inyectado podía leer localStorage
 // directamente y robar la sesión de admin completa).
-const verifyAdminToken = (req, res, next) => {
+// "Cerrar todas las sesiones" (admin supremo): cada token guarda el número de versión de
+// sesiones vigente al iniciar sesión (campo v). Al subir ese número, todos los tokens
+// anteriores dejan de valer. Se guarda en la tabla configuracion y se cachea en memoria
+// (el servidor corre en una sola instancia, así que el cambio se ve al instante).
+let versionSesiones = null;
+async function obtenerVersionSesiones() {
+  if (versionSesiones !== null) return versionSesiones;
+  const { data, error } = await supabase
+    .from('configuracion')
+    .select('valor')
+    .eq('clave', 'version_sesiones')
+    .maybeSingle();
+  if (error) throw error;
+  versionSesiones = Number(data?.valor) || 1;
+  return versionSesiones;
+}
+
+const verifyAdminToken = async (req, res, next) => {
   const token = req.cookies?.admin_token;
-  
+
   if (!token) {
     return res.status(401).json({ error: 'Token requerido' });
   }
-  
+
+  let decoded;
   try {
-    const decoded = jwt.verify(token, JWT_SECRET, { algorithms: ['HS256'] });
-    req.admin = decoded;
-    next();
+    decoded = jwt.verify(token, JWT_SECRET, { algorithms: ['HS256'] });
   } catch (error) {
     if (error.name === 'TokenExpiredError') {
       return res.status(401).json({ error: 'Token expirado' });
     }
     return res.status(403).json({ error: 'Token inválido' });
   }
+
+  try {
+    // Los tokens anteriores a este cambio no traen v: cuentan como versión 1
+    if ((decoded.v || 1) !== await obtenerVersionSesiones()) {
+      return res.status(401).json({ error: 'La sesión fue cerrada por un administrador' });
+    }
+  } catch (error) {
+    return manejarError(res, error);
+  }
+
+  // Los tokens anteriores a este cambio no traen rol: son del admin normal
+  req.admin = { ...decoded, rol: decoded.rol === 'superadmin' ? 'superadmin' : 'admin' };
+  next();
 };
+
+// Solo para las rutas /api/superadmin/*: se usa siempre DESPUÉS de verifyAdminToken.
+// La pestaña "Avanzado" del panel se oculta al admin normal, pero la protección real es esta.
+const verifySuperAdmin = (req, res, next) => {
+  if (req.admin?.rol !== 'superadmin') {
+    return res.status(403).json({ error: 'Solo el admin supremo puede hacer esto' });
+  }
+  next();
+};
+
+// Registro de actividad del panel (admin supremo > Avanzado > Actividad): qué se hizo y
+// cuándo, sin datos personales. Se llama SIN await y nunca lanza error: si falla, solo se
+// loguea en Render, y la acción principal (cancelar, bloquear, etc.) sigue igual.
+async function registrarActividad(rol, accion, detalle = '') {
+  try {
+    const { error } = await supabase
+      .from('registro_actividad')
+      .insert([{ rol, accion, detalle: String(detalle).slice(0, 500) }]);
+    if (error) console.error('⚠️ No se pudo guardar el registro de actividad:', error);
+  } catch (err) {
+    console.error('⚠️ No se pudo guardar el registro de actividad:', err);
+  }
+}
+
+const NOMBRES_ROL = { admin: 'Admin', superadmin: 'Admin supremo' };
+
+// Fecha 'YYYY-MM-DD' -> 'DD/MM/YYYY' para los textos del registro de actividad
+function fechaDMY(fechaISO) {
+  return String(fechaISO).split('-').reverse().join('/');
+}
 
 // CSRF (doble-submit): exige que el valor de la cookie csrf_token coincida con
 // el header X-CSRF-Token que manda el frontend. Se aplica solo a rutas que
@@ -456,17 +518,25 @@ app.post('/api/login', loginLimiter, async (req, res) => {
       return res.status(400).json({ error: 'Contraseña requerida' });
     }
     
-    // Validar contraseña
-    const passwordValida = await bcrypt.compare(password, ADMIN_PASSWORD_HASH);
-    
+    if (typeof password !== 'string' || password.length > 200) {
+      return res.status(400).json({ error: 'Contraseña inválida' });
+    }
+
+    // Validar contraseña: primero la del admin supremo (si está configurada), después la normal
+    const esSuperadmin = SUPERADMIN_PASSWORD_HASH !== '' && await bcrypt.compare(password, SUPERADMIN_PASSWORD_HASH);
+    const passwordValida = esSuperadmin || await bcrypt.compare(password, ADMIN_PASSWORD_HASH);
+
     if (!passwordValida) {
       console.warn(`⚠️ Intento de login fallido a las ${new Date().toISOString()}`);
+      registrarActividad('-', 'Intento de inicio de sesión fallido');
       return res.status(401).json({ error: 'Contraseña incorrecta' });
     }
-    
-    // Generar JWT (válido por 8 horas)
+
+    const rol = esSuperadmin ? 'superadmin' : 'admin';
+
+    // Generar JWT (válido por 8 horas). Lleva el rol y la versión de sesiones vigente.
     const token = jwt.sign(
-      { adminId: 'admin', timestamp: Date.now() },
+      { adminId: 'admin', rol, v: await obtenerVersionSesiones(), timestamp: Date.now() },
       JWT_SECRET,
       { expiresIn: '8h', algorithm: 'HS256' }
     );
@@ -503,10 +573,12 @@ app.post('/api/login', loginLimiter, async (req, res) => {
       path: '/'
     });
     
-    console.log(`✅ Login exitoso a las ${new Date().toISOString()}`);
-    res.json({ 
+    console.log(`✅ Login exitoso (${rol}) a las ${new Date().toISOString()}`);
+    registrarActividad(rol, 'Inicio de sesión');
+    res.json({
       mensaje: 'Sesión iniciada correctamente',
-      expiresIn: '8h'
+      expiresIn: '8h',
+      rol
     });
   } catch (error) {
     console.error('❌ Error en login:', error);
@@ -537,13 +609,18 @@ app.post('/api/logout', (req, res) => {
 // o el login al cargar la página, ya que el token ya no se puede leer desde el
 // JavaScript del cliente)
 app.get('/api/admin/verificar-sesion', verifyAdminToken, (req, res) => {
-  res.json({ ok: true });
+  res.json({ ok: true, rol: req.admin.rol });
 });
 
-// GET espacios
+// GET espacios (público): la página usa `publico` y `aviso` para saber qué espacios se
+// pueden reservar y qué aviso mostrar de los que no (se manejan desde el admin supremo)
 app.get('/api/espacios', async (req, res) => {
   try {
-    const { data } = await supabase.from('espacios').select('*');
+    const { data, error } = await supabase
+      .from('espacios')
+      .select('id, nombre, publico, aviso')
+      .order('id', { ascending: true });
+    if (error) throw error;
     res.json(data || []);
   } catch (error) {
     manejarError(res, error);
@@ -659,14 +736,24 @@ app.post('/api/reservas', crearReservaLimiter, async (req, res) => {
       return res.status(400).json({ error: 'El contacto debe tener el formato "celular | email" con un email válido' });
     }
 
-    // Por ahora solo se ofrece públicamente Frente (3). Altillo (1) se gestiona a mano
-    // con planilla (ver modalAvisoAltillo en index.html): el botón estaba oculto, pero
-    // la API lo seguía aceptando y alguien podía reservarlo por fuera de la página.
-    // Para volver a habilitar Altillo, agregar el 1 a esta lista.
-    const ESPACIOS_PUBLICOS = [3];
+    // Qué espacios se pueden reservar desde la página lo decide el admin supremo
+    // (columna espacios.publico, panel > Avanzado > Espacios). Se revisa acá y no solo en
+    // la página, porque alguien podría mandar la reserva directo a la API.
     const espacioIdNum = parseInt(espacio_id);
-    if (!ESPACIOS_PUBLICOS.includes(espacioIdNum)) {
+    if (!Number.isInteger(espacioIdNum)) {
       return res.status(400).json({ error: 'Espacio inválido' });
+    }
+    const { data: espacioData, error: errorEspacio } = await supabase
+      .from('espacios')
+      .select('publico')
+      .eq('id', espacioIdNum)
+      .maybeSingle();
+    if (errorEspacio) throw errorEspacio;
+    if (!espacioData) {
+      return res.status(400).json({ error: 'Espacio inválido' });
+    }
+    if (!espacioData.publico) {
+      return res.status(400).json({ error: 'Ese espacio no se puede reservar por el momento' });
     }
     
     // Validar formato de hora
@@ -996,7 +1083,7 @@ app.post('/api/cancelar-por-codigo', cancelarLimiter, async (req, res) => {
     // updateData viene vacío y respondemos de forma idempotente sin reenviar emails.
     const { data: updateData, error: updateError } = await supabase
       .from('reservas')
-      .update({ estado: 'cancelada' })
+      .update({ estado: 'cancelada', cancelada_en: new Date().toISOString(), cancelada_por: 'usuario' })
       .eq('codigo_cancelacion_hash', codigoHashBuscado)
       .eq('estado', 'activa')
       .select();
@@ -1229,6 +1316,7 @@ app.post('/api/admin/meses-habilitados', verifyAdminToken, verificarCSRF, async 
       );
 
     if (error) throw error;
+    registrarActividad(req.admin.rol, habilitado ? 'Habilitó un mes' : 'Deshabilitó un mes', `${String(mesNum).padStart(2, '0')}/${anioNum}`);
     res.json({ mensaje: 'Actualizado correctamente' });
   } catch (error) {
     manejarError(res, error);
@@ -1335,6 +1423,8 @@ app.post('/api/bloqueos', verifyAdminToken, verificarCSRF, async (req, res) => {
       throw error;
     }
     
+    registrarActividad(req.admin.rol, 'Creó un bloqueo',
+      `${getEspacioNombre(Number(espacio_id))}, ${fechaDMY(fecha)}, ${isBloqueCompleto ? 'todo el día' : `${hora_inicio.substring(0, 5)} - ${hora_fin.substring(0, 5)}`}`);
     res.status(201).json({ mensaje: 'Bloqueo creado' });
   } catch (error) {
     manejarError(res, error);
@@ -1360,6 +1450,8 @@ app.delete('/api/bloqueos/:id', verifyAdminToken, verificarCSRF, async (req, res
     if (!data || data.length === 0) {
       return res.status(404).json({ error: 'Bloqueo no encontrado' });
     }
+    const b = data[0];
+    registrarActividad(req.admin.rol, 'Eliminó un bloqueo', `${getEspacioNombre(b.espacio_id)}, ${fechaDMY(b.fecha)}`);
     res.json({ mensaje: 'Bloqueo eliminado' });
   } catch (error) {
     manejarError(res, error);
@@ -1529,6 +1621,8 @@ app.post('/api/admin/reservas', verifyAdminToken, verificarCSRF, async (req, res
     // A propósito no se manda aviso al moderador acá (a diferencia del formulario
     // público): quien crea esto ya es el moderador, y está viendo el resultado en
     // pantalla al toque, no hace falta que se notifique a sí mismo.
+    registrarActividad(req.admin.rol, 'Creó una reserva de prioridad',
+      `#${nuevaReserva[0].id} · Frente, ${fechaDMY(fecha)}, ${descripcionHorario(espacioIdNum, hora_inicio, hora_fin)}`);
     res.json({ mensaje: 'Reserva de prioridad creada correctamente', reserva: nuevaReserva[0] });
   } catch (error) {
     manejarError(res, error);
@@ -1561,10 +1655,16 @@ app.post('/api/admin/cancelar/:reserva_id', verifyAdminToken, verificarCSRF, asy
       return res.json({ mensaje: 'La reserva ya se encontraba cancelada' });
     }
     
-    // Transición condicional (BUG-005): solo cancela si seguía activa
+    // Transición condicional (BUG-005): solo cancela si seguía activa. Se guarda cuándo,
+    // quién y el motivo, para verlo después en el panel del admin supremo.
     const { data: updateData, error } = await supabase
       .from('reservas')
-      .update({ estado: 'cancelada' })
+      .update({
+        estado: 'cancelada',
+        cancelada_en: new Date().toISOString(),
+        cancelada_por: req.admin.rol === 'superadmin' ? 'admin supremo' : 'moderador',
+        motivo_cancelacion: motivo ? String(motivo).slice(0, 300) : null
+      })
       .eq('id', reserva_id)
       .eq('estado', 'activa')
       .select();
@@ -1621,6 +1721,8 @@ app.post('/api/admin/cancelar/:reserva_id', verifyAdminToken, verificarCSRF, asy
       `
     });
 
+    registrarActividad(req.admin.rol, 'Canceló una reserva',
+      `#${reserva.id} · ${getEspacioNombre(reserva.espacio_id)}, ${fechaDMY(reserva.fecha)}, ${descripcionHorario(reserva.espacio_id, reserva.hora_inicio.substring(0, 5), reserva.hora_fin.substring(0, 5))}`);
     res.json({ mensaje: 'Reserva cancelada por admin' });
   } catch (error) {
     manejarError(res, error);
@@ -1662,7 +1764,164 @@ app.post('/api/admin/reportes/:id/leer', verifyAdminToken, verificarCSRF, async 
     if (!data || data.length === 0) {
       return res.status(404).json({ error: 'Reporte no encontrado' });
     }
+    registrarActividad(req.admin.rol, 'Marcó un reporte como leído', `#${id}`);
     res.json({ mensaje: 'Reporte marcado como leído' });
+  } catch (error) {
+    manejarError(res, error);
+  }
+});
+
+// ========== ENDPOINTS DEL ADMIN SUPREMO (JWT con rol superadmin) ==========
+
+// Valida una lista de IDs enviada en el cuerpo: enteros positivos, sin repetir, hasta 500
+function idsValidos(ids) {
+  if (!Array.isArray(ids) || ids.length === 0 || ids.length > 500) return null;
+  if (!ids.every(esIdValido)) return null;
+  return [...new Set(ids.map(Number))];
+}
+
+// Para el registro de actividad: "#1, #2, #3" (recortado si son muchos)
+function listaIds(ids) {
+  const texto = ids.map(id => `#${id}`).join(', ');
+  return texto.length > 400 ? texto.slice(0, 400) + '…' : texto;
+}
+
+// Habilitar o deshabilitar el Frente o el Altillo para el público, y el aviso que ve la
+// gente cuando no está disponible. Reemplaza tener que cambiar código para reactivar el Altillo.
+app.post('/api/superadmin/espacios/:id', verifyAdminToken, verifySuperAdmin, verificarCSRF, async (req, res) => {
+  try {
+    const id = Number(req.params.id);
+    if (![1, 3].includes(id)) {
+      return res.status(400).json({ error: 'Solo se pueden configurar el Frente y el Altillo' });
+    }
+    const { publico, aviso } = req.body;
+    if (typeof publico !== 'boolean') {
+      return res.status(400).json({ error: 'El campo publico debe ser true o false' });
+    }
+    if (aviso !== undefined && aviso !== null && (typeof aviso !== 'string' || aviso.length > 1000)) {
+      return res.status(400).json({ error: 'El aviso debe ser un texto de hasta 1000 caracteres' });
+    }
+
+    // Estado anterior, solo para que el registro de actividad diga qué cambió
+    const { data: antes, error: errorAntes } = await supabase
+      .from('espacios')
+      .select('publico')
+      .eq('id', id)
+      .maybeSingle();
+    if (errorAntes) throw errorAntes;
+
+    const { data, error } = await supabase
+      .from('espacios')
+      .update({ publico, aviso: aviso ? aviso.trim() : null })
+      .eq('id', id)
+      .select('id, nombre, publico, aviso');
+
+    if (error) throw error;
+    if (!data || data.length === 0) {
+      return res.status(404).json({ error: 'Espacio no encontrado' });
+    }
+    const accion = antes && antes.publico === publico
+      ? 'Guardó el aviso de un espacio'
+      : (publico ? 'Habilitó un espacio para el público' : 'Deshabilitó un espacio para el público');
+    registrarActividad(req.admin.rol, accion, getEspacioNombre(id));
+    res.json({ mensaje: 'Espacio actualizado', espacio: data[0] });
+  } catch (error) {
+    manejarError(res, error);
+  }
+});
+
+// Eliminar definitivamente reservas de la base (por ejemplo, las de prueba). Solo las
+// CANCELADAS: una activa primero se cancela desde el panel, para que la persona reciba el aviso.
+app.post('/api/superadmin/reservas/eliminar', verifyAdminToken, verifySuperAdmin, verificarCSRF, async (req, res) => {
+  try {
+    const ids = idsValidos(req.body.ids);
+    if (!ids) {
+      return res.status(400).json({ error: 'Lista de reservas inválida (entre 1 y 500)' });
+    }
+
+    const { data, error } = await supabase
+      .from('reservas')
+      .delete()
+      .in('id', ids)
+      .eq('estado', 'cancelada')
+      .select('id');
+
+    if (error) {
+      if (error.code === '23503') {
+        return res.status(409).json({ error: 'Alguna de esas reservas tiene registros asociados y no se puede eliminar' });
+      }
+      throw error;
+    }
+
+    const eliminadas = (data || []).map(r => r.id);
+    if (eliminadas.length > 0) {
+      registrarActividad(req.admin.rol, `Eliminó ${eliminadas.length} reserva${eliminadas.length === 1 ? '' : 's'} cancelada${eliminadas.length === 1 ? '' : 's'}`, listaIds(eliminadas));
+    }
+    res.json({ eliminadas: eliminadas.length, ignoradas: ids.length - eliminadas.length });
+  } catch (error) {
+    manejarError(res, error);
+  }
+});
+
+// Eliminar definitivamente reportes de errores (por ejemplo, los de prueba)
+app.post('/api/superadmin/reportes/eliminar', verifyAdminToken, verifySuperAdmin, verificarCSRF, async (req, res) => {
+  try {
+    const ids = idsValidos(req.body.ids);
+    if (!ids) {
+      return res.status(400).json({ error: 'Lista de reportes inválida (entre 1 y 500)' });
+    }
+
+    const { data, error } = await supabase
+      .from('reportes_errores')
+      .delete()
+      .in('id', ids)
+      .select('id');
+
+    if (error) throw error;
+    const eliminados = (data || []).map(r => r.id);
+    if (eliminados.length > 0) {
+      registrarActividad(req.admin.rol, `Eliminó ${eliminados.length} reporte${eliminados.length === 1 ? '' : 's'}`, listaIds(eliminados));
+    }
+    res.json({ eliminados: eliminados.length });
+  } catch (error) {
+    manejarError(res, error);
+  }
+});
+
+// Registro de actividad del panel (los últimos 300 movimientos)
+app.get('/api/superadmin/actividad', verifyAdminToken, verifySuperAdmin, async (req, res) => {
+  try {
+    const { data, error } = await supabase
+      .from('registro_actividad')
+      .select('id, creado_en, rol, accion, detalle')
+      .order('id', { ascending: false })
+      .limit(300);
+
+    if (error) throw error;
+    res.json((data || []).map(a => ({ ...a, rol: NOMBRES_ROL[a.rol] || a.rol })));
+  } catch (error) {
+    manejarError(res, error);
+  }
+});
+
+// Cerrar todas las sesiones del panel (incluida la propia): sirve si la contraseña se
+// filtró o alguien dejó la sesión abierta en una computadora ajena. Conviene cambiar
+// también la contraseña en Render si se sospecha que alguien la conoce.
+app.post('/api/superadmin/cerrar-sesiones', verifyAdminToken, verifySuperAdmin, verificarCSRF, async (req, res) => {
+  try {
+    const nueva = (await obtenerVersionSesiones()) + 1;
+    const { error } = await supabase
+      .from('configuracion')
+      .upsert({ clave: 'version_sesiones', valor: String(nueva) }, { onConflict: 'clave' });
+
+    if (error) throw error;
+    versionSesiones = nueva;
+    registrarActividad(req.admin.rol, 'Cerró todas las sesiones del panel');
+
+    const opcionesCookie = { secure: true, sameSite: 'lax', domain: '.ceq-una.com', path: '/' };
+    res.clearCookie('admin_token', { ...opcionesCookie, httpOnly: true });
+    res.clearCookie('csrf_token', { ...opcionesCookie, httpOnly: false });
+    res.json({ mensaje: 'Se cerraron todas las sesiones' });
   } catch (error) {
     manejarError(res, error);
   }

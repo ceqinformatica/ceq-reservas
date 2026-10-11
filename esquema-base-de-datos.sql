@@ -1,7 +1,8 @@
 -- =====================================================================
 -- Sistema de Reservas del CEQ - Estructura de la base de datos (Supabase / PostgreSQL 17)
 -- =====================================================================
--- Exportado del proyecto de producción el 11/10/2026 (DB-001 de la auditoría técnica).
+-- Exportado del proyecto de producción el 11/10/2026 (DB-001 de la auditoría técnica),
+-- actualizado con la migración "admin supremo" del mismo día (migracion-admin-supremo.sql).
 -- Contiene SOLO la estructura (tablas, reglas, triggers y seguridad) y los 3 espacios.
 -- No contiene reservas ni datos personales.
 --
@@ -20,13 +21,17 @@ create extension if not exists btree_gist with schema public;
 
 -- ---------------------------------------------------------------------
 -- ESPACIOS: 1 = Altillo, 2 = Sala de Reuniones, 3 = Frente.
--- El servidor usa estos números fijos (ver getEspacioNombre y ESPACIOS_PUBLICOS en server.js).
+-- El servidor usa estos números fijos (ver getEspacioNombre en server.js).
+-- publico: si se puede reservar desde la página (se cambia en el panel > Avanzado > Espacios).
+-- aviso: texto que ve la gente cuando el espacio no está disponible.
 -- ---------------------------------------------------------------------
 create table public.espacios (
   id          bigint generated always as identity primary key,
   nombre      text not null,
   descripcion text,
-  created_at  timestamp default now()
+  created_at  timestamp default now(),
+  publico     boolean not null default false,
+  aviso       text
 );
 
 -- ---------------------------------------------------------------------
@@ -37,6 +42,8 @@ create table public.espacios (
 -- codigo_cancelacion: en desuso (los códigos se guardan solo cifrados en codigo_cancelacion_hash,
 --   SEC-005). Se mantiene vacía; no volver a usarla.
 -- reservado_por_admin: true en las reservas de prioridad creadas desde el panel.
+-- cancelada_en / cancelada_por / motivo_cancelacion: cuándo, quién ('usuario', 'moderador' o
+--   'admin supremo') y por qué se canceló. Vacías en las canceladas antes del 11/10/2026.
 -- ---------------------------------------------------------------------
 create table public.reservas (
   id                      bigint generated always as identity primary key,
@@ -54,6 +61,9 @@ create table public.reservas (
   horario                 tsrange generated always as (tsrange(fecha + hora_inicio, fecha + hora_fin, '[)')) stored,
   codigo_cancelacion_hash text,
   reservado_por_admin     boolean not null default false,
+  cancelada_en            timestamptz,
+  cancelada_por           text,
+  motivo_cancelacion      text,
 
   -- Garantía principal del sistema: dos reservas ACTIVAS del mismo espacio no pueden
   -- superponerse en el tiempo. La base lo rechaza aunque lleguen al mismo instante
@@ -117,6 +127,26 @@ create table public.meses_habilitados (
   created_at timestamp default now(),
   updated_at timestamp default now(),
   unique (anio, mes)
+);
+
+-- ---------------------------------------------------------------------
+-- REGISTRO DE ACTIVIDAD del panel (admin supremo > Avanzado > Actividad), sin datos personales
+-- ---------------------------------------------------------------------
+create table public.registro_actividad (
+  id        bigint generated always as identity primary key,
+  creado_en timestamptz not null default now(),
+  rol       text not null,
+  accion    text not null,
+  detalle   text
+);
+
+-- ---------------------------------------------------------------------
+-- CONFIGURACIÓN general. version_sesiones: al subirla ("Cerrar todas las sesiones"),
+-- todas las sesiones abiertas del panel dejan de valer.
+-- ---------------------------------------------------------------------
+create table public.configuracion (
+  clave text primary key,
+  valor text not null
 );
 
 -- ---------------------------------------------------------------------
@@ -213,14 +243,21 @@ alter table public.bloqueos          enable row level security;
 alter table public.cancelaciones     enable row level security;
 alter table public.reportes_errores  enable row level security;
 alter table public.meses_habilitados enable row level security;
+alter table public.registro_actividad enable row level security;
+alter table public.configuracion     enable row level security;
 
 -- ---------------------------------------------------------------------
--- DATOS INICIALES: los 3 espacios con sus números fijos
+-- DATOS INICIALES: los 3 espacios con sus números fijos (solo el Frente abierto al público)
+-- y la versión inicial de las sesiones del panel
 -- ---------------------------------------------------------------------
-insert into public.espacios (id, nombre, descripcion) overriding system value values
-  (1, 'Altillo', 'Espacio arriba'),
-  (2, 'Sala de Reuniones', 'Sala principal'),
-  (3, 'Frente', 'Espacio frente');
+insert into public.espacios (id, nombre, descripcion, publico, aviso) overriding system value values
+  (1, 'Altillo', 'Espacio arriba', false, 'Por el momento, las reservas del Altillo se gestionan de forma manual, ya que la persona encargada actualmente no cuenta con una computadora para administrarlas a través de este sistema.
+
+Para reservar este espacio, anotate en la planilla correspondiente. Cuando se restablezca el acceso, el Altillo va a volver a estar disponible acá.'),
+  (2, 'Sala de Reuniones', 'Sala principal', false, null),
+  (3, 'Frente', 'Espacio frente', true, null);
+
+insert into public.configuracion (clave, valor) values ('version_sesiones', '1');
 
 -- Para que un espacio nuevo agregado a mano reciba el número 4 y no choque con los anteriores
 select setval(pg_get_serial_sequence('public.espacios', 'id'), 3);

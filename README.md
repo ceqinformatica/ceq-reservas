@@ -24,7 +24,7 @@ UptimeRobot ──> consulta el servidor cada 5 minutos
 |---|---|---|
 | Páginas (`index.html`, `cancelar.html`, `admin.html`) | Repo [`ceq-reservas-frontend`](https://github.com/ceqinformatica/ceq-reservas-frontend), publicado en **Vercel** como `reservas.ceq-una.com` | Lo que ve la gente. No guardan nada: todo lo piden al servidor. |
 | Servidor (`server.js`) | Este repo, publicado en **Render** (servicio `ceq-reservas`, plan gratuito, Node.js 24) como `api.ceq-una.com` | Valida y guarda las reservas, manda los correos y atiende el panel. |
-| Base de datos | **Supabase** (proyecto `reservas-ceq`, PostgreSQL 17, plan gratuito) | Guarda reservas, bloqueos, meses habilitados y reportes. Su estructura está en [`esquema-base-de-datos.sql`](esquema-base-de-datos.sql). |
+| Base de datos | **Supabase** (proyecto `reservas-ceq`, PostgreSQL 17, plan gratuito) | Guarda reservas, bloqueos, meses habilitados, reportes, qué espacios están abiertos y el registro de actividad del panel. Su estructura está en [`esquema-base-de-datos.sql`](esquema-base-de-datos.sql). |
 | Correos | **Brevo**, remitente `reservas@ceq-una.com` | Confirmaciones, cancelaciones y avisos a los moderadores. |
 | Monitoreo | **UptimeRobot**, cuenta `ceq.informatica@gmail.com` | Consulta `https://api.ceq-una.com/api/health` cada 5 minutos y avisa por correo si el sistema se cae. Además mantiene despiertos al servidor y a la base. |
 | Dominio | `ceq-una.com` registrado en **Hosting PY**, DNS administrado en **Cloudflare** | Los registros `reservas` (Vercel) y `api` (Render) **no se tocan**. |
@@ -39,7 +39,7 @@ Las contraseñas de estas cuentas se guardan en un documento privado de la Secre
 | Render | `ceq.informatica@gmail.com` (workspace "reservas ceq") |
 | UptimeRobot | `ceq.informatica@gmail.com` |
 | Vercel, Supabase, Brevo, Cloudflare, Hosting PY | completar con la cuenta de cada uno |
-| Panel de administración | contraseña única del admin (ver sección 11 para cambiarla) |
+| Panel de administración | dos contraseñas: la del **admin** (moderadores) y la del **admin supremo** (solo quien administra el sistema). Ver sección 11 para cambiarlas. |
 
 ## 3. Variables de entorno (Render → servicio `ceq-reservas` → Environment)
 
@@ -49,7 +49,8 @@ Las contraseñas de estas cuentas se guardan en un documento privado de la Secre
 | `SUPABASE_KEY` | Sí | Clave **service_role** de Supabase. Es secreta: da acceso total a la base. Nunca ponerla en las páginas. |
 | `BREVO_API_KEY` | Sí | Clave de Brevo para mandar correos. |
 | `JWT_SECRET` | Sí | Texto secreto con el que se firman las sesiones del panel. Si se cambia, se cierran todas las sesiones abiertas. |
-| `ADMIN_PASSWORD_HASH` | Sí | La contraseña del panel, cifrada (sección 11). |
+| `ADMIN_PASSWORD_HASH` | Sí | La contraseña del panel (admin), cifrada (sección 11). |
+| `SUPERADMIN_PASSWORD_HASH` | No | La contraseña del **admin supremo**, cifrada (sección 11). Tiene que ser distinta de la del admin. Si no está, nadie puede entrar como admin supremo y el panel funciona igual que antes. |
 | `EMAIL_MODERADOR` | No | Correo que recibe los avisos generales y los reportes. Por defecto, `ceq.informatica@gmail.com`. |
 | `EMAIL_MODERADOR_FRENTE` | No | Correo que además recibe los avisos del Frente. |
 | `EMAILS_SIN_LIMITE` | No | Correos que no tienen el límite de 2 reservas por mes (para hacer pruebas), separados por coma. |
@@ -79,11 +80,26 @@ Si falta una obligatoria, el servidor no arranca y lo dice en los Logs de Render
 | Revisar reportes | Reportes | Cada reporte nuevo también llega por correo a `EMAIL_MODERADOR` (hasta 20 avisos por día). Marcalos como leídos. |
 | **Copia de seguridad** | Exportar | **Exportar a Excel una vez por mes.** El plan gratuito de Supabase no guarda copias que se puedan recuperar. |
 
+### Admin supremo
+
+Se entra al mismo panel, pero con la contraseña del admin supremo (`SUPERADMIN_PASSWORD_HASH`). Arriba dice **Admin supremo**, y además de todo lo anterior aparece:
+
+| Qué | Dónde | Notas |
+|---|---|---|
+| Cuándo se hizo cada reserva, y cuándo, quién y por qué se canceló | Reservas → columna **Registro** (y el detalle de cada día en el calendario) | Las canceladas antes del 11/10/2026 dicen "sin datos". Quién: `usuario` (con su código), `moderador` o `admin supremo`. |
+| Habilitar o deshabilitar el Frente o el Altillo | Avanzado → Espacios | Se marca o desmarca "Se puede reservar desde la página" y se escribe el aviso que ve la gente al entrar. Las reservas que ya existen no se tocan. |
+| Eliminar reservas de la base | Avanzado → Eliminar reservas canceladas | Definitivo, para limpiar las de prueba. **Solo canceladas**: una activa primero se cancela (así la persona recibe el aviso). Pide escribir ELIMINAR. Si hace falta, exportá a Excel antes. |
+| Eliminar reportes | Avanzado → Eliminar reportes de errores | Definitivo. |
+| Ver qué se hizo en el panel | Avanzado → Registro de actividad | Últimos 300 movimientos: inicios de sesión (también los fallidos), cancelaciones, bloqueos, meses, reservas de prioridad, reportes leídos, espacios y eliminaciones, con fecha, hora y si fue el admin o el admin supremo. No guarda datos personales. |
+| Cerrar todas las sesiones | Avanzado → Seguridad | Saca del panel a todos, incluido quien lo usa. Si se sospecha que alguien conoce una contraseña, cambiala también (sección 11). |
+
+El admin normal no ve la pestaña Avanzado, y el servidor le rechaza esas acciones aunque intente hacerlas por otro lado.
+
 ## 6. Reglas del sistema y dónde se cambian
 
 | Regla | Valor actual | Dónde |
 |---|---|---|
-| Espacios que se pueden reservar desde la página | Solo Frente (3). Altillo (1) se gestiona con planilla. | `ESPACIOS_PUBLICOS` en `server.js` (ver sección 7) |
+| Espacios que se pueden reservar desde la página | Solo Frente (3). Altillo (1) se gestiona con planilla. | Panel → Avanzado → Espacios (admin supremo). Se guarda en la columna `publico` de la tabla `espacios` (ver sección 7). |
 | Turnos del Frente | Desayuno 07–10, Almuerzo 10–13, Merienda 14–18 | `turnosValidosFrente` y `NOMBRES_TURNOS_FRENTE` en `server.js`, y los turnos en `index.html` |
 | Días | Lunes a viernes, desde hoy, solo en meses habilitados | `server.js` (`POST /api/reservas`) |
 | Límite por persona | 2 reservas activas por mes y por espacio (se reconoce a la persona por correo o por celular) | `MAX_RESERVAS_POR_PERSONA_MES` en `server.js` |
@@ -94,10 +110,13 @@ Si falta una obligatoria, el servidor no arranca y lo dice en los Logs de Render
 
 ## 7. Reactivar el Altillo
 
-1. `server.js`: cambiar `const ESPACIOS_PUBLICOS = [3];` por `[1, 3]`.
-2. `index.html` (repo de las páginas): en el botón del Altillo (`data-espacio="1"`), quitar `disabled`, `aria-disabled="true"`, el `title`, la clase `no-disponible` y el texto `<span>No disponible</span>`.
-3. `index.html`: borrar el bloque "Mostrar el aviso de Altillo una vez por sesión" (al final del archivo), para que deje de aparecer el aviso de que se reserva con planilla.
-4. Subir los dos repos y hacer una reserva de prueba en el Altillo (horario libre de 1 a 3 horas, entre 08:00 y 18:00).
+Ya no hace falta tocar código:
+
+1. Entrar al panel con la contraseña del **admin supremo** → pestaña **Avanzado** → **Espacios**.
+2. En la tarjeta del Altillo, marcar **Se puede reservar desde la página** y tocar **Guardar**.
+3. Abrir la página (o recargarla) y hacer una reserva de prueba en el Altillo (horario libre de 1 a 3 horas, entre 08:00 y 18:00). Después cancelarla y, si se quiere, eliminarla desde Avanzado.
+
+Para volver a cerrarlo: desmarcar la casilla, escribir el aviso que tiene que ver la gente y **Guardar**. Lo mismo sirve para cerrar el Frente por un tiempo (por ejemplo, en vacaciones). La página muestra el aviso una vez por visita y el botón del espacio dice "No disponible"; el servidor rechaza cualquier reserva en un espacio cerrado.
 
 ## 8. Si algo falla
 
@@ -121,7 +140,7 @@ Si falta una obligatoria, el servidor no arranca y lo dice en los Logs de Render
 
 ## 10. Base de datos
 
-La estructura completa está en [`esquema-base-de-datos.sql`](esquema-base-de-datos.sql): 6 tablas (`espacios`, `reservas`, `bloqueos`, `meses_habilitados`, `reportes_errores` y `cancelaciones`, que está en desuso).
+La estructura completa está en [`esquema-base-de-datos.sql`](esquema-base-de-datos.sql): 8 tablas (`espacios`, `reservas`, `bloqueos`, `meses_habilitados`, `reportes_errores`, `registro_actividad`, `configuracion` y `cancelaciones`, que está en desuso). Los cambios que se le hicieron a una base ya existente quedan como archivos `migracion-*.sql` (por ejemplo, [`migracion-admin-supremo.sql`](migracion-admin-supremo.sql), aplicada el 11/10/2026); `esquema-base-de-datos.sql` ya los incluye.
 
 Protecciones que viven en la base (además de las del servidor):
 - **`no_solapamiento_activo`:** dos reservas activas del mismo espacio no pueden superponerse, aunque lleguen al mismo instante.
@@ -140,7 +159,8 @@ Si se cambia la estructura en Supabase, actualizar también ese archivo.
   node -e "console.log(require('bcryptjs').hashSync('LA-NUEVA-CONTRASEÑA', 10))"
   ```
   Copiar el resultado (empieza con `$2`) en `ADMIN_PASSWORD_HASH` en Render y guardar. La contraseña en sí no se guarda en ningún lado.
-- **Cerrar todas las sesiones del panel** (por ejemplo, si alguien dejó una sesión abierta en una computadora ajena): cambiar `JWT_SECRET` en Render por otro texto largo al azar.
+- **Cambiar la contraseña del admin supremo:** igual, pero el resultado va en `SUPERADMIN_PASSWORD_HASH`. Tiene que ser distinta de la del admin (si fueran iguales, todos entrarían como admin supremo).
+- **Cerrar todas las sesiones del panel** (por ejemplo, si alguien dejó una sesión abierta en una computadora ajena): como admin supremo, Avanzado → Seguridad → **Cerrar todas las sesiones**. Si no se puede entrar como admin supremo, cambiar `JWT_SECRET` en Render por otro texto largo al azar hace lo mismo.
 - **Nunca** subir un archivo `.env` ni pegar claves en el código o en las páginas.
 
 ## 12. Pendientes conocidos
@@ -149,7 +169,7 @@ De la auditoría técnica del 24/07/2026 (la respuesta completa está en el Apé
 
 - Pruebas automáticas que corran solas en GitHub (TEST-001).
 - Separar el JavaScript de las páginas y activar la política de seguridad CSP (SEC-004, ARCH-001).
-- Que los códigos de cancelación venzan (SEC-005) y poder cerrar una sesión puntual del panel (AUTH-002; hoy se cierran todas cambiando `JWT_SECRET`).
+- Que los códigos de cancelación venzan (SEC-005) y poder cerrar una sesión puntual del panel (AUTH-002; hoy se cierran todas juntas desde Avanzado → Seguridad).
 - Evitar reservas duplicadas por reintentos con una clave de idempotencia (BUG-004).
 - Guardar celular y correo en columnas separadas (VAL-002).
 - Definir si se siguen mostrando los nombres en el calendario público (PRIV-001, decisión de la Comisión).
