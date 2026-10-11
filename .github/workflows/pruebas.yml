@@ -1,0 +1,33 @@
+# Pruebas automáticas del servidor: GitHub las corre solas cada vez que se sube un cambio
+# a la rama main (y también se pueden correr a mano desde la pestaña Actions).
+# No usan la base real, ni mandan correos, ni necesitan claves.
+name: Pruebas
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  pruebas:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - name: Bajar el código
+        uses: actions/checkout@v4
+
+      - name: Instalar Node.js 24
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+
+      - name: Instalar las dependencias del servidor
+        run: npm ci
+
+      - name: Instalar la base de prueba (PGlite)
+        run: npm install --no-save @electric-sql/pglite@0.5.8
+
+      - name: Correr todas las pruebas
+        run: node pruebas/correr-todas.js
