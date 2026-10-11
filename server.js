@@ -346,6 +346,36 @@ function descripcionHorario(espacioId, horaInicioHHMM, horaFinHHMM) {
   return rango;
 }
 
+// Regla de cancelación del Frente para los correos de confirmación (la misma que aplica
+// /api/cancelar-por-codigo): gratis con el código hasta 2 días antes; después, por WhatsApp.
+// Antes la gente se enteraba recién cuando intentaba cancelar y el sistema no la dejaba.
+function reglaCancelacionHtml(espacioId, fecha) {
+  if (Number(espacioId) !== 3) return '';
+  const whatsapp = `<a href="https://wa.me/${CONTACTO_WHATSAPP_FRENTE}">WhatsApp</a>`;
+  if (diferenciaEnDiasCalendario(fecha) < 2) {
+    return `<p>Como faltan menos de 2 días, esta reserva ya no se puede cancelar con el código. Si necesitás cancelarla, escribinos por ${whatsapp}.</p>`;
+  }
+  const limite = new Date(fecha + 'T00:00:00Z');
+  limite.setUTCDate(limite.getUTCDate() - 2);
+  const fechaLimite = `${String(limite.getUTCDate()).padStart(2, '0')}/${String(limite.getUTCMonth() + 1).padStart(2, '0')}/${limite.getUTCFullYear()}`;
+  return `<p>Podés cancelarla gratis con tu código hasta el <strong>${fechaLimite}</strong> (2 días antes). Después de esa fecha, la cancelación solo se gestiona por ${whatsapp}.</p>`;
+}
+
+// Enlace que abre Google Calendar con el evento de la reserva ya cargado (en hora de Paraguay).
+// Recibe horaInicio/horaFin como "HH:MM".
+function enlaceGoogleCalendar(espacioId, fecha, horaInicioHHMM, horaFinHHMM) {
+  const dia = fecha.replace(/-/g, '');
+  const params = new URLSearchParams({
+    action: 'TEMPLATE',
+    text: `Reserva del ${getEspacioNombre(espacioId)} - CEQ`,
+    dates: `${dia}T${horaInicioHHMM.replace(':', '')}00/${dia}T${horaFinHHMM.replace(':', '')}00`,
+    ctz: 'America/Asuncion',
+    details: `Horario: ${descripcionHorario(espacioId, horaInicioHHMM, horaFinHHMM)}\nPara cancelar, usá el código de tu email de confirmación en https://reservas.ceq-una.com/cancelar.html`,
+    location: 'Centro de Estudiantes de Química - Facultad de Ciencias Químicas (UNA)'
+  });
+  return 'https://calendar.google.com/calendar/render?' + params.toString();
+}
+
 // Middleware de autenticación JWT (AUTH-002: el token viaja en una cookie httpOnly,
 // no en localStorage ni en el header Authorization. Esto hace que sea imposible que
 // JavaScript del lado del cliente lea o robe el token, incluso si hubiera un XSS
@@ -858,6 +888,8 @@ app.post('/api/reservas', crearReservaLimiter, async (req, res) => {
             <li><strong>Código de cancelación:</strong> ${codigo}</li>
           </ul>
           <p>Si necesitas cancelar, usa tu código en: <a href="https://reservas.ceq-una.com/cancelar.html">Cancelar Reserva</a></p>
+          ${reglaCancelacionHtml(espacioIdNum, fecha)}
+          <p><a href="${escapeHtml(enlaceGoogleCalendar(espacioIdNum, fecha, hora_inicio, hora_fin))}">📅 Agregar a Google Calendar</a></p>
           ${contactoLinea}
           <p>Centro de Estudiantes de Química</p>
         `
@@ -1487,6 +1519,8 @@ app.post('/api/admin/reservas', verifyAdminToken, verificarCSRF, async (req, res
           <li><strong>Código de cancelación:</strong> ${codigo}</li>
         </ul>
         <p>Si necesitas cancelar, usa tu código en: <a href="https://reservas.ceq-una.com/cancelar.html">Cancelar Reserva</a></p>
+        ${reglaCancelacionHtml(espacioIdNum, fecha)}
+        <p><a href="${escapeHtml(enlaceGoogleCalendar(espacioIdNum, fecha, hora_inicio, hora_fin))}">📅 Agregar a Google Calendar</a></p>
         <p>Ante cualquier consulta, contactate con: ${getContactoLineaHtml(espacioIdNum)}</p>
         <p>Centro de Estudiantes de Química</p>
       `
