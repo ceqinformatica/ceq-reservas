@@ -104,6 +104,7 @@ El admin normal no ve la pestaña Avanzado, y el servidor le rechaza esas accion
 Una planilla en la cuenta `ceq.informatica@gmail.com` tiene todas las reservas y se actualiza **cada hora** con el script [`sincronizar-reservas.gs`](sincronizar-reservas.gs). Pestañas:
 - **Resumen:** hora de la última actualización, estado (OK o el error) y totales por espacio, turno, día de la semana y mes.
 - **Reservas:** todas las reservas, una por fila, con filtros. Se reescribe en cada actualización: **no edites ahí**, porque se pierde. Para trabajar con los datos, copiá la pestaña.
+- **Una pestaña por mes** ("Noviembre 2026", "Octubre 2026", …), del más nuevo al más viejo: las reservas de ese mes, con el mismo formato. También se reescriben (no editar ahí). Cada mes nuevo aparece solo; si un mes se queda sin reservas, su pestaña se borra.
 - **Copia AAAA-MM:** foto fija tomada en la primera actualización de cada mes. Es la copia de seguridad: no se vuelve a tocar. Se guardan las últimas 24.
 
 Tiene datos personales (nombre, celular, email): compartila **solo** con quienes administran el sistema, nunca con "cualquier persona con el enlace".

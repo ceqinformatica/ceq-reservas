@@ -7,6 +7,8 @@
  * ceq.informatica@gmail.com. Pide las reservas a https://api.ceq-una.com con la clave
  * CLAVE_SINCRONIZACION (la misma que está en Render) y arma:
  *   - Reservas: todas las reservas, una por fila (se reescribe en cada actualización).
+ *   - Una pestaña por mes ("Octubre 2026", ...), del más nuevo al más viejo, con las reservas
+ *     de ese mes (también se reescriben; si un mes se queda sin reservas, su pestaña se borra).
  *   - Resumen: totales y la hora de la última actualización.
  *   - Copia AAAA-MM: en la primera actualización de cada mes se guarda una copia fija de
  *     "Reservas" (copia de seguridad: no se vuelve a tocar). Se conservan las últimas 24.
@@ -23,6 +25,7 @@ const PREFIJO_COPIA = 'Copia ';
 const COPIAS_A_CONSERVAR = 24;
 const DIAS_SEMANA = ['Domingo', 'Lunes', 'Martes', 'Miércoles', 'Jueves', 'Viernes', 'Sábado'];
 const MESES = ['Enero', 'Febrero', 'Marzo', 'Abril', 'Mayo', 'Junio', 'Julio', 'Agosto', 'Septiembre', 'Octubre', 'Noviembre', 'Diciembre'];
+const PATRON_HOJA_MES = new RegExp('^(' + MESES.join('|') + ') \\d{4}$'); // "Octubre 2026"
 const COLUMNAS = ['N°', 'Fecha', 'Día', 'Espacio', 'Turno', 'Inicio', 'Fin', 'Nombre', 'Celular', 'Email', 'Motivo',
   'Estado', 'Prioridad', 'Creada', 'Cancelada', 'Cancelada por', 'Motivo de cancelación'];
 const COL_FECHA = 2;
@@ -91,6 +94,7 @@ function sincronizar() {
     const datos = pedirReservas_();
     const hoja = obtenerHoja_(ss, HOJA_RESERVAS, 1);
     escribirReservas_(hoja, datos.reservas);
+    escribirMeses_(ss, datos.reservas);
     escribirResumen_(resumen, datos);
     guardarCopiaMensual_(ss, hoja);
     borrarHojaVaciaInicial_(ss);
@@ -131,8 +135,8 @@ function armarFilasReservas(reservas, fechaDesdeTexto, fechaHoraDesdeIso) {
     diaSemana(r.fecha),
     r.espacio,
     r.turno || '-',
-    r.hora_inicio,
-    r.hora_fin,
+    comoTexto(r.hora_inicio), // si no, Google lo convierte en hora y muestra "7:00" en vez de "07:00"
+    comoTexto(r.hora_fin),
     comoTexto(r.nombre),
     comoTexto(r.celular),
     comoTexto(r.email),
@@ -186,7 +190,8 @@ function armarResumen(reservas) {
   bloques.push([['Por mes', 'Activas', 'Canceladas']].concat(meses.map(mes => {
     const del = reservas.filter(r => r.fecha.startsWith(mes));
     const act = contar(del, r => r.estado === 'activa');
-    return [`${MESES[Number(mes.slice(5, 7)) - 1]} ${mes.slice(0, 4)}`, act, del.length - act];
+    // Como texto: si no, Google convierte "Agosto 2026" en una fecha
+    return [comoTexto(`${MESES[Number(mes.slice(5, 7)) - 1]} ${mes.slice(0, 4)}`), act, del.length - act];
   })));
 
   const personas = new Set(activas.map(r => (r.email || '').toLowerCase() || (r.celular || '').replace(/\D/g, '')).filter(Boolean));
@@ -225,11 +230,52 @@ function escribirReservas_(hoja, reservas) {
   hoja.autoResizeColumns(1, COLUMNAS.length);
 }
 
+// Una pestaña por mes, con el mismo formato que "Reservas"
+function escribirMeses_(ss, reservas) {
+  const porMes = {};
+  reservas.forEach(r => {
+    const clave = r.fecha.slice(0, 7);
+    (porMes[clave] = porMes[clave] || []).push(r);
+  });
+  const nombreHojaMes = clave => `${MESES[Number(clave.slice(5, 7)) - 1]} ${clave.slice(0, 4)}`;
+  const claves = Object.keys(porMes).sort(); // del más viejo al más nuevo
+  const nombres = claves.map(nombreHojaMes);
+
+  // Meses que ya no tienen reservas (por ejemplo, porque se eliminaron)
+  ss.getSheets()
+    .filter(h => PATRON_HOJA_MES.test(h.getName()) && nombres.indexOf(h.getName()) === -1)
+    .forEach(h => ss.deleteSheet(h));
+
+  claves.forEach(clave => {
+    const hoja = ss.getSheetByName(nombreHojaMes(clave)) || ss.insertSheet(nombreHojaMes(clave));
+    escribirReservas_(hoja, porMes[clave]);
+  });
+  ordenarHojas_(ss);
+}
+
+// Orden fijo de las pestañas: Resumen, Reservas, los meses del más nuevo al más viejo y al final
+// lo demás (las copias). Solo mueve si hace falta (cuando aparece un mes nuevo).
+function ordenarHojas_(ss) {
+  const hojas = ss.getSheets();
+  const nombres = hojas.map(h => h.getName());
+  const claveMes = nombre => nombre.split(' ')[1] + '-' + String(MESES.indexOf(nombre.split(' ')[0]) + 1).padStart(2, '0');
+  const meses = nombres.filter(n => PATRON_HOJA_MES.test(n)).sort((a, b) => claveMes(b).localeCompare(claveMes(a)));
+  const fijas = [HOJA_RESUMEN, HOJA_RESERVAS].filter(n => nombres.indexOf(n) !== -1);
+  const orden = fijas.concat(meses, nombres.filter(n => fijas.indexOf(n) === -1 && meses.indexOf(n) === -1));
+  if (orden.every((n, i) => n === nombres[i])) return;
+  // moveActiveSheet cuenta desde 1. Se ubican de a una, de la primera a la última.
+  orden.forEach((n, i) => {
+    ss.setActiveSheet(ss.getSheetByName(n));
+    ss.moveActiveSheet(i + 1);
+  });
+  ss.setActiveSheet(ss.getSheetByName(orden[0]));
+}
+
 function escribirResumen_(hoja, datos) {
   hoja.clear();
   hoja.getRange('A1:B3').setValues([
     ['Reservas del CEQ', ''],
-    ['Última actualización', ahoraTexto_()],
+    ['Última actualización', comoTexto(ahoraTexto_())],
     ['Estado', `OK: ${datos.reservas.length} reservas en la base`]
   ]);
   hoja.getRange('A1').setFontWeight('bold').setFontSize(14);
