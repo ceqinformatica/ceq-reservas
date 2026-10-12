@@ -7,6 +7,7 @@
 // La prueba de la estructura de la base necesita además PGlite (una base Postgres de prueba):
 //   npm install --no-save @electric-sql/pglite@0.5.8
 // Si no está instalada, esa prueba se salta y se avisa.
+const fs = require('fs');
 const path = require('path');
 const { spawn } = require('child_process');
 
@@ -23,9 +24,13 @@ const PRUEBAS = [
   ['Correos de confirmación del Frente', 'probar_frente_correos.js', [raiz, servidor, ayudante('interceptar_brevo.js'), ayudante('reloj_falso.js')]],
   ['Altillo, motivos del Frente y acompañantes', 'probar_altillo_servidor.js', [raiz, servidor, ayudante('interceptar_brevo.js'), ayudante('reloj_falso.js')]],
   ['Copia de seguridad mensual y "Responder a" de los correos', 'probar_copia_y_responder.js', [raiz, aqui]],
+  ['Plazos de conservación de la Política de Privacidad', 'probar_retencion.js', [raiz, aqui]],
   ['Estructura y reglas de la base de datos', 'probar_esquema.js', [raiz, path.join(raiz, 'esquema-base-de-datos.sql')], '@electric-sql/pglite']
 ];
 const LIMITE_MS = 6 * 60 * 1000;
+const EN_GITHUB = process.env.GITHUB_ACTIONS === 'true';
+// Formato de las anotaciones de GitHub Actions (::error ...::mensaje)
+const escaparGithub = s => String(s).replace(/%/g, '%25').replace(/\r/g, '%0D').replace(/\n/g, '%0A');
 
 function correr(archivo, args) {
   return new Promise(resolve => {
@@ -58,7 +63,9 @@ function correr(archivo, args) {
     if (!ok) {
       // Se muestran las pruebas que fallaron (o toda la salida si no llegó al final)
       const fallas = salida.split('\n').filter(l => l.startsWith('FALLA'));
-      console.log((fallas.length ? fallas : salida.split('\n').slice(-40)).map(l => '   ' + l).join('\n'));
+      const detalle = (fallas.length ? fallas : salida.split('\n').slice(-40)).join('\n');
+      console.log(detalle.split('\n').map(l => '   ' + l).join('\n'));
+      if (EN_GITHUB) console.log(`::error title=${escaparGithub(nombre)}::${escaparGithub(detalle.slice(0, 3500))}`);
     }
     resumen.push({ nombre, estado: ok ? 'bien' : 'mal', detalle: m ? `${m[1]}/${m[2]}` : '' });
   }
@@ -70,5 +77,10 @@ function correr(archivo, args) {
     ? `✅ Todo bien: ${total} pruebas en ${resumen.filter(r => r.estado === 'bien').length} grupos.`
     : `❌ Fallaron ${mal.length} grupo(s): ${mal.map(r => r.nombre).join('; ')}`);
   if (resumen.some(r => r.estado === 'saltada')) console.log('⚠️  Hubo grupos saltados (ver arriba).');
+  if (EN_GITHUB && process.env.GITHUB_STEP_SUMMARY) {
+    const filas = resumen.map(r => `| ${r.estado === 'bien' ? '✅' : r.estado === 'mal' ? '❌' : '⏭'} | ${r.nombre} | ${r.detalle || '-'} |`);
+    fs.appendFileSync(process.env.GITHUB_STEP_SUMMARY, ['## Pruebas del sistema de reservas', '', '| | Grupo | Pruebas |', '|---|---|---|', ...filas, ''].join('\n'));
+  }
+  if (EN_GITHUB) console.log(`::notice title=Resultado::${escaparGithub(mal.length === 0 ? `Todo bien: ${total} pruebas` : `Fallaron: ${mal.map(r => r.nombre).join('; ')}`)}`);
   process.exit(mal.length === 0 ? 0 : 1);
 })();

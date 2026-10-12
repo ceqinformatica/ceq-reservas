@@ -3,6 +3,8 @@
 // Si el destinatario contiene "falla-brevo@", se responde con error (para probar reintentos).
 const fs = require('fs');
 const fetchOriginal = globalThis.fetch;
+// precarga: Node carga fetch/Response recién la primera vez que se usan; se fuerza al arrancar
+new Response('');
 globalThis.fetch = async (url, opciones = {}) => {
   if (String(url).startsWith('https://api.brevo.com')) {
     if (String(opciones.body).includes('falla-brevo@')) {

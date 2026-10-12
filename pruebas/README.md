@@ -33,6 +33,7 @@ Tarda unos 3 minutos. Al final dice `✅ Todo bien: N pruebas` o qué grupo fall
 | `probar_frente_correos.js` | Correos de confirmación (regla de cancelación del Frente y Google Calendar). |
 | `probar_altillo_servidor.js` | Horario del Altillo, motivos del Frente y acompañantes. |
 | `probar_copia_y_responder.js` | Copia de seguridad mensual por correo y "Responder a" de los correos. |
+| `probar_retencion.js` | Plazos de conservación de la Política de Privacidad: anonimizar reservas de más de 2 años y borrar reportes de más de 1 año. |
 | `probar_esquema.js` | Que `esquema-base-de-datos.sql` se pueda crear desde cero y que sus reglas funcionen (sin superposiciones, bloqueos, acompañantes, etc.). |
 | `mini_postgrest.js`, `reloj_falso.js`, `interceptar_brevo.js` | Ayudantes: base simulada, reloj falso y correos interceptados. |
 

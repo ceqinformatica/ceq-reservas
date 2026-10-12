@@ -36,8 +36,8 @@ const db = {
   espacios: [{ id: 1, nombre: 'Altillo', publico: false, aviso: 'Se reserva con planilla' }, { id: 2, nombre: 'Sala de Reuniones', publico: false, aviso: null },
     { id: 3, nombre: 'Frente', publico: true, aviso: null }],
   configuracion: [{ clave: 'version_sesiones', valor: '1' }],
-  reportes_errores: [{ id: 10, mensaje: 'prueba 1', url: null, navegador: null, leido: false, created_at: '2026-10-11T08:41:00' },
-    { id: 11, mensaje: 'prueba 2', url: null, navegador: null, leido: true, created_at: '2026-10-11T09:00:00' }],
+  reportes_errores: [{ id: 10, mensaje: 'prueba 1', url: null, navegador: null, leido: false, created_at: hoyAsu() + 'T08:41:00' },
+    { id: 11, mensaje: 'prueba 2', url: null, navegador: null, leido: true, created_at: hoyAsu() + 'T09:00:00' }],
   registro_actividad: [],
   meses_habilitados: [{ id: 1, anio: anioHoy, mes: mesHoy, habilitado: true }],
   bloqueos: []

@@ -69,7 +69,9 @@ const anotar = (nombre, ok, detalle = '') => resultados.push({ nombre, ok, detal
   // 2. Reporte normal -> se guarda y llega el aviso al moderador, con el contenido escapado
   r = await reportar({ mensaje: 'No carga el calendario\n<script>alert(1)</script>', url: 'https://reservas.ceq-una.com/', navegador: 'Mozilla/5.0 <b>Prueba</b>' }, '203.0.113.1');
   j = await r.json();
-  await esperar(300);
+  // Se espera hasta que llegue el aviso (máx. 5 s): el correo sale después de responder
+  for (let i = 0; i < 50 && leerEmails().length === 0; i++) await esperar(100);
+  await esperar(100);
   let emails = leerEmails();
   const aviso = emails[0];
   anotar('Reporte válido: responde 201', r.status === 201, `${r.status} ${JSON.stringify(j)}`);

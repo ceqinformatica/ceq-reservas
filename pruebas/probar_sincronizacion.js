@@ -12,6 +12,10 @@ const vm = require('vm');
 const { spawn } = require('child_process');
 
 const [carpeta, interceptor, archivoGs] = process.argv.slice(2);
+// El servidor corre con un reloj falso fijo en el 15/07/2026 (cerca de los datos de prueba), así la
+// prueba no depende del día real (por ejemplo, de los plazos de conservación de datos).
+const relojArchivo = path.join(os.tmpdir(), 'ceq-reloj-sinc-' + Date.now() + '.json');
+fs.writeFileSync(relojArchivo, JSON.stringify({ desfase_ms: Date.parse('2026-07-15T13:00:00Z') - Date.now() }));
 const jwt = require(path.join(carpeta, 'node_modules', 'jsonwebtoken'));
 const CLAVE = 'clave-de-sincronizacion-de-prueba-0123456789abcdef'; // 50 caracteres
 const resultados = [];
@@ -79,9 +83,9 @@ const supa = http.createServer((rq, rs) => {
 
 async function arrancar(env, puerto) {
   const brevoLog = path.join(os.tmpdir(), 'ceq-brevo-sinc.log'); fs.writeFileSync(brevoLog, '');
-  const hijo = spawn(process.execPath, ['--require', interceptor, path.join(carpeta, 'server.js')], {
+  const hijo = spawn(process.execPath, ['--require', path.join(path.dirname(interceptor), 'reloj_falso.js'), '--require', interceptor, path.join(carpeta, 'server.js')], {
     cwd: carpeta, env: { ...process.env, PORT: String(puerto), SUPABASE_URL: 'http://127.0.0.1:54326', SUPABASE_KEY: 'x', BREVO_API_KEY: 'x',
-      JWT_SECRET: 'secreto', ADMIN_PASSWORD_HASH: 'x', BREVO_LOG: brevoLog, NODE_OPTIONS: '', ...env } });
+      JWT_SECRET: 'secreto', ADMIN_PASSWORD_HASH: 'x', BREVO_LOG: brevoLog, RELOJ_FALSO: relojArchivo, NODE_OPTIONS: '', ...env } });
   let salida = ''; hijo.stdout.on('data', d => salida += d); hijo.stderr.on('data', d => salida += d);
   for (let i = 0; i < 600 && !salida.includes('Sincronización con Google Sheets'); i++) await esperar(100);
   hijo.salida = () => salida;
