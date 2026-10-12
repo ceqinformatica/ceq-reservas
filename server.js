@@ -150,9 +150,28 @@ const CONFIG_POR_DEFECTO = {
   max_reservas_por_persona_mes: 2,
   contacto_email_frente: 'Monsegonza511@gmail.com',
   contacto_whatsapp_frente: '595972753471', // formato wa.me: código de país + número, sin +, espacios ni guiones
-  email_alertas: EMAIL_MODERADOR
+  email_alertas: EMAIL_MODERADOR,
+  // Espacios deshabilitados cuyo aviso NO se muestra al entrar a la página (se guarda el texto igual)
+  avisos_ocultos: [],
+  // Ventana de novedades que ve la gente al entrar (una vez por navegador y por versión). Se
+  // escribe desde el admin supremo; este es el contenido inicial.
+  ventana_novedades: {
+    activa: true,
+    version: '2026-10',
+    titulo: '¡Actualizamos la página de reservas!',
+    intro: 'Renovamos el sistema de reservas del CEQ para que sea más fácil de usar. Esto es lo nuevo:',
+    bloques: [
+      { titulo: 'Nuevo diseño, más claro', texto: 'El calendario muestra mejor qué turnos quedan libres, y el contador indica las reservas del mes y del espacio que estás viendo.' },
+      { titulo: 'Lista de espera', texto: 'Si ya no quedan turnos, dejá tu correo y te avisamos apenas alguien cancele una reserva.' },
+      { titulo: 'Recordatorio por correo', texto: 'Dos días antes de tu reserva te llega un recordatorio, con un enlace para cancelarla si no vas a poder asistir.' }
+    ],
+    cierre: 'Antes de reservar, leé los Términos y condiciones y la Política de privacidad: al confirmar una reserva los aceptás. Tu nombre y el motivo se muestran en el calendario para que puedas verificar que tu reserva quedó registrada.'
+  }
 };
 let config = { ...CONFIG_POR_DEFECTO };
+// Las que se guardan en la tabla como JSON (el resto, como texto simple)
+const CLAVES_CONFIG_JSON = ['turnos_frente', 'avisos_ocultos', 'ventana_novedades'];
+const LIMITES_NOVEDADES = { titulo: 80, intro: 600, bloques: 6, bloqueTitulo: 60, bloqueTexto: 400, cierre: 600 };
 
 // Valida cada valor de configuración. Devuelve el valor normalizado o lanza un Error con un
 // mensaje para mostrar en el panel. Se usa al guardar desde el panel y al leer de la base.
@@ -198,6 +217,40 @@ const VALIDADORES_CONFIG = {
     const email = String(valor || '').trim();
     if (!EMAIL_REGEX.test(email) || email.length > 100) throw new Error('El correo para las alertas no es válido');
     return email;
+  },
+  avisos_ocultos(valor) {
+    if (!Array.isArray(valor)) throw new Error('avisos_ocultos tiene que ser una lista');
+    const ids = [...new Set(valor.map(Number))];
+    if (ids.some(id => ![1, 3].includes(id))) throw new Error('avisos_ocultos solo admite el Frente y el Altillo');
+    return ids.sort();
+  },
+  ventana_novedades(valor) {
+    const v = valor || {};
+    const L = LIMITES_NOVEDADES;
+    const texto = (t, max, nombre) => {
+      const s = String(t == null ? '' : t).replace(/\r\n/g, '\n').trim();
+      if (s.length > max) throw new Error(`${nombre} puede tener hasta ${max} caracteres`);
+      return s;
+    };
+    const titulo = texto(v.titulo, L.titulo, 'El título');
+    if (!titulo) throw new Error('La ventana necesita un título');
+    const bloques = Array.isArray(v.bloques) ? v.bloques : [];
+    if (bloques.length > L.bloques) throw new Error(`Puede haber hasta ${L.bloques} bloques`);
+    const version = String(v.version || '');
+    if (!/^[\w.:-]{1,40}$/.test(version)) throw new Error('Versión de la ventana inválida');
+    return {
+      activa: v.activa === true,
+      version,
+      titulo,
+      intro: texto(v.intro, L.intro, 'El texto de introducción'),
+      bloques: bloques.map((b, i) => {
+        const bt = texto(b && b.titulo, L.bloqueTitulo, `El título del bloque ${i + 1}`);
+        const bx = texto(b && b.texto, L.bloqueTexto, `El texto del bloque ${i + 1}`);
+        if (!bt && !bx) throw new Error(`El bloque ${i + 1} está vacío`);
+        return { titulo: bt, texto: bx };
+      }),
+      cierre: texto(v.cierre, L.cierre, 'El texto final')
+    };
   }
 };
 
@@ -210,7 +263,7 @@ async function cargarConfiguracion() {
   const nueva = { ...CONFIG_POR_DEFECTO };
   (data || []).forEach(({ clave, valor }) => {
     try {
-      nueva[clave] = VALIDADORES_CONFIG[clave](clave === 'turnos_frente' ? JSON.parse(valor) : valor);
+      nueva[clave] = VALIDADORES_CONFIG[clave](CLAVES_CONFIG_JSON.includes(clave) ? JSON.parse(valor) : valor);
     } catch (err) {
       console.error(`⚠️ Configuración "${clave}" inválida en la base, se usa el valor por defecto:`, err.message);
     }
@@ -848,7 +901,8 @@ app.get('/api/admin/verificar-sesion', verifyAdminToken, (req, res) => {
 });
 
 // GET espacios (público): la página usa `publico` y `aviso` para saber qué espacios se
-// pueden reservar y qué aviso mostrar de los que no (se manejan desde el admin supremo)
+// pueden reservar y qué aviso mostrar de los que no (se manejan desde el admin supremo).
+// `mostrar_aviso` en false: el espacio se deshabilita sin ventana al entrar.
 app.get('/api/espacios', async (req, res) => {
   try {
     const { data, error } = await supabase
@@ -856,7 +910,7 @@ app.get('/api/espacios', async (req, res) => {
       .select('id, nombre, publico, aviso')
       .order('id', { ascending: true });
     if (error) throw error;
-    res.json(data || []);
+    res.json((data || []).map(e => ({ ...e, mostrar_aviso: !config.avisos_ocultos.includes(Number(e.id)) })));
   } catch (error) {
     manejarError(res, error);
   }
@@ -986,7 +1040,8 @@ app.get('/api/configuracion', lecturaPublicaLimiter, (req, res) => {
     contacto_frente: { email: config.contacto_email_frente, whatsapp: config.contacto_whatsapp_frente },
     motivos_frente: MOTIVOS_FRENTE,
     altillo: { hora_desde: ALTILLO_HORA_DESDE, hora_hasta: ALTILLO_HORA_HASTA, max_horas: ALTILLO_MAX_HORAS },
-    max_acompanantes: MAX_ACOMPANANTES
+    max_acompanantes: MAX_ACOMPANANTES,
+    ventana_novedades: config.ventana_novedades && config.ventana_novedades.activa ? config.ventana_novedades : null
   });
 });
 
@@ -2405,9 +2460,12 @@ app.post('/api/superadmin/espacios/:id', verifyAdminToken, verifySuperAdmin, ver
     if (![1, 3].includes(id)) {
       return res.status(400).json({ error: 'Solo se pueden configurar el Frente y el Altillo' });
     }
-    const { publico, aviso } = req.body;
+    const { publico, aviso, mostrar_aviso } = req.body;
     if (typeof publico !== 'boolean') {
       return res.status(400).json({ error: 'El campo publico debe ser true o false' });
+    }
+    if (mostrar_aviso !== undefined && typeof mostrar_aviso !== 'boolean') {
+      return res.status(400).json({ error: 'El campo mostrar_aviso debe ser true o false' });
     }
     if (aviso !== undefined && aviso !== null && (typeof aviso !== 'string' || aviso.length > 1000)) {
       return res.status(400).json({ error: 'El aviso debe ser un texto de hasta 1000 caracteres' });
@@ -2431,11 +2489,22 @@ app.post('/api/superadmin/espacios/:id', verifyAdminToken, verifySuperAdmin, ver
     if (!data || data.length === 0) {
       return res.status(404).json({ error: 'Espacio no encontrado' });
     }
+    // Mostrar u ocultar el aviso al entrar (sin borrar el texto)
+    if (mostrar_aviso !== undefined && mostrar_aviso === config.avisos_ocultos.includes(id)) {
+      const ocultos = mostrar_aviso
+        ? config.avisos_ocultos.filter(x => x !== id)
+        : [...config.avisos_ocultos, id];
+      const { error: errorOcultos } = await supabase.from('configuracion')
+        .upsert({ clave: 'avisos_ocultos', valor: comoTexto('avisos_ocultos', VALIDADORES_CONFIG.avisos_ocultos(ocultos)) }, { onConflict: 'clave' });
+      if (errorOcultos) throw errorOcultos;
+      await cargarConfiguracion();
+    }
     const accion = antes && antes.publico === publico
       ? 'Guardó el aviso de un espacio'
       : (publico ? 'Habilitó un espacio para el público' : 'Deshabilitó un espacio para el público');
-    registrarActividad(req.admin.rol, accion, getEspacioNombre(id));
-    res.json({ mensaje: 'Espacio actualizado', espacio: data[0] });
+    const conAviso = !config.avisos_ocultos.includes(id);
+    registrarActividad(req.admin.rol, accion, publico || conAviso ? getEspacioNombre(id) : `${getEspacioNombre(id)} (sin aviso al entrar)`);
+    res.json({ mensaje: 'Espacio actualizado', espacio: { ...data[0], mostrar_aviso: conAviso } });
   } catch (error) {
     manejarError(res, error);
   }
@@ -2525,18 +2594,53 @@ const NOMBRES_CONFIG = {
   email_alertas: 'correo de alertas'
 };
 
+const comoTexto = (clave, valor) => CLAVES_CONFIG_JSON.includes(clave) ? JSON.stringify(valor) : String(valor);
+
 app.get('/api/superadmin/configuracion', verifyAdminToken, verifySuperAdmin, (req, res) => {
   res.json(config);
+});
+
+// Ventana de novedades: la escribe el admin supremo (título, introducción, bloques y texto final).
+// "Publicar" con volver_a_mostrar le da una versión nueva: la ve de nuevo quien ya la había cerrado.
+// Sin volver_a_mostrar (por ejemplo, para corregir un error de tipeo) se conserva la versión.
+app.post('/api/superadmin/novedades', verifyAdminToken, verifySuperAdmin, verificarCSRF, async (req, res) => {
+  try {
+    const b = req.body || {};
+    if (typeof b.activa !== 'boolean') {
+      return res.status(400).json({ error: 'El campo activa debe ser true o false' });
+    }
+    const anterior = config.ventana_novedades || {};
+    const nuevaVersion = b.volver_a_mostrar === true || !anterior.version;
+    let ventana;
+    try {
+      ventana = VALIDADORES_CONFIG.ventana_novedades({
+        ...b,
+        version: nuevaVersion ? `v${Date.now()}` : anterior.version
+      });
+    } catch (err) {
+      return res.status(400).json({ error: err.message });
+    }
+    const { error } = await supabase.from('configuracion')
+      .upsert({ clave: 'ventana_novedades', valor: comoTexto('ventana_novedades', ventana) }, { onConflict: 'clave' });
+    if (error) throw error;
+    await cargarConfiguracion();
+    registrarActividad(req.admin.rol,
+      !ventana.activa ? 'Quitó la ventana de novedades' : (nuevaVersion ? 'Publicó la ventana de novedades' : 'Corrigió la ventana de novedades'),
+      ventana.titulo);
+    res.json({ mensaje: 'Ventana guardada', ventana_novedades: config.ventana_novedades });
+  } catch (error) {
+    manejarError(res, error);
+  }
 });
 
 app.post('/api/superadmin/configuracion', verifyAdminToken, verifySuperAdmin, verificarCSRF, async (req, res) => {
   try {
     const cambios = req.body || {};
-    const claves = Object.keys(cambios).filter(k => Object.prototype.hasOwnProperty.call(VALIDADORES_CONFIG, k));
+    // Los avisos ocultos y la ventana de novedades tienen su propia ruta (más abajo)
+    const claves = Object.keys(cambios).filter(k => Object.prototype.hasOwnProperty.call(NOMBRES_CONFIG, k));
     if (claves.length === 0) {
       return res.status(400).json({ error: 'No hay nada para guardar' });
     }
-    const comoTexto = (clave, valor) => clave === 'turnos_frente' ? JSON.stringify(valor) : String(valor);
     const filas = [];
     for (const clave of claves) {
       let valor;
