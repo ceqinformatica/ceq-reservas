@@ -24,6 +24,7 @@ const PRUEBAS = [
   ['Correos de confirmación del Frente', 'probar_frente_correos.js', [raiz, servidor, ayudante('interceptar_brevo.js'), ayudante('reloj_falso.js')]],
   ['Altillo, motivos del Frente y acompañantes', 'probar_altillo_servidor.js', [raiz, servidor, ayudante('interceptar_brevo.js'), ayudante('reloj_falso.js')]],
   ['Copia de seguridad mensual y "Responder a" de los correos', 'probar_copia_y_responder.js', [raiz, aqui]],
+  ['Ventana de novedades y espacios sin aviso', 'probar_novedades.js', [raiz, aqui]],
   ['Plazos de conservación de la Política de Privacidad', 'probar_retencion.js', [raiz, aqui]],
   ['Estructura y reglas de la base de datos', 'probar_esquema.js', [raiz, path.join(raiz, 'esquema-base-de-datos.sql')], '@electric-sql/pglite']
 ];
