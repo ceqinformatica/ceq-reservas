@@ -2776,6 +2776,42 @@ async function limpiarListaEspera() {
   if (error2) throw error2;
 }
 
+// ========== PLAZOS DE CONSERVACIÓN (Política de Privacidad, artículo 10) ==========
+// Plazo: 6 meses (un semestre).
+// - Reservas de hace más de 6 meses (por su fecha): se borran el nombre, el contacto, los
+//   acompañantes y el motivo de cancelación, y el motivo del Altillo (texto libre). Queda solo lo
+//   estadístico (espacio, fecha, horario, estado, motivo del Frente, que es de una lista fija).
+// - Reportes de problemas de hace más de 6 meses: se borran.
+// Se revisa una vez por día. Si se cambia este plazo, cambiar también privacidad.html.
+const MESES_CONSERVACION = 6;
+const NOMBRE_ANONIMIZADO = '(datos eliminados)';
+let ultimaRevisionConservacion = '';
+
+async function aplicarPlazosDeConservacion() {
+  const hoy = hoyEnAsuncion().toISOString().slice(0, 10);
+  if (ultimaRevisionConservacion === hoy) return;
+  const limite = hoyEnAsuncion();
+  limite.setUTCMonth(limite.getUTCMonth() - MESES_CONSERVACION);
+  const fechaLimite = limite.toISOString().slice(0, 10);
+  const datosBorrados = { nombre_solicitante: NOMBRE_ANONIMIZADO, contacto: '-', acompanantes: [], motivo_cancelacion: null };
+
+  const { data: frente, error: e1 } = await supabase.from('reservas').update(datosBorrados)
+    .lt('fecha', fechaLimite).neq('nombre_solicitante', NOMBRE_ANONIMIZADO).neq('espacio_id', 1).select('id');
+  if (e1) throw e1;
+  const { data: altillo, error: e2 } = await supabase.from('reservas').update({ ...datosBorrados, motivo: '' })
+    .lt('fecha', fechaLimite).neq('nombre_solicitante', NOMBRE_ANONIMIZADO).eq('espacio_id', 1).select('id');
+  if (e2) throw e2;
+  const { data: reportes, error: e3 } = await supabase.from('reportes_errores').delete().lt('created_at', fechaLimite + 'T00:00:00').select('id');
+  if (e3) throw e3;
+
+  const anonimizadas = (frente || []).length + (altillo || []).length;
+  if (anonimizadas || (reportes || []).length) {
+    console.log(`🧹 Plazos de conservación: ${anonimizadas} reserva(s) anonimizada(s), ${(reportes || []).length} reporte(s) borrado(s)`);
+    registrarActividad('sistema', 'Aplicó los plazos de conservación', `${anonimizadas} reserva(s) anonimizada(s) · ${(reportes || []).length} reporte(s) borrado(s)`);
+  }
+  ultimaRevisionConservacion = hoy;
+}
+
 // ========== COPIA DE SEGURIDAD MENSUAL POR CORREO ==========
 // Supabase gratis no guarda copias que se puedan descargar, y la planilla de Google ya no tiene
 // los contactos. Por eso, una vez por mes (la primera vuelta después de las 08:00 de cada mes
@@ -2922,6 +2958,7 @@ async function correrTareasPeriodicas() {
     ['recordatorios', enviarRecordatorios],
     ['lista de espera', limpiarListaEspera],
     ['copia mensual', enviarCopiaMensual],
+    ['plazos de conservación', aplicarPlazosDeConservacion],
     ['alertas', enviarAlertas]
   ];
   for (const [nombre, tarea] of tareas) {

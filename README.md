@@ -117,7 +117,7 @@ El admin normal no ve la pestaña Avanzado, y el servidor le rechaza esas accion
 
 Supabase gratis no guarda copias que se puedan descargar. Por eso, el **día 1° de cada mes a las 08:00** el servidor manda al **correo de alertas** (Avanzado → Configuración) un archivo `reservas-ceq-AAAA-MM.csv` con **todas** las reservas y todos sus datos (también celulares, correos, acompañantes y cancelaciones). Se abre con Excel o Google Sheets.
 
-**Qué hacer cuando llega:** guardar el archivo en la carpeta de copias de Google Drive. Tiene datos personales: no reenviarlo. Si un mes no llega, revisar Render → Logs (buscar `copia mensual`). El mes ya enviado queda anotado en la tabla `configuracion` (clave `copia_mensual_enviada`): para que se vuelva a mandar, borrá esa fila.
+**Qué hacer cuando llega:** guardar el archivo en la carpeta de copias de Google Drive y **borrar las copias de hace más de 6 meses** (lo exige la Política de Privacidad). Tiene datos personales: no reenviarlo. Si un mes no llega, revisar Render → Logs (buscar `copia mensual`). El mes ya enviado queda anotado en la tabla `configuracion` (clave `copia_mensual_enviada`): para que se vuelva a mandar, borrá esa fila.
 
 ### Planilla de Google Sheets (se actualiza sola)
 
@@ -197,7 +197,7 @@ Para volver a cerrarlo: desmarcar la casilla, escribir el aviso que tiene que ve
 
 La estructura completa está en [`esquema-base-de-datos.sql`](esquema-base-de-datos.sql): 9 tablas (`espacios`, `reservas`, `bloqueos`, `meses_habilitados`, `reportes_errores`, `registro_actividad`, `configuracion`, `lista_espera` y `cancelaciones`, que está en desuso). Los cambios que se le hicieron a una base ya existente quedan como archivos `migracion-*.sql` ([`migracion-admin-supremo.sql`](migracion-admin-supremo.sql), [`migracion-funciones-octubre.sql`](migracion-funciones-octubre.sql) y [`migracion-acompanantes-y-lista-espera.sql`](migracion-acompanantes-y-lista-espera.sql), del 11/10/2026); `esquema-base-de-datos.sql` ya los incluye.
 
-**Tareas automáticas:** cada 5 minutos el servidor abre los meses programados, manda los recordatorios del día, limpia la lista de espera vieja, manda la copia de seguridad del mes (una vez por mes), relee la configuración y manda las alertas pendientes (ver `tareasPeriodicas()` en `server.js`). Funciona porque UptimeRobot mantiene el servidor despierto.
+**Tareas automáticas:** cada 5 minutos el servidor abre los meses programados, manda los recordatorios del día, limpia la lista de espera vieja, manda la copia de seguridad del mes (una vez por mes), aplica los plazos de conservación de la Política de Privacidad (una vez por día: borra nombre, contacto, acompañantes y textos libres de las reservas de hace más de 6 meses, y borra los reportes de hace más de 6 meses; si se cambia ese plazo, cambiar también `privacidad.html`), relee la configuración y manda las alertas pendientes (ver `tareasPeriodicas()` en `server.js`). Funciona porque UptimeRobot mantiene el servidor despierto.
 
 Protecciones que viven en la base (además de las del servidor):
 - **`no_solapamiento_activo`:** dos reservas activas del mismo espacio no pueden superponerse, aunque lleguen al mismo instante.
