@@ -440,7 +440,8 @@ function obtenerIpCliente(req) {
 // y uno solo se enteraba por los reportes de usuarios. Si aparecen IPs 10.x acá, es
 // señal de que Render dejó de mandar cf-connecting-ip y hay que revisar obtenerIpCliente().
 function registrar429(req, res, next, options) {
-  console.warn(`⚠️ 429 rate limit: IP ${obtenerIpCliente(req)} en ${req.method} ${req.originalUrl}`);
+  // Sin la parte después del "?": ahí viajan los enlaces de cancelación (CEQ-13)
+  console.warn(`⚠️ 429 rate limit: IP ${obtenerIpCliente(req)} en ${req.method} ${req.path}`);
   anotarAlerta('429', `${obtenerIpCliente(req)}|${req.method} ${req.originalUrl.split('?')[0]}`);
   res.status(options.statusCode).json(options.message);
 }
@@ -582,6 +583,73 @@ function identidadContacto(contacto) {
   return {
     email: mail.toLowerCase() || null,
     celular: digitos.length >= 6 ? digitos.slice(-9) : null
+  };
+}
+
+// true si la reserva ya terminó: el día ya pasó, o es hoy y su hora de fin ya pasó (en Paraguay)
+function reservaYaTermino(reserva) {
+  const dias = diferenciaEnDiasCalendario(reserva.fecha);
+  if (dias !== 0) return dias < 0;
+  const [h, m] = String(reserva.hora_fin).split(':').map(Number);
+  return horaActualEnAsuncionEnMinutos() >= h * 60 + m;
+}
+
+// Fecha "AAAA-MM-DD" que exista de verdad (new Date convierte en silencio el 31/02 en 03/03)
+function esFechaValida(fecha) {
+  if (typeof fecha !== 'string' || !/^\d{4}-\d{2}-\d{2}$/.test(fecha)) return false;
+  const d = new Date(fecha + 'T00:00:00Z');
+  return Number.isFinite(d.getTime()) && d.toISOString().slice(0, 10) === fecha;
+}
+
+// Número entero positivo, como número o como texto de solo dígitos (parseInt aceptaba "3abc")
+function enteroPositivo(valor) {
+  if (typeof valor === 'number') return Number.isSafeInteger(valor) && valor > 0 ? valor : null;
+  if (typeof valor === 'string' && /^\d{1,9}$/.test(valor.trim())) return Number(valor.trim()) || null;
+  return null;
+}
+
+// Valida y normaliza los datos de una reserva antes de guardar nada (CEQ-03). Lanza un Error con
+// el mensaje para la persona. Devuelve los valores limpios que se usan para guardar y escribir.
+function validarDatosDeReserva(body) {
+  const b = body || {};
+  const campos = ['nombre_solicitante', 'contacto', 'fecha', 'hora_inicio', 'hora_fin', 'motivo'];
+  if (campos.some(k => b[k] == null || b[k] === '') || b.espacio_id == null || b.espacio_id === '') {
+    throw new Error('Faltan parámetros requeridos');
+  }
+  if (campos.some(k => typeof b[k] !== 'string')) throw new Error('Tipos de datos inválidos');
+  const espacioIdNum = enteroPositivo(b.espacio_id);
+  if (!espacioIdNum) throw new Error('Espacio inválido');
+
+  const nombre = b.nombre_solicitante.trim().replace(/\s+/g, ' ');
+  const motivo = b.motivo.trim();
+  if (nombre.length > 150 || b.contacto.length > 200 || motivo.length > 500) {
+    throw new Error('Uno o más campos exceden la longitud permitida');
+  }
+  if (nombre.length < 2 || !/\p{L}/u.test(nombre)) throw new Error('Escribí tu nombre y apellido');
+  if (!motivo) throw new Error('Faltan parámetros requeridos');
+
+  // El resto del sistema usa el formato "celular | email" (confirmaciones, límite por persona)
+  const partes = b.contacto.split('|').map(p => p.trim());
+  if (partes.length !== 2) throw new Error('El contacto debe tener el formato "celular | email" con un email válido');
+  const [celular, emailCrudo] = partes;
+  const email = emailCrudo.toLowerCase();
+  const digitos = celular.replace(/\D/g, '');
+  if (!/^\+?[\d\s()-]+$/.test(celular) || digitos.length < 7 || digitos.length > 15) {
+    throw new Error('El celular no es válido: usá solo números (por ejemplo, 0981 123 456)');
+  }
+  if (!EMAIL_REGEX.test(email) || email.length > 100) {
+    throw new Error('El contacto debe tener el formato "celular | email" con un email válido');
+  }
+  if (!esFechaValida(b.fecha)) throw new Error('Fecha inválida');
+
+  return {
+    espacioIdNum,
+    nombre_solicitante: nombre,
+    contacto: `${celular} | ${email}`,
+    fecha: b.fecha,
+    hora_inicio: b.hora_inicio,
+    hora_fin: b.hora_fin,
+    motivo
   };
 }
 
@@ -829,17 +897,16 @@ app.post('/api/login', loginLimiter, async (req, res) => {
       { expiresIn: '8h', algorithm: 'HS256' }
     );
 
-    // AUTH-002: cookie de primera parte (mismo dominio raíz que el frontend),
-    // así los navegadores no la tratan como cookie de terceros y no la bloquean
-    // (Safari y el modo incógnito de Chrome bloquean cookies de terceros por defecto).
-    // Requiere que el backend esté servido desde un subdominio de ceq-una.com
-    // (ej. api.ceq-una.com) — si todavía corre solo en onrender.com, esta cookie
-    // con domain=.ceq-una.com no se va a setear correctamente.
+    // AUTH-002: cookie de primera parte (api.ceq-una.com es del mismo sitio que la página),
+    // así los navegadores no la tratan como cookie de terceros y no la bloquean.
+    // CEQ-10: sin "domain", la cookie es SOLO de api.ceq-una.com. Antes llevaba
+    // domain=.ceq-una.com y el navegador también se la mandaba a ceq-una.com (la web del CEQ,
+    // en otro servidor) y a cualquier otro subdominio. Se borra la vieja, si quedó.
+    borrarCookieSesionVieja(res);
     res.cookie('admin_token', token, {
       httpOnly: true,
       secure: true,
       sameSite: 'lax',
-      domain: '.ceq-una.com',
       maxAge: 8 * 60 * 60 * 1000, // 8 horas, en milisegundos
       path: '/'
     });
@@ -874,22 +941,23 @@ app.post('/api/login', loginLimiter, async (req, res) => {
   }
 });
 
+// La cookie del token con domain=.ceq-una.com (antes de CEQ-10). Dura 8 horas, así que después
+// del primer día ya no queda ninguna; se sigue borrando por las dudas.
+function borrarCookieSesionVieja(res) {
+  res.clearCookie('admin_token', { httpOnly: true, secure: true, sameSite: 'lax', domain: '.ceq-una.com', path: '/' });
+}
+
+// Borra las cookies de sesión: el token (solo de la API), la vieja y la del CSRF. La del CSRF
+// sigue en .ceq-una.com porque el panel (reservas.ceq-una.com) tiene que poder leerla.
+function borrarCookiesSesion(res) {
+  res.clearCookie('admin_token', { httpOnly: true, secure: true, sameSite: 'lax', path: '/' });
+  borrarCookieSesionVieja(res);
+  res.clearCookie('csrf_token', { httpOnly: false, secure: true, sameSite: 'lax', domain: '.ceq-una.com', path: '/' });
+}
+
 // Cerrar sesión: limpia las cookies del token y del CSRF (AUTH-002)
 app.post('/api/logout', (req, res) => {
-  res.clearCookie('admin_token', {
-    httpOnly: true,
-    secure: true,
-    sameSite: 'lax',
-    domain: '.ceq-una.com',
-    path: '/'
-  });
-  res.clearCookie('csrf_token', {
-    httpOnly: false,
-    secure: true,
-    sameSite: 'lax',
-    domain: '.ceq-una.com',
-    path: '/'
-  });
+  borrarCookiesSesion(res);
   res.json({ mensaje: 'Sesión cerrada' });
 });
 
@@ -1047,37 +1115,21 @@ app.get('/api/configuracion', lecturaPublicaLimiter, (req, res) => {
 
 app.post('/api/reservas', crearReservaLimiter, async (req, res) => {
   try {
-    const { espacio_id, nombre_solicitante, contacto, fecha, hora_inicio, hora_fin, motivo } = req.body;
-    
-    // Faltan parámetros requeridos. `motivo` también es obligatorio acá (el HTML ya
-    // lo exige, pero golpeando la API directamente se podía saltear esa validación).
-    if (!espacio_id || !nombre_solicitante || !contacto || !fecha || !hora_inicio || !hora_fin || !motivo) {
-      return res.status(400).json({ error: 'Faltan parámetros requeridos' });
+    // Todo se valida ANTES de guardar (CEQ-03): tipos, nombre, celular, correo y fecha. Antes,
+    // un contacto mandado como lista pasaba el chequeo, se guardaba y después el servidor
+    // fallaba al leerlo, y un nombre de puros espacios o un celular "abc" se aceptaban.
+    let datos;
+    try {
+      datos = validarDatosDeReserva(req.body);
+    } catch (err) {
+      return res.status(400).json({ error: err.message });
     }
-
-    // Longitudes máximas razonables (VAL-002)
-    if (String(nombre_solicitante).length > 150 || String(contacto).length > 200 || String(motivo).length > 500) {
-      return res.status(400).json({ error: 'Uno o más campos exceden la longitud permitida' });
-    }
-
-    // VAL-002: el resto del sistema asume el formato "celular | email" y usa
-    // contacto.split('|')[1] para mandar la confirmación por mail. Si el formato no
-    // coincide (por ejemplo, golpeando la API directo sin pasar por el formulario),
-    // esa parte queda undefined y el email de confirmación se pierde en silencio,
-    // sin avisar a nadie que falló.
-    const partesContacto = String(contacto).split('|').map(p => p.trim());
-    const emailValidoRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
-    if (partesContacto.length !== 2 || !partesContacto[0] || !emailValidoRegex.test(partesContacto[1])) {
-      return res.status(400).json({ error: 'El contacto debe tener el formato "celular | email" con un email válido' });
-    }
+    const { espacioIdNum, nombre_solicitante, contacto, fecha, hora_inicio, hora_fin, motivo } = datos;
+    const partesContacto = contacto.split('|').map(p => p.trim());
 
     // Qué espacios se pueden reservar desde la página lo decide el admin supremo
     // (columna espacios.publico, panel > Avanzado > Espacios). Se revisa acá y no solo en
     // la página, porque alguien podría mandar la reserva directo a la API.
-    const espacioIdNum = parseInt(espacio_id);
-    if (!Number.isInteger(espacioIdNum)) {
-      return res.status(400).json({ error: 'Espacio inválido' });
-    }
     const { data: espacioData, error: errorEspacio } = await supabase
       .from('espacios')
       .select('publico')
@@ -1121,7 +1173,11 @@ app.post('/api/reservas', crearReservaLimiter, async (req, res) => {
         return res.status(400).json({ error: 'Elegí el motivo de la lista' });
       }
     } else {
-      // Altillo: bloques de 1 hora entre las 08:00 y las 20:00, de 1 a 2 horas
+      // Altillo: bloques de 1 hora entre las 08:00 y las 20:00, de 1 a 2 horas. Solo horas
+      // completas (CEQ-04): el calendario de la página trabaja por horas enteras.
+      if (horaIniM !== 0 || horaFinM !== 0) {
+        return res.status(400).json({ error: 'El Altillo se reserva en bloques de horas completas (por ejemplo, 09:00 a 11:00)' });
+      }
       const duracionHoras = (finMin - inicioMin) / 60;
       if (duracionHoras < 1 || duracionHoras > ALTILLO_MAX_HORAS) {
         return res.status(400).json({ error: `La duración debe ser entre 1 y ${ALTILLO_MAX_HORAS} horas` });
@@ -1172,36 +1228,14 @@ app.post('/api/reservas', crearReservaLimiter, async (req, res) => {
       return res.status(400).json({ error: 'Ese mes todavía no está habilitado para reservas' });
     }
 
-    // Límite de reservas activas por persona por mes (en el mes de la FECHA reservada,
-    // no del día en que se reserva). Se identifica a la persona por email Y por celular,
-    // para que no alcance con cambiar solo uno de los dos. Las canceladas no cuentan.
-    // Las reservas de prioridad del panel admin no pasan por acá (no tienen límite).
-    if (!EMAILS_SIN_LIMITE.has(partesContacto[1].toLowerCase())) {
-      const ultimoDia = new Date(Date.UTC(anioReserva, mesReserva, 0)).getUTCDate();
-      const mesStr = String(mesReserva).padStart(2, '0');
-      const { data: reservasDelMes, error: errorReservasMes } = await supabase
-        .from('reservas')
-        .select('contacto')
-        .eq('estado', 'activa')
-        .eq('espacio_id', espacioIdNum)
-        .gte('fecha', `${anioReserva}-${mesStr}-01`)
-        .lte('fecha', `${anioReserva}-${mesStr}-${ultimoDia}`);
-
-      if (errorReservasMes) throw errorReservasMes;
-
-      const persona = identidadContacto(contacto);
-      const cantidad = (reservasDelMes || []).filter(r => {
-        const otra = identidadContacto(r.contacto);
-        return (persona.email && otra.email === persona.email) ||
-               (persona.celular && otra.celular === persona.celular);
-      }).length;
-
-      if (cantidad >= config.max_reservas_por_persona_mes) {
-        return res.status(400).json({
-          error: `Ya tenés ${cantidad} reservas activas en ${getEspacioNombre(espacioIdNum)} para ese mes. El máximo es ${config.max_reservas_por_persona_mes} por persona. Si necesitás otro turno, cancelá una de tus reservas anteriores.`
-        });
-      }
-    }
+    // Límite de reservas activas por persona por mes: solo en el Frente (el Altillo no tiene
+    // límite). Cuenta el mes de la FECHA reservada; se reconoce a la persona por correo O por
+    // celular, y no cuentan las canceladas ni las de prioridad del panel. El conteo y el guardado
+    // los hace la base en un solo paso (función crear_reserva_con_cupo, CEQ-02): antes se contaba
+    // acá y se guardaba aparte, y varios pedidos simultáneos podían pasar todos el límite.
+    const limiteCupo = espacioIdNum === 3 && !EMAILS_SIN_LIMITE.has(partesContacto[1].toLowerCase())
+      ? config.max_reservas_por_persona_mes
+      : null;
 
     // VAL-001: si la reserva es para hoy, el horario no puede haber pasado. En el Frente, el
     // turno no puede haber empezado; en el Altillo, el primer bloque de 1 hora no puede haber
@@ -1243,26 +1277,33 @@ app.post('/api/reservas', crearReservaLimiter, async (req, res) => {
     const codigo = crypto.randomBytes(8).toString('hex').toUpperCase();
     const codigoHash = hashCodigo(codigo);
     
-    // Insertar reserva
-    const { data: nuevaReserva, error } = await supabase
-      .from('reservas')
-      .insert([{
-        espacio_id: espacioIdNum,
-        nombre_solicitante,
-        contacto,
-        fecha,
-        hora_inicio: hora_inicio + ':00',
-        hora_fin: hora_fin + ':00',
-        estado: 'activa',
-        motivo: String(motivo || '').trim(),
-        codigo_cancelacion_hash: codigoHash,
-        acompanantes
-      }])
-      .select();
-    
+    // Insertar reserva (con el control de cupo en la misma transacción)
+    const persona = identidadContacto(contacto);
+    const { data: nuevaReserva, error } = await supabase.rpc('crear_reserva_con_cupo', {
+      p_espacio_id: espacioIdNum,
+      p_nombre: nombre_solicitante,
+      p_contacto: contacto,
+      p_fecha: fecha,
+      p_hora_inicio: hora_inicio + ':00',
+      p_hora_fin: hora_fin + ':00',
+      p_motivo: motivo,
+      p_codigo_hash: codigoHash,
+      p_acompanantes: acompanantes,
+      p_limite: limiteCupo,
+      p_email: persona.email,
+      p_celular: persona.celular
+    });
+
     if (error) {
       if (error.code === '23505' || error.code === '23P01') {
         return res.status(409).json({ error: 'Horario no disponible - se solapa con otra reserva existente' });
+      }
+      // CEQ03: la base contó que la persona ya llegó al límite del mes
+      if (error.code === 'CEQ03') {
+        const cantidad = Number(error.message) || config.max_reservas_por_persona_mes;
+        return res.status(400).json({
+          error: `Ya tenés ${cantidad} reservas activas en ${getEspacioNombre(espacioIdNum)} para ese mes. El máximo es ${config.max_reservas_por_persona_mes} por persona. Si necesitás otro turno, cancelá una de tus reservas anteriores.`
+        });
       }
       // CONC-001: el trigger de la base detectó, de forma atómica, que el horario
       // está bloqueado por administración (esto puede pasar incluso si el chequeo
@@ -1396,7 +1437,9 @@ async function cancelarComoUsuario(reserva, res) {
   // calendario contra día calendario, fijo en huso horario de Paraguay.
   const diferenciaDias = diferenciaEnDiasCalendario(reserva.fecha);
 
-  if (diferenciaDias < 0) {
+  // También si es de hoy y su horario ya terminó (CEQ-05): si no, se podía usar el Altillo a la
+  // mañana, cancelar a la tarde y recuperar el cupo
+  if (reservaYaTermino(reserva)) {
     return res.status(400).json({ error: 'Esa reserva ya pasó: no se puede cancelar' });
   }
 
@@ -1534,6 +1577,7 @@ app.get('/api/cancelar-por-enlace', cancelarLimiter, async (req, res) => {
     if (!reserva) return;
     const dias = diferenciaEnDiasCalendario(reserva.fecha);
     const plazoVencido = Number(reserva.espacio_id) === 3 && dias < 2;
+    const yaPaso = reservaYaTermino(reserva);
     res.set('Cache-Control', 'no-store');
     res.json({
       id: reserva.id,
@@ -1541,9 +1585,9 @@ app.get('/api/cancelar-por-enlace', cancelarLimiter, async (req, res) => {
       fecha_larga: fechaLarga(reserva.fecha),
       horario: descripcionHorario(reserva.espacio_id, reserva.hora_inicio.substring(0, 5), reserva.hora_fin.substring(0, 5)),
       estado: reserva.estado,
-      ya_paso: dias < 0,
-      se_puede_cancelar: reserva.estado === 'activa' && dias >= 0 && !plazoVencido,
-      plazo_vencido: reserva.estado === 'activa' && dias >= 0 && plazoVencido,
+      ya_paso: yaPaso,
+      se_puede_cancelar: reserva.estado === 'activa' && !yaPaso && !plazoVencido,
+      plazo_vencido: reserva.estado === 'activa' && !yaPaso && plazoVencido,
       whatsapp: Number(reserva.espacio_id) === 3 ? config.contacto_whatsapp_frente : null
     });
   } catch (error) {
@@ -1574,6 +1618,12 @@ app.post('/api/cancelar-por-enlace', cancelarLimiter, async (req, res) => {
 const MAX_AVISOS_LISTA_ESPERA_POR_DIA = 60; // dentro de los 300 correos diarios de Brevo
 const DIAS_VIGENCIA_LISTA_ESPERA = 60; // las inscripciones sin avisar más viejas se borran solas
 let avisosListaEsperaHoy = { dia: '', cantidad: 0 };
+
+function avisosListaEsperaRestantesHoy() {
+  const dia = hoyEnAsuncion().toISOString().slice(0, 10);
+  if (avisosListaEsperaHoy.dia !== dia) return MAX_AVISOS_LISTA_ESPERA_POR_DIA;
+  return MAX_AVISOS_LISTA_ESPERA_POR_DIA - avisosListaEsperaHoy.cantidad;
+}
 
 function puedeAvisarListaEspera() {
   const dia = hoyEnAsuncion().toISOString().slice(0, 10);
@@ -1630,27 +1680,50 @@ async function avisarListaEspera(reserva) {
     const fin = reserva.hora_fin.substring(0, 5);
     if (horarioYaEmpezo(reserva.fecha, inicio)) return;
 
-    // Se marcan como avisadas ANTES de mandar: si llegan dos cancelaciones juntas, nadie
-    // recibe dos avisos por la misma inscripción
+    // Solo se toman tantas inscripciones como avisos queden hoy (CEQ-06): antes se marcaban
+    // todas como avisadas y, pasado el tope diario, el resto quedaba marcado sin recibir nada.
+    // Las que no entran siguen esperando el próximo turno que se libere.
+    const disponibles = avisosListaEsperaRestantesHoy();
+    if (disponibles <= 0) {
+      console.warn('⚠️ Se alcanzó el tope diario de avisos de lista de espera');
+      return;
+    }
+    const { data: pendientes, error: errorPendientes } = await supabase
+      .from('lista_espera').select('id')
+      .eq('espacio_id', reserva.espacio_id).is('avisado_en', null)
+      .order('creado_en', { ascending: true }).limit(disponibles);
+    if (errorPendientes) throw errorPendientes;
+    if (!pendientes || pendientes.length === 0) return;
+
+    // Se marcan ANTES de mandar (con la condición "todavía sin avisar"): si llegan dos
+    // cancelaciones juntas, nadie recibe dos avisos por la misma inscripción
     const { data: tomadas, error } = await supabase
       .from('lista_espera').update({ avisado_en: new Date().toISOString() })
-      .eq('espacio_id', reserva.espacio_id).is('avisado_en', null).select('email');
+      .in('id', pendientes.map(p => p.id)).is('avisado_en', null).select('id, email');
     if (error) throw error;
     if (!tomadas || tomadas.length === 0) return;
+    // Si un aviso no se pudo mandar, la inscripción vuelve a quedar pendiente
+    const devolver = async ids => {
+      if (ids.length === 0) return;
+      const { error: errorDevolver } = await supabase.from('lista_espera').update({ avisado_en: null }).in('id', ids);
+      if (errorDevolver) console.error('⚠️ No se pudo dejar pendiente en la lista de espera:', errorDevolver);
+    };
 
     const espacio = getEspacioNombre(reserva.espacio_id);
     const horario = descripcionHorario(reserva.espacio_id, inicio, fin);
     const enlace = `https://reservas.ceq-una.com/?fecha=${reserva.fecha}&espacio=${Number(reserva.espacio_id)}`;
-    for (const correo of [...new Set(tomadas.map(x => x.email))]) {
+    for (let i = 0; i < tomadas.length; i++) {
+      const correo = tomadas[i].email;
       if (!puedeAvisarListaEspera()) {
         console.warn('⚠️ Se alcanzó el tope diario de avisos de lista de espera');
+        await devolver(tomadas.slice(i).map(x => x.id));
         break;
       }
       // Correo simple, como de una persona (sin botón ni emoji), para que Gmail lo deje en
       // "Principal" y no en "Promociones". El asunto lleva el día, el turno y el número de la
       // reserva cancelada: cada aviso tiene un asunto distinto y Gmail no los agrupa.
       const dia = fechaLarga(reserva.fecha);
-      enviarEmail({
+      const enviado = await enviarEmail({
         to: correo,
         subject: `Se liberó un turno en el ${espacio}: ${dia}, ${horario} (aviso #${reserva.id})`,
         responderA: correoRespuesta(reserva.espacio_id),
@@ -1664,6 +1737,10 @@ async function avisarListaEspera(reserva) {
         `,
         text: `Hola,\n\nSe canceló una reserva del ${espacio} y quedó libre el ${dia}, ${horario}.\n\nSi te sirve, podés reservarlo acá: ${enlace}\n\nEl turno es de quien reserve primero.\n\nTe escribimos porque te anotaste en la lista de espera del ${espacio}. Este es el único aviso; si querés otro, volvé a anotarte en la página.\n\nCentro de Estudiantes de Química`
       });
+      if (!enviado) {
+        avisosListaEsperaHoy.cantidad = Math.max(avisosListaEsperaHoy.cantidad - 1, 0);
+        await devolver([tomadas[i].id]);
+      }
     }
   } catch (err) {
     console.error('⚠️ No se pudo avisar a la lista de espera:', err);
@@ -1955,8 +2032,11 @@ app.post('/api/bloqueos', verifyAdminToken, verificarCSRF, async (req, res) => {
       return res.status(400).json({ error: 'Faltan parámetros' });
     }
 
-    if (!/^\d{4}-\d{2}-\d{2}$/.test(fecha) || isNaN(new Date(fecha + 'T00:00:00').getTime())) {
+    if (!esFechaValida(fecha) || typeof hora_inicio !== 'string' || typeof hora_fin !== 'string') {
       return res.status(400).json({ error: 'Fecha inválida' });
+    }
+    if (![1, 3].includes(Number(espacio_id))) {
+      return res.status(400).json({ error: 'Espacio inválido' });
     }
 
     // VAL-003: un bloqueo en una fecha que ya pasó (en Paraguay) no tiene efecto y solo
@@ -1980,11 +2060,18 @@ app.post('/api/bloqueos', verifyAdminToken, verificarCSRF, async (req, res) => {
     const isBloqueCompleto = horaI === 0 && minI === 0 && horaF === 23 && minF === 59;
     
     if (!isBloqueCompleto) {
-      const horaMinima = Number(espacio_id) === 3 ? 7 : 8;
-      const horaMaxima = 18;
-      
-      if (horaI < horaMinima || horaF > horaMaxima || horaI >= horaF) {
-        return res.status(400).json({ error: `Horario inválido (${horaMinima}:00-${horaMaxima}:00)` });
+      // El rango sale de la configuración de cada espacio (CEQ-04): el Frente, de sus turnos;
+      // el Altillo, de 08:00 a 20:00. Antes había un tope fijo de 18:00 para los dos.
+      const aMin = hhmm => { const [h, m] = hhmm.split(':').map(Number); return h * 60 + m; };
+      const [desdeMin, hastaMin] = Number(espacio_id) === 3
+        ? [Math.min(...config.turnos_frente.map(t => aMin(t.inicio))), Math.max(...config.turnos_frente.map(t => aMin(t.fin)))]
+        : [ALTILLO_HORA_DESDE * 60, ALTILLO_HORA_HASTA * 60];
+      const texto = m => `${String(Math.floor(m / 60)).padStart(2, '0')}:${String(m % 60).padStart(2, '0')}`;
+      const iniMin = horaI * 60 + minI;
+      const finMin = horaF * 60 + minF;
+
+      if (iniMin < desdeMin || finMin > hastaMin || iniMin >= finMin) {
+        return res.status(400).json({ error: `Horario inválido (${texto(desdeMin)}-${texto(hastaMin)})` });
       }
     }
 
@@ -2093,25 +2180,17 @@ app.delete('/api/bloqueos/:id', verifyAdminToken, verificarCSRF, async (req, res
 // meses_habilitados, que es justamente el punto de este endpoint.
 app.post('/api/admin/reservas', verifyAdminToken, verificarCSRF, async (req, res) => {
   try {
-    const { espacio_id, nombre_solicitante, contacto, fecha, hora_inicio, hora_fin, motivo } = req.body;
-
-    if (!espacio_id || !nombre_solicitante || !contacto || !fecha || !hora_inicio || !hora_fin || !motivo) {
-      return res.status(400).json({ error: 'Faltan parámetros requeridos' });
+    // Misma validación que el formulario público (CEQ-03)
+    let datos;
+    try {
+      datos = validarDatosDeReserva(req.body);
+    } catch (err) {
+      return res.status(400).json({ error: err.message });
     }
-
-    if (String(nombre_solicitante).length > 150 || String(contacto).length > 200 || String(motivo).length > 500) {
-      return res.status(400).json({ error: 'Uno o más campos exceden la longitud permitida' });
-    }
-
-    const partesContacto = String(contacto).split('|').map(p => p.trim());
-    const emailValidoRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
-    if (partesContacto.length !== 2 || !partesContacto[0] || !emailValidoRegex.test(partesContacto[1])) {
-      return res.status(400).json({ error: 'El contacto debe tener el formato "celular | email" con un email válido' });
-    }
+    const { espacioIdNum, nombre_solicitante, contacto, fecha, hora_inicio, hora_fin, motivo } = datos;
 
     // Este endpoint es solo para Frente — la prioridad de la Comisión Directiva
     // aplica únicamente ahí, no tiene sentido para Altillo.
-    const espacioIdNum = parseInt(espacio_id);
     if (espacioIdNum !== 3) {
       return res.status(400).json({ error: 'Este endpoint es solo para Frente' });
     }
@@ -2186,13 +2265,13 @@ app.post('/api/admin/reservas', verifyAdminToken, verificarCSRF, async (req, res
       .from('reservas')
       .insert([{
         espacio_id: espacioIdNum,
-        nombre_solicitante: String(nombre_solicitante).trim(),
-        contacto: String(contacto).trim(),
+        nombre_solicitante,
+        contacto,
         fecha,
         hora_inicio: hora_inicio + ':00',
         hora_fin: hora_fin + ':00',
         estado: 'activa',
-        motivo: motivo || '',
+        motivo,
         codigo_cancelacion_hash: codigoHash,
         reservado_por_admin: true
       }])
@@ -2211,7 +2290,7 @@ app.post('/api/admin/reservas', verifyAdminToken, verificarCSRF, async (req, res
     // Se manda la misma confirmación que recibe cualquier persona que reserva por el
     // formulario público, al email que se haya cargado en el contacto de la reserva
     // de prioridad — para que la Comisión Directiva también tenga registro/código.
-    const email = partesContacto[1];
+    const email = contacto.split('|')[1].trim();
     enviarEmail({
       to: email,
       subject: `✓ Confirmación de Reserva - CEQ #${nuevaReserva[0].id}`,
@@ -2678,9 +2757,7 @@ app.post('/api/superadmin/cerrar-sesiones', verifyAdminToken, verifySuperAdmin, 
     versionSesiones = nueva;
     registrarActividad(req.admin.rol, 'Cerró todas las sesiones del panel');
 
-    const opcionesCookie = { secure: true, sameSite: 'lax', domain: '.ceq-una.com', path: '/' };
-    res.clearCookie('admin_token', { ...opcionesCookie, httpOnly: true });
-    res.clearCookie('csrf_token', { ...opcionesCookie, httpOnly: false });
+    borrarCookiesSesion(res);
     res.json({ mensaje: 'Se cerraron todas las sesiones' });
   } catch (error) {
     manejarError(res, error);
@@ -2905,6 +2982,12 @@ async function aplicarPlazosDeConservacion() {
   const { data: altillo, error: e2 } = await supabase.from('reservas').update({ ...datosBorrados, motivo: '' })
     .lt('fecha', fechaLimite).neq('nombre_solicitante', NOMBRE_ANONIMIZADO).eq('espacio_id', 1).select('id');
   if (e2) throw e2;
+  // En el Frente el motivo se conserva solo si es uno de la lista (es una categoría, no un dato
+  // personal). Las reservas de prioridad del panel pueden tener motivo libre: ese se borra.
+  const { error: e4 } = await supabase.from('reservas').update({ motivo: '' })
+    .lt('fecha', fechaLimite).eq('espacio_id', 3).neq('motivo', '')
+    .not('motivo', 'in', `(${MOTIVOS_FRENTE.map(m => `"${m}"`).join(',')})`);
+  if (e4) throw e4;
   const { data: reportes, error: e3 } = await supabase.from('reportes_errores').delete().lt('created_at', fechaLimite + 'T00:00:00').select('id');
   if (e3) throw e3;
 
@@ -2988,9 +3071,9 @@ async function enviarCopiaMensual() {
       html: `
         <p>Hola,</p>
         <p>Te mandamos la copia de seguridad mensual del sistema de reservas: el archivo adjunto tiene las <strong>${total} reservas</strong> guardadas hasta hoy, con todos sus datos (también celulares, correos y cancelaciones).</p>
-        <p><strong>Qué hacer:</strong> guardá el archivo en la carpeta de copias de Google Drive. Se abre con Excel o con Google Sheets.</p>
+        <p><strong>Qué hacer:</strong> nada. La copia queda guardada en este correo; si la necesitás, el archivo se abre con Excel o con Google Sheets.</p>
         <p>La base de datos gratuita no guarda copias que se puedan descargar: si algún día se perdiera, estas copias son la forma de recuperar las reservas.</p>
-        <p>El archivo tiene datos personales: no lo reenvíes ni lo compartas fuera de quienes administran el sistema.</p>
+        <p>El archivo tiene datos personales: no lo reenvíes, no lo guardes en otro lado y no lo compartas fuera de quienes administran el sistema. Según la Política de Privacidad, las copias se conservan como máximo 6 meses: el script "Limpiar copias de seguridad" de esta cuenta las manda a la papelera solo cuando cumplen ese plazo.</p>
         <p>Sistema de Reservas del CEQ</p>
       `,
       adjuntos: [{ name: `reservas-ceq-${mes}.csv`, content: Buffer.from(csv, 'utf8').toString('base64') }]
@@ -3073,6 +3156,18 @@ async function correrTareasPeriodicas() {
     }
   }
 }
+
+// ========== ERRORES NO ATRAPADOS (CEQ-12) ==========
+// Lo que falla antes de llegar a una ruta (por ejemplo, un JSON mal escrito o demasiado grande)
+// no pasa por manejarError(). Sin esto, Express respondía con una página HTML que, fuera del modo
+// producción, mostraba rutas internas del servidor. Va después de todas las rutas.
+app.use((err, req, res, next) => {
+  if (res.headersSent) return next(err);
+  if (err.type === 'entity.parse.failed') return res.status(400).json({ error: 'JSON inválido' });
+  if (err.type === 'entity.too.large') return res.status(413).json({ error: 'Solicitud demasiado grande' });
+  console.error(`⚠️ Error no atrapado en ${req.method} ${req.path}:`, err && err.name, err && err.message);
+  res.status(500).json({ error: 'Error interno del servidor' });
+});
 
 // ========== INICIAR SERVIDOR ==========
 

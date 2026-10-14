@@ -81,7 +81,7 @@ Si falta una obligatoria, el servidor no arranca y lo dice en los Logs de Render
 | **Programar la apertura de un mes** | Meses → Programar la apertura de un mes | Se elige el mes (el que sigue al último habilitado) y la fecha y hora (de Paraguay). A esa hora exacta se abre solo, aunque nadie esté conectado, y la página muestra mientras tanto una cuenta regresiva. Se puede cancelar desde la misma pantalla. Habilitar o deshabilitar el mes a mano borra la programación. |
 | Buscar a una persona | Reservas → "Buscar persona" | Por nombre (sin importar tildes), email o celular (con o sin espacios). Muestra un resumen: próximas, pasadas, canceladas y asistencia. |
 | Marcar asistencia | Reservas → botones **✓ Vino / ✗ No vino** | Aparecen en las reservas activas cuyo día ya llegó (también en el detalle del calendario). Tocar la opción marcada la borra. Sale en el Excel y en la planilla. |
-| Bloquear un día u horario | Bloqueos | No se puede bloquear una fecha pasada ni un horario con reservas activas: primero hay que cancelarlas. |
+| Bloquear un día u horario | Bloqueos | No se puede bloquear una fecha pasada ni un horario con reservas activas: primero hay que cancelarlas. El horario tiene que estar dentro del espacio: el Frente, entre el primer y el último turno; el Altillo, de 08:00 a 20:00. |
 | Reserva de prioridad (Comisión Directiva) | Prioridad | Solo Frente. Se puede hacer aunque el mes no esté habilitado y no cuenta para el límite por persona. Le llega la confirmación al correo que se cargue. |
 | Cancelar una reserva | Reservas → Cancelar | Pide un motivo; se avisa por correo a quien reservó y a los moderadores. Así se ayuda a quien perdió su código. |
 | Revisar reportes | Reportes | Cada reporte nuevo también llega por correo a `EMAIL_MODERADOR` (hasta 20 avisos por día). Marcalos como leídos. |
@@ -118,7 +118,7 @@ El admin normal no ve la pestaña Avanzado, y el servidor le rechaza esas accion
 
 Supabase gratis no guarda copias que se puedan descargar. Por eso, el **día 1° de cada mes a las 08:00** el servidor manda al **correo de alertas** (Avanzado → Configuración) un archivo `reservas-ceq-AAAA-MM.csv` con **todas** las reservas y todos sus datos (también celulares, correos, acompañantes y cancelaciones). Se abre con Excel o Google Sheets.
 
-**Qué hacer cuando llega:** guardar el archivo en la carpeta de copias de Google Drive y **borrar las copias de hace más de 6 meses** (lo exige la Política de Privacidad). Tiene datos personales: no reenviarlo. Si un mes no llega, revisar Render → Logs (buscar `copia mensual`). El mes ya enviado queda anotado en la tabla `configuracion` (clave `copia_mensual_enviada`): para que se vuelva a mandar, borrá esa fila.
+**Qué hacer cuando llega:** nada; la copia queda en el correo. **No guardarla en otro lado**: la Política de Privacidad dice que las copias se conservan como máximo 6 meses, y el script `google-sheets/limpiar-copias-de-seguridad.gs` (un proyecto de Apps Script aparte en la cuenta ceq.informatica, con un activador diario) manda a la papelera las de más de 6 meses. Para instalarlo: script.google.com → Nuevo proyecto → pegar el código → ejecutar `activarLimpiezaDiaria` y autorizar (en Chrome). Tiene datos personales: no reenviarlo. Si un mes no llega, revisar Render → Logs (buscar `copia mensual`). El mes ya enviado queda anotado en la tabla `configuracion` (clave `copia_mensual_enviada`): para que se vuelva a mandar, borrá esa fila.
 
 ### Planilla de Google Sheets (se actualiza sola)
 
@@ -126,7 +126,7 @@ Una planilla en la cuenta `ceq.informatica@gmail.com` tiene todas las reservas y
 - **Resumen:** hora de la última actualización, estado (OK o el error) y totales por espacio, turno, día de la semana y mes.
 - **Reservas:** todas las reservas, una por fila, con filtros. Se reescribe en cada actualización: **no edites ahí**, porque se pierde. Para trabajar con los datos, copiá la pestaña.
 - **Una pestaña por mes** ("Noviembre 2026", "Octubre 2026", …), del más nuevo al más viejo: las reservas de ese mes, con el mismo formato. También se reescriben (no editar ahí). Cada mes nuevo aparece solo; si un mes se queda sin reservas, su pestaña se borra.
-- **Copia AAAA-MM:** foto fija tomada en la primera actualización de cada mes. Es la copia de seguridad: no se vuelve a tocar. Se guardan las últimas 24.
+- **Copia AAAA-MM:** foto fija tomada en la primera actualización de cada mes. Es la copia de seguridad. Se borra cuando tiene más de 6 meses y, mientras tanto, las reservas que pasan ese plazo quedan sin nombre, acompañantes ni motivo libre (Política de Privacidad).
 
 Columnas: N°, Fecha, Día, Espacio, Turno, Inicio, Fin, Nombre, Motivo, Acompañantes (solo nombres), Estado, Asistencia y Creada. **No trae celulares, correos, prioridad ni datos de cancelación**: el servidor ni siquiera se los manda (para eso están el panel y su Excel). Las "personas distintas" del Resumen se cuentan con un código anónimo que manda el servidor. Las copias guardadas antes de este cambio se limpiaron solas (se borraron esas columnas).
 
@@ -155,7 +155,7 @@ Si falla la actualización automática, Google manda un correo a la cuenta. La c
 | Horario del Altillo | Bloques de 1 hora de 08:00 a 20:00 (el último empieza a las 19:00), de 1 a 2 horas por reserva. Hoy se puede tomar el bloque en curso mientras no haya terminado (a las 11:30, el de las 11:00 sí; a las 12:00, ya no). | `ALTILLO_HORA_DESDE`, `ALTILLO_HORA_HASTA` y `ALTILLO_MAX_HORAS` en `server.js` (la página los toma de ahí) |
 | Acompañantes | Solo en el Altillo (en el Frente no se piden). Opcional, hasta 4 por reserva, con nombre y celular. Se ven en el panel, el Excel y los correos (en la planilla, solo los nombres); nunca en la página pública. | `MAX_ACOMPANANTES` en `server.js` y el límite `reservas_acompanantes_validos` de la base |
 | Días | Lunes a viernes, desde hoy, solo en meses habilitados | `server.js` (`POST /api/reservas`) |
-| Límite por persona | 2 reservas activas por mes y por espacio (se reconoce a la persona por correo o por celular) | Panel → Avanzado → Configuración (admin supremo) |
+| Límite por persona | Solo en el Frente: 2 reservas activas por mes (se reconoce a la persona por correo o por celular). El Altillo no tiene límite. No cuentan las canceladas ni las de prioridad del panel. La base cuenta y guarda en un solo paso (función `crear_reserva_con_cupo`), así varios pedidos al mismo tiempo no pasan el límite. | Panel → Avanzado → Configuración (admin supremo) |
 | Cancelación con código o enlace (Frente) | Hasta 2 días antes; después, por WhatsApp | `cancelarComoUsuario()` en `server.js` |
 | Límites por IP | Crear 30/hora, cancelar 20/hora, reportes 10/hora, consultas 1200 cada 5 min, login 5 intentos fallidos cada 15 min | Los `rateLimit` en `server.js` |
 | Contacto del Frente | Correo y WhatsApp de la persona encargada | Panel → Avanzado → Configuración (admin supremo): se actualiza en los correos y en las páginas. Si cambia la persona, cambiar también `EMAIL_MODERADOR_FRENTE` en Render (avisos internos). |
@@ -203,6 +203,7 @@ La estructura completa está en [`esquema-base-de-datos.sql`](esquema-base-de-da
 Protecciones que viven en la base (además de las del servidor):
 - **`no_solapamiento_activo`:** dos reservas activas del mismo espacio no pueden superponerse, aunque lleguen al mismo instante.
 - **Triggers:** no se puede reservar sobre un bloqueo (error `CEQ01`) ni bloquear sobre una reserva activa (error `CEQ02`).
+- **Función `crear_reserva_con_cupo`** (migración `migracion-cupo-atomico.sql`): el servidor guarda las reservas públicas con ella. Con un candado por espacio y mes, cuenta las reservas activas del mes de la persona (sin las de prioridad) y guarda en la misma transacción; si llegó al límite, responde el error `CEQ03`. Solo la puede usar el servidor (`service_role`).
 - **Seguridad (RLS) activada sin políticas:** solo el servidor, con la clave service_role, puede leer y escribir.
 - Los códigos de cancelación se guardan cifrados: **no se pueden recuperar**, ni siquiera desde la base.
 

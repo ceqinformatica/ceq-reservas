@@ -11,7 +11,8 @@
  *     de ese mes (también se reescriben; si un mes se queda sin reservas, su pestaña se borra).
  *   - Resumen: totales y la hora de la última actualización.
  *   - Copia AAAA-MM: en la primera actualización de cada mes se guarda una copia fija de
- *     "Reservas" (copia de seguridad: no se vuelve a tocar). Se conservan las últimas 24.
+ *     "Reservas" (copia de seguridad). Se borra a los 6 meses y, mientras tanto, las reservas
+ *     que pasan ese plazo quedan sin nombre, acompañantes ni motivo libre (Política de Privacidad).
  *
  * La clave NO se escribe en este código: se guarda con el menú "Reservas CEQ > Guardar clave".
  * No trae celulares, correos ni datos de cancelación (esos se ven en el panel y en el Excel del
@@ -23,7 +24,13 @@ const ZONA = 'America/Asuncion';
 const HOJA_RESERVAS = 'Reservas';
 const HOJA_RESUMEN = 'Resumen';
 const PREFIJO_COPIA = 'Copia ';
-const COPIAS_A_CONSERVAR = 24;
+// Plazo de la Política de Privacidad: las copias de más de 6 meses se borran, y en las demás se
+// borran los datos de las reservas que ya pasaron ese plazo
+const MESES_CONSERVACION = 6;
+const NOMBRE_ANONIMIZADO = '(datos eliminados)';
+// Los motivos del Frente son categorías (no datos personales): se conservan, como en el servidor
+const MOTIVOS_FRENTE = ['Actividad Personal', 'Recaudación - Asociación Estudiantil', 'Recaudación - Secretaría CEQ',
+  'Recaudación - Padrinaje', 'Recaudación - Congreso o Evento Académico'];
 const DIAS_SEMANA = ['Domingo', 'Lunes', 'Martes', 'Miércoles', 'Jueves', 'Viernes', 'Sábado'];
 const MESES = ['Enero', 'Febrero', 'Marzo', 'Abril', 'Mayo', 'Junio', 'Julio', 'Agosto', 'Septiembre', 'Octubre', 'Noviembre', 'Diciembre'];
 const PATRON_HOJA_MES = new RegExp('^(' + MESES.join('|') + ') \\d{4}$'); // "Octubre 2026"
@@ -304,10 +311,60 @@ function guardarCopiaMensual_(ss, hoja) {
   if (!ss.getSheetByName(nombre)) {
     hoja.copyTo(ss).setName(nombre); // la copia queda al final, después de las demás hojas
   }
-  const copias = ss.getSheets().filter(h => h.getName().indexOf(PREFIJO_COPIA) === 0)
-    .sort((a, b) => a.getName() < b.getName() ? -1 : 1);
-  copias.slice(0, Math.max(copias.length - COPIAS_A_CONSERVAR, 0)).forEach(h => ss.deleteSheet(h));
-  copias.slice(Math.max(copias.length - COPIAS_A_CONSERVAR, 0)).forEach(limpiarCopiaVieja_);
+  // Política de Privacidad: los datos se guardan como máximo 6 meses (CEQ-09). Se borran las
+  // copias de hace más de 6 meses (por su fecha, no por cantidad) y, en las que quedan, se borran
+  // los datos personales de las reservas que ya pasaron ese plazo (igual que hace el servidor).
+  const limite = fechaLimiteConservacion_();
+  const mesLimite = limite.slice(0, 7);
+  ss.getSheets().filter(h => h.getName().indexOf(PREFIJO_COPIA) === 0).forEach(h => {
+    const mes = h.getName().slice(PREFIJO_COPIA.length);
+    if (/^\d{4}-\d{2}$/.test(mes) && mes < mesLimite) ss.deleteSheet(h);
+    else {
+      limpiarCopiaVieja_(h);
+      anonimizarCopia_(h, limite);
+    }
+  });
+}
+
+// "AAAA-MM-DD" de hoy menos MESES_CONSERVACION meses, en hora de Paraguay
+function fechaLimiteConservacion_() {
+  const [a, m, d] = Utilities.formatDate(new Date(), ZONA, 'yyyy-MM-dd').split('-').map(Number);
+  const fecha = new Date(Date.UTC(a, m - 1 - MESES_CONSERVACION, d));
+  return fecha.toISOString().slice(0, 10);
+}
+
+// En una copia guardada, las reservas con fecha anterior al límite quedan sin nombre, sin
+// acompañantes y, si el motivo no es uno de la lista del Frente, sin motivo
+function anonimizarCopia_(hoja, limite) {
+  const ancho = hoja.getLastColumn();
+  const filas = hoja.getLastRow() - 1;
+  if (ancho === 0 || filas <= 0) return;
+  const encabezado = hoja.getRange(1, 1, 1, ancho).getValues()[0];
+  const col = n => encabezado.indexOf(n);
+  const [cFecha, cNombre, cMotivo, cAcomp] = [col('Fecha'), col('Nombre'), col('Motivo'), col('Acompañantes')];
+  if (cFecha === -1 || cNombre === -1) return;
+  const rango = hoja.getRange(2, 1, filas, ancho);
+  const valores = rango.getValues();
+  let cambios = false;
+  valores.forEach(f => {
+    const esFecha = Object.prototype.toString.call(f[cFecha]) === '[object Date]';
+    const fecha = esFecha ? Utilities.formatDate(f[cFecha], ZONA, 'yyyy-MM-dd') : textoAFechaIso_(f[cFecha]);
+    if (!fecha || fecha >= limite || f[cNombre] === NOMBRE_ANONIMIZADO) return;
+    f[cNombre] = NOMBRE_ANONIMIZADO;
+    if (cAcomp !== -1) f[cAcomp] = '';
+    if (cMotivo !== -1 && MOTIVOS_FRENTE.indexOf(String(f[cMotivo])) === -1) f[cMotivo] = '';
+    cambios = true;
+  });
+  if (cambios) rango.setValues(valores);
+}
+
+// "16/11/2026" o "2026-11-16" -> "2026-11-16"; cualquier otra cosa -> ''
+function textoAFechaIso_(valor) {
+  const t = String(valor || '').replace(/^'/, '');
+  let m = t.match(/^(\d{4})-(\d{2})-(\d{2})/);
+  if (m) return `${m[1]}-${m[2]}-${m[3]}`;
+  m = t.match(/^(\d{2})\/(\d{2})\/(\d{4})/);
+  return m ? `${m[3]}-${m[2]}-${m[1]}` : '';
 }
 
 // Las copias guardadas con la versión anterior tenían celulares, correos y otros datos que ya no
