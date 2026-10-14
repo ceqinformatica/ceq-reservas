@@ -33,11 +33,11 @@ const anotar = (nombre, ok, detalle = '') => resultados.push({ nombre, ok, detal
 
   // Estructura
   const tablas = (await db.query(`select string_agg(tablename, ', ' order by tablename) t from pg_tables where schemaname = 'public'`)).rows[0].t;
-  anotar('Están las 9 tablas', tablas === 'bloqueos, cancelaciones, configuracion, espacios, lista_espera, meses_habilitados, registro_actividad, reportes_errores, reservas', tablas);
+  anotar('Están las 10 tablas', tablas === 'bloqueos, cancelaciones, configuracion, correos_pendientes, espacios, lista_espera, meses_habilitados, registro_actividad, reportes_errores, reservas', tablas);
   const esp = (await db.query('select id, nombre from espacios order by id')).rows.map(r => `${r.id}=${r.nombre}`).join(', ');
   anotar('Los 3 espacios con sus números (1 Altillo, 2 Sala, 3 Frente)', esp === '1=Altillo, 2=Sala de Reuniones, 3=Frente', esp);
   const rls = (await db.query(`select count(*)::int n from pg_class c join pg_namespace n on n.oid = c.relnamespace where n.nspname = 'public' and c.relkind = 'r' and c.relrowsecurity`)).rows[0].n;
-  anotar('RLS activado en las 9 tablas (solo el servidor puede leer y escribir)', rls === 9, String(rls));
+  anotar('RLS activado en las 10 tablas (solo el servidor puede leer y escribir)', rls === 10, String(rls));
 
   // Regla anti-superposición
   anotar('Reserva Frente 07:00-10:00', await ok(reserva(3, '2026-11-10', '07:00', '10:00')) === 'ok');
@@ -114,6 +114,10 @@ const anotar = (nombre, ok, detalle = '') => resultados.push({ nombre, ok, detal
   anotar('Cupo: sigue valiendo la regla anti-superposición (23P01)', await ok(cupo('2026-12-01', '08:00', '10:00', '0984 1 | x@ejemplo.com', 'x@ejemplo.com', null)) === '23P01');
   await db.query(bloqueo(3, '2026-12-10', '00:00', '23:59'));
   anotar('Cupo: siguen valiendo los bloqueos (CEQ01)', await ok(cupo('2026-12-10', '07:00', '10:00', '0985 555 555 | y@ejemplo.com', 'y@ejemplo.com', '985555555')) === 'CEQ01');
+  // Cola de correos (CEQ-06)
+  anotar('Cola de correos: un correo nuevo queda "pendiente" con 0 intentos', await ok(`insert into correos_pendientes (destinatarios, asunto, html) values ('["a@b.com"]', 'Hola', '<p>x</p>')`) === 'ok'
+    && (await db.query(`select estado, intentos from correos_pendientes`)).rows.every(f => f.estado === 'pendiente' && f.intentos === 0));
+  anotar('Cola de correos: un estado inventado se rechaza (23514)', await ok(`update correos_pendientes set estado = 'perdido'`) === '23514');
   const guardada = (await db.query(`select estado, motivo, reservado_por_admin, acompanantes::text a from reservas where nombre_solicitante = 'Cupo' order by id limit 1`)).rows[0];
   anotar('Cupo: guarda la reserva activa, con el motivo y sin prioridad', guardada.estado === 'activa' && guardada.motivo === 'Actividad Personal' && guardada.reservado_por_admin === false && guardada.a === '[]', JSON.stringify(guardada));
   terminar();

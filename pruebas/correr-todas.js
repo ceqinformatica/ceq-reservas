@@ -26,6 +26,7 @@ const PRUEBAS = [
   ['Copia de seguridad mensual y "Responder a" de los correos', 'probar_copia_y_responder.js', [raiz, aqui]],
   ['Ventana de novedades y espacios sin aviso', 'probar_novedades.js', [raiz, aqui]],
   ['Arreglos de la auditoría técnica (cupo, validación, cancelaciones, lista de espera, cookies)', 'probar_auditoria.js', [raiz, aqui]],
+  ['Cola de correos con reintentos', 'probar_cola_correos.js', [raiz, aqui]],
   ['Plazos de conservación de la Política de Privacidad', 'probar_retencion.js', [raiz, aqui]],
   ['Estructura y reglas de la base de datos', 'probar_esquema.js', [raiz, path.join(raiz, 'esquema-base-de-datos.sql')], '@electric-sql/pglite']
 ];
