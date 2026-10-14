@@ -87,6 +87,35 @@ const anotar = (nombre, ok, detalle = '') => resultados.push({ nombre, ok, detal
   anotar('Lista de espera: un correo por espacio (23505 si se repite)', await ok(`insert into lista_espera (espacio_id, email) values (3, 'a@b.com')`) === 'ok'
     && await ok(`insert into lista_espera (espacio_id, email) values (3, 'a@b.com')`) === '23505'
     && await ok(`insert into lista_espera (espacio_id, email) values (1, 'a@b.com')`) === 'ok');
+
+  // Función crear_reserva_con_cupo (CEQ-02): cuenta el límite del mes y guarda en un solo paso
+  const cupo = (fecha, ini, fin, contacto, email, celular, limite = 2, espacio = 3) =>
+    `select id from crear_reserva_con_cupo(${espacio}, 'Cupo', '${contacto}', '${fecha}', '${ini}', '${fin}', 'Actividad Personal',
+       md5(random()::text), '[]'::jsonb, ${limite === null ? 'null' : limite}, ${email ? `'${email}'` : 'null'}, ${celular ? `'${celular}'` : 'null'})`;
+  const errorDe = async sql => { try { await db.query(sql); return { code: 'ok' }; } catch (e) { return { code: e.code, message: e.message }; } };
+  anotar('Cupo: primera reserva del mes de la persona', await ok(cupo('2026-12-01', '07:00', '10:00', '0982 111 222 | cupo@ejemplo.com', 'cupo@ejemplo.com', '982111222')) === 'ok');
+  anotar('Cupo: segunda reserva (otro día)', await ok(cupo('2026-12-02', '07:00', '10:00', '0982 111 222 | cupo@ejemplo.com', 'cupo@ejemplo.com', '982111222')) === 'ok');
+  let e = await errorDe(cupo('2026-12-03', '07:00', '10:00', '0982 111 222 | cupo@ejemplo.com', 'cupo@ejemplo.com', '982111222'));
+  anotar('Cupo: la tercera se rechaza con CEQ03 y la cantidad en el mensaje', e.code === 'CEQ03' && e.message === '2', JSON.stringify(e));
+  e = await errorDe(cupo('2026-12-03', '07:00', '10:00', '0999 999 999 | CUPO@ejemplo.com', 'cupo@ejemplo.com', '999999999'));
+  anotar('Cupo: se reconoce por correo aunque cambie el celular (y sin importar mayúsculas)', e.code === 'CEQ03', JSON.stringify(e));
+  e = await errorDe(cupo('2026-12-03', '07:00', '10:00', '+595 982 111 222 | otra@ejemplo.com', 'otra@ejemplo.com', '982111222'));
+  anotar('Cupo: se reconoce por celular aunque cambie el correo (con +595)', e.code === 'CEQ03', JSON.stringify(e));
+  anotar('Cupo: el mes siguiente se cuenta aparte', await ok(cupo('2027-01-04', '07:00', '10:00', '0982 111 222 | cupo@ejemplo.com', 'cupo@ejemplo.com', '982111222')) === 'ok');
+  await db.query(`update reservas set estado = 'cancelada' where fecha = '2026-12-02' and nombre_solicitante = 'Cupo'`);
+  anotar('Cupo: una cancelada no cuenta', await ok(cupo('2026-12-03', '07:00', '10:00', '0982 111 222 | cupo@ejemplo.com', 'cupo@ejemplo.com', '982111222')) === 'ok');
+  await db.query(`insert into reservas (espacio_id, nombre_solicitante, contacto, fecha, hora_inicio, hora_fin, reservado_por_admin, codigo_cancelacion_hash)
+    values (3, 'Prio', '0983 333 444 | prio@ejemplo.com', '2026-12-07', '07:00', '10:00', true, md5(random()::text)),
+           (3, 'Prio', '0983 333 444 | prio@ejemplo.com', '2026-12-08', '07:00', '10:00', true, md5(random()::text))`);
+  anotar('Cupo: las reservas de prioridad no cuentan', await ok(cupo('2026-12-09', '07:00', '10:00', '0983 333 444 | prio@ejemplo.com', 'prio@ejemplo.com', '983333444')) === 'ok');
+  anotar('Cupo: sin límite (Altillo) no cuenta nada', await ok(cupo('2026-12-01', '08:00', '09:00', '0982 111 222 | cupo@ejemplo.com', 'cupo@ejemplo.com', '982111222', null, 1)) === 'ok'
+    && await ok(cupo('2026-12-02', '08:00', '09:00', '0982 111 222 | cupo@ejemplo.com', 'cupo@ejemplo.com', '982111222', null, 1)) === 'ok'
+    && await ok(cupo('2026-12-03', '08:00', '09:00', '0982 111 222 | cupo@ejemplo.com', 'cupo@ejemplo.com', '982111222', null, 1)) === 'ok');
+  anotar('Cupo: sigue valiendo la regla anti-superposición (23P01)', await ok(cupo('2026-12-01', '08:00', '10:00', '0984 1 | x@ejemplo.com', 'x@ejemplo.com', null)) === '23P01');
+  await db.query(bloqueo(3, '2026-12-10', '00:00', '23:59'));
+  anotar('Cupo: siguen valiendo los bloqueos (CEQ01)', await ok(cupo('2026-12-10', '07:00', '10:00', '0985 555 555 | y@ejemplo.com', 'y@ejemplo.com', '985555555')) === 'CEQ01');
+  const guardada = (await db.query(`select estado, motivo, reservado_por_admin, acompanantes::text a from reservas where nombre_solicitante = 'Cupo' order by id limit 1`)).rows[0];
+  anotar('Cupo: guarda la reserva activa, con el motivo y sin prioridad', guardada.estado === 'activa' && guardada.motivo === 'Actividad Personal' && guardada.reservado_por_admin === false && guardada.a === '[]', JSON.stringify(guardada));
   terminar();
 
   function terminar() {

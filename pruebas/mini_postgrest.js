@@ -1,8 +1,31 @@
 // Mini PostgREST en memoria para probar server.js sin Supabase. Soporta lo que usa el servidor:
 // filtros eq/neq/in/is/gte/lte/gt/lt, select de columnas, order (varias columnas), limit/offset
 // (con el tope de 1000 filas de Supabase), insert, upsert (on_conflict de varias columnas),
-// update y delete con return=representation, y restricciones únicas.
+// update y delete con return=representation, restricciones únicas y la función
+// crear_reserva_con_cupo (rpc).
 const http = require('http');
+
+// La fila que guarda crear_reserva_con_cupo a partir de sus parámetros
+function filaDesdeRpcReserva(a) {
+  return {
+    espacio_id: a.p_espacio_id, nombre_solicitante: a.p_nombre, contacto: a.p_contacto, fecha: a.p_fecha,
+    hora_inicio: a.p_hora_inicio, hora_fin: a.p_hora_fin, estado: 'activa', motivo: a.p_motivo || '',
+    codigo_cancelacion_hash: a.p_codigo_hash, acompanantes: a.p_acompanantes || []
+  };
+}
+
+// Lo que cuenta crear_reserva_con_cupo: reservas activas del mismo espacio y mes, que no sean de
+// prioridad, con el mismo correo o los mismos últimos 9 dígitos del celular. null si no hay límite.
+function contarCupo(reservas, a) {
+  if (a.p_limite == null) return null;
+  const ident = c => { const [cel = '', mail = ''] = String(c || '').split('|').map(x => x.trim()); const d = cel.replace(/\D/g, ''); return { email: mail.toLowerCase() || null, celular: d.length >= 6 ? d.slice(-9) : null }; };
+  const mes = String(a.p_fecha).slice(0, 7);
+  return reservas.filter(r => r.estado === 'activa' && Number(r.espacio_id) === Number(a.p_espacio_id) &&
+    String(r.fecha).slice(0, 7) === mes && r.reservado_por_admin !== true && (() => {
+      const o = ident(r.contacto);
+      return (a.p_email && o.email === a.p_email) || (a.p_celular && o.celular === a.p_celular);
+    })()).length;
+}
 
 function crearMiniPostgrest(db, { unicas = {}, porDefecto = {}, fallar = () => false } = {}) {
   const siguiente = {};
@@ -38,6 +61,23 @@ function crearMiniPostgrest(db, { unicas = {}, porDefecto = {}, fallar = () => f
       pedidos.push({ metodo: rq.method, tabla, consulta: p.toString(), cuerpo });
       const enviar = (st, datos, extra = {}) => { rs.writeHead(st, { 'content-type': 'application/json', ...extra }); rs.end(datos === undefined ? '' : JSON.stringify(datos)); };
       try {
+        // Función crear_reserva_con_cupo (ver migracion-cupo-atomico.sql): cuenta el límite del
+        // mes y guarda la reserva. Acá es atómico solo, porque el simulador atiende de a uno.
+        if (tabla === 'rpc/crear_reserva_con_cupo') {
+          if (fallar('reservas', 'POST')) return enviar(500, { code: 'XX000', message: 'falla simulada' });
+          const a = JSON.parse(cuerpo || '{}');
+          const n = contarCupo(db.reservas, a);
+          if (n !== null && n >= a.p_limite) return enviar(400, { code: 'CEQ03', message: String(n) });
+          const fila = { ...(porDefecto.reservas ? porDefecto.reservas() : {}), ...filaDesdeRpcReserva(a) };
+          if (fila.reservado_por_admin === undefined) fila.reservado_por_admin = false;
+          fila.id = nuevoId('reservas');
+          (unicas.reservas || []).forEach(cols => {
+            if (db.reservas.some(o => cols.every(c => String(o[c]) === String(fila[c])))) { const e = new Error('duplicado'); e.codigo = '23505'; throw e; }
+          });
+          db.reservas.push(fila);
+          pedidos.push({ metodo: 'POST', tabla: 'reservas', consulta: '', cuerpo: JSON.stringify(fila) });
+          return enviar(200, [{ ...fila }]);
+        }
         if (fallar(tabla, rq.method)) return enviar(500, { code: 'XX000', message: 'falla simulada' });
         if (!db[tabla]) return enviar(404, { code: '42P01', message: 'no existe ' + tabla });
         const representar = filas => prefer.includes('return=representation') ? enviar(rq.method === 'POST' ? 201 : 200, proyectar(filas, p.get('select'))) : enviar(rq.method === 'POST' ? 201 : 204);
@@ -83,4 +123,4 @@ function crearMiniPostgrest(db, { unicas = {}, porDefecto = {}, fallar = () => f
   return { servidor, pedidos };
 }
 
-module.exports = { crearMiniPostgrest };
+module.exports = { crearMiniPostgrest, filaDesdeRpcReserva, contarCupo };

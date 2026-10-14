@@ -7,6 +7,7 @@ const fs = require('fs');
 const path = require('path');
 const os = require('os');
 const { spawn } = require('child_process');
+const { filaDesdeRpcReserva, contarCupo } = require(path.join(__dirname, 'mini_postgrest.js'));
 const [carpeta, serverOriginal, interceptor, reloj] = process.argv.slice(2);
 
 const archivoServidor = path.join(carpeta, 'server-altillo-prueba.js');
@@ -33,6 +34,13 @@ const supa = http.createServer((req, res) => {
     if (req.url.startsWith('/rest/v1/espacios')) {
       const id = new URL(req.url, 'http://x').searchParams.get('id');
       return enviar(200, [{ publico: id !== 'eq.2' }]);
+    }
+    // Las reservas públicas se guardan con la función crear_reserva_con_cupo de la base
+    if (req.url.startsWith('/rest/v1/rpc/crear_reserva_con_cupo') && req.method === 'POST') {
+      const args = JSON.parse(cuerpo);
+      const fila = filaDesdeRpcReserva(args);
+      insertados.push({ ...fila, limite: args.p_limite });
+      return enviar(200, [{ id: siguienteId++, ...fila }]);
     }
     if (req.url.startsWith('/rest/v1/reservas') && req.method === 'POST') {
       const fila = JSON.parse(cuerpo)[0];
@@ -90,7 +98,9 @@ const anotar = (nombre, ok, detalle = '') => resultados.push({ nombre, ok, detal
   r = await reservar(1, '19:00', '20:00'); anotar('Altillo 19:00-20:00: aceptada (nuevo)', ok201(r), det(r));
   r = await reservar(1, '18:00', '20:00'); anotar('Altillo 18:00-20:00: aceptada', ok201(r), det(r));
   r = await reservar(1, '08:00', '11:00'); anotar('Altillo 3 horas: rechazada', err(r, 'entre 1 y 2 horas'), det(r));
-  r = await reservar(1, '08:30', '09:00'); anotar('Altillo 30 minutos: rechazada', err(r, 'entre 1 y 2 horas'), det(r));
+  r = await reservar(1, '08:30', '09:00'); anotar('Altillo 30 minutos: rechazada', err(r, 'horas completas'), det(r));
+  r = await reservar(1, '08:30', '10:00'); anotar('Altillo 08:30-10:00 (no es hora completa): rechazada', err(r, 'horas completas'), det(r));
+  r = await reservar(1, '09:00', '10:30'); anotar('Altillo 09:00-10:30 (no es hora completa): rechazada', err(r, 'horas completas'), det(r));
   r = await reservar(1, '07:00', '08:00'); anotar('Altillo antes de las 08:00: rechazada', err(r, 'fuera de rango'), det(r));
   r = await reservar(1, '19:00', '21:00'); anotar('Altillo después de las 20:00: rechazada', err(r, 'fuera de rango'), det(r));
 

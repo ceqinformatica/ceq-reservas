@@ -127,6 +127,7 @@ const VENTANA = {
   // Sobrevive a un reinicio (se lee de la base)
   hijo.kill(); await esperar(300);
   hijo = await arrancar();
+  await esperar(800); // la configuración se lee de la base al arrancar, sin bloquear el arranque
   r = await llamar('GET', '/api/configuracion');
   anotar('Después de reiniciar el servidor, sigue la última ventana', r.datos.ventana_novedades && r.datos.ventana_novedades.titulo === '<img src=x onerror=alert(1)>');
 

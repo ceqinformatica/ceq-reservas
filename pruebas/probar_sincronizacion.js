@@ -238,9 +238,28 @@ async function arrancar(env, puerto) {
   datos.reservas = respaldo;
   contexto.sincronizar();
 
-  for (let i = 0; i < 26; i++) g.ss._agregar(`Copia 20${String(i).padStart(2, '0')}-01`); // copias viejas de sobra
+  // Plazo de 6 meses (CEQ-09), contado desde hoy (el script usa la fecha real)
+  const haceMeses = (n, dia = 1) => { const [a, m] = new Intl.DateTimeFormat('en-CA', { timeZone: 'America/Asuncion' }).format(new Date()).split('-').map(Number); return new Date(Date.UTC(a, m - 1 - n, dia, 12)); };
+  const mesCopia = d => d.toISOString().slice(0, 7);
+  const dmy = d => `'${d.toISOString().slice(8, 10)}/${d.toISOString().slice(5, 7)}/${d.toISOString().slice(0, 4)}`;
+  const viejas = [mesCopia(haceMeses(9)), mesCopia(haceMeses(7))];
+  for (const m of viejas) g.ss._agregar(`Copia ${m}`); // copias de hace más de 6 meses
+  const nombreQueda = `Copia ${mesCopia(haceMeses(5))}`;
+  const queda = g.ss._agregar(nombreQueda);
+  queda._celdas = [
+    ['N°', 'Fecha', 'Día', 'Espacio', 'Turno', 'Inicio', 'Fin', 'Nombre', 'Motivo', 'Acompañantes', 'Estado', 'Asistencia', 'Creada'],
+    [1, dmy(haceMeses(8, 10)), 'Lunes', 'Altillo', '-', "'08:00", "'10:00", "'Pedro Viejo", "'Reunión con Juan", 'Ana Pérez', 'Activa', '', 'c'],
+    [2, haceMeses(7, 12), 'Lunes', 'Frente', 'Desayuno', "'07:00", "'10:00", "'Rosa Vieja", 'Actividad Personal', '', 'Activa', '', 'c'],
+    [3, dmy(haceMeses(5, 20)), 'Martes', 'Frente', 'Desayuno', "'07:00", "'10:00", "'Lucía Nueva", "'Ensayo", '', 'Activa', '', 'c']
+  ];
   contexto.sincronizar();
-  anotar('Se conservan solo las últimas 24 copias', g.ss.getSheets().filter(h => h.getName().startsWith('Copia ')).length === 24 && !nombresHojas().includes('Copia 2000-01'), String(g.ss.getSheets().length));
+  anotar('Se borran las copias de hace más de 6 meses (por fecha, no por cantidad)', viejas.every(m => !nombresHojas().includes(`Copia ${m}`)) && nombresHojas().includes(nombreQueda), nombresHojas().filter(n => n.startsWith('Copia')).join(','));
+  const ene = (g.ss.getSheetByName(nombreQueda) || { _celdas: [[], [], [], []] })._celdas;
+  anotar('En las copias que quedan, las reservas de más de 6 meses pierden nombre, acompañantes y motivo libre',
+    ene[1][7] === '(datos eliminados)' && ene[1][9] === '' && ene[1][8] === '' && ene[2][7] === '(datos eliminados)' && ene[2][8] === 'Actividad Personal',
+    ene.slice(1).map(f => f.slice(7, 10).join('|')).join(' // '));
+  anotar('...y las más nuevas que el plazo quedan como estaban', ene[3][7] === "'Lucía Nueva" && ene[3][8] === "'Ensayo", ene[3].slice(7, 10).join('|'));
+  if (g.ss.getSheetByName(nombreQueda)) g.ss.deleteSheet(g.ss.getSheetByName(nombreQueda));
 
   g.propiedades.CLAVE_SINCRONIZACION = 'clave-equivocada-de-mas-de-32-caracteres-xx';
   const antes = g.ss.getSheetByName('Reservas')._celdas.length;

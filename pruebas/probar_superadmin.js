@@ -7,6 +7,7 @@ const path = require('path');
 const os = require('os');
 const crypto = require('crypto');
 const { spawn } = require('child_process');
+const { filaDesdeRpcReserva, contarCupo } = require(path.join(__dirname, 'mini_postgrest.js'));
 
 const [carpeta, interceptor] = process.argv.slice(2);
 const req = m => require(path.join(carpeta, 'node_modules', m));
@@ -82,6 +83,15 @@ const supa = http.createServer((rq, rs) => {
     pedidos.push(`${rq.method} ${tabla}?${p}`);
     const enviar = (st, datos) => { rs.writeHead(st, { 'content-type': 'application/json' }); rs.end(datos === undefined ? '' : JSON.stringify(datos)); };
     try {
+      // Reservas públicas: función crear_reserva_con_cupo de la base (cuenta el límite y guarda)
+      if (tabla === 'rpc/crear_reserva_con_cupo') {
+        const a = JSON.parse(cuerpo);
+        const n = contarCupo(db.reservas, a);
+        if (n !== null && n >= a.p_limite) return enviar(400, { code: 'CEQ03', message: String(n) });
+        const fila = { ...filaDesdeRpcReserva(a), id: nuevoId('reservas'), reservado_por_admin: false };
+        db.reservas.push(fila);
+        return enviar(200, [{ ...fila }]);
+      }
       if (!db[tabla]) return enviar(404, { code: '42P01', message: `relation "public.${tabla}" does not exist` });
       const representar = filas => prefer.includes('return=representation') ? enviar(rq.method === 'POST' ? 201 : 200, proyectar(filas, p.get('select'))) : enviar(rq.method === 'POST' ? 201 : 204);
       if (rq.method === 'GET' || rq.method === 'HEAD') {

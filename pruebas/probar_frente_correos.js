@@ -6,6 +6,7 @@ const fs = require('fs');
 const path = require('path');
 const os = require('os');
 const { spawn } = require('child_process');
+const { filaDesdeRpcReserva, contarCupo } = require(path.join(__dirname, 'mini_postgrest.js'));
 const [carpeta, serverOriginal, interceptor, reloj] = process.argv.slice(2);
 const relojArchivo = path.join(os.tmpdir(), 'ceq-reloj-frente-' + Date.now() + '.json');
 fs.writeFileSync(relojArchivo, JSON.stringify({ desfase_ms: Date.parse('2026-10-12T13:00:00Z') - Date.now() }));
@@ -25,6 +26,7 @@ const supa = http.createServer((req, res) => {
     const enviar = (s, d) => { res.writeHead(s, { 'content-type': 'application/json' }); res.end(JSON.stringify(d)); };
     if (req.url.startsWith('/rest/v1/meses_habilitados')) return enviar(200, [{ habilitado: true }]);
     if (req.url.startsWith('/rest/v1/espacios')) return enviar(200, [{ publico: true }]);
+    if (req.url.startsWith('/rest/v1/rpc/crear_reserva_con_cupo') && req.method === 'POST') return enviar(200, [{ id: siguienteId++, ...filaDesdeRpcReserva(JSON.parse(cuerpo)) }]);
     if (req.url.startsWith('/rest/v1/reservas') && req.method === 'POST') return enviar(201, [{ id: siguienteId++, ...JSON.parse(cuerpo)[0] }]);
     return enviar(200, []);
   });
