@@ -370,13 +370,97 @@ async function enviarEmail({ to, subject, html, text, responderA, adjuntos }) {
     if (!res.ok) {
       const errorData = await res.json().catch(() => ({}));
       console.error('⚠️ Error al enviar email vía Brevo:', res.status, errorData);
+      ultimoErrorEmail = `Brevo ${res.status}: ${String(errorData.message || errorData.code || '').slice(0, 200)}`;
       return false;
     }
     return true;
   } catch (err) {
     console.error('⚠️ Error de red al enviar email:', err);
+    ultimoErrorEmail = `Error de red: ${String(err && err.message || err).slice(0, 200)}`;
     return false;
   }
+}
+let ultimoErrorEmail = '';
+
+// ========== COLA DE CORREOS (CEQ-06) ==========
+// Los correos de las reservas (confirmaciones, avisos a los moderadores, cancelaciones,
+// recordatorios, reportes) primero se guardan en la tabla correos_pendientes y después se
+// mandan. Si Brevo falla, se reintenta a los 1, 5, 15, 60 y 180 minutos; si el servidor se
+// reinicia en el medio, se retoma al volver. Antes, si Brevo fallaba justo en ese momento, el
+// correo se perdía (la reserva quedaba guardada igual, pero la persona no recibía su código).
+// Privacidad: cuando un correo sale (o se da por perdido), se borra su contenido de la tabla
+// (tiene el código de cancelación en claro), y las filas se borran a los 7 días.
+// Si la tabla no está (o la base no responde), se manda directo, como antes.
+const REINTENTOS_CORREO_MIN = [1, 5, 15, 60, 180];
+const INTERVALO_COLA_CORREOS_MS = Number(process.env.INTERVALO_COLA_CORREOS_MS) || 60 * 1000;
+let colaCorreosEnCurso = false;
+
+// Nunca lanza error. Devuelve true si el correo quedó en la cola (o salió directo).
+async function encolarCorreo({ to, subject, html, text, responderA }) {
+  const destinatarios = (Array.isArray(to) ? to : [to]).filter(Boolean);
+  if (destinatarios.length === 0) return false;
+  try {
+    const { data, error } = await supabase.from('correos_pendientes').insert([{
+      destinatarios, asunto: subject, html: html || '', texto: text || null,
+      responder_a: responderA || null, estado: 'pendiente', proximo_intento: new Date().toISOString()
+    }]).select('id');
+    if (error || !data || data.length === 0) throw error || new Error('la cola no devolvió la fila');
+    procesarColaCorreos().catch(err => console.error('⚠️ Cola de correos:', err));
+    return true;
+  } catch (err) {
+    console.error('⚠️ No se pudo guardar el correo en la cola, se manda directo:', err && (err.message || err.code));
+    return enviarEmail({ to: destinatarios, subject, html, text, responderA });
+  }
+}
+
+async function procesarColaCorreos() {
+  if (colaCorreosEnCurso) return;
+  colaCorreosEnCurso = true;
+  try {
+    const ahora = new Date().toISOString();
+    // Pendientes cuya hora llegó, y los que quedaron "enviando" porque el servidor se reinició
+    const [pendientes, colgados] = await Promise.all([
+      supabase.from('correos_pendientes').select('*').eq('estado', 'pendiente').lte('proximo_intento', ahora).order('id', { ascending: true }).limit(20),
+      supabase.from('correos_pendientes').select('*').eq('estado', 'enviando').lt('reclamado_hasta', ahora).order('id', { ascending: true }).limit(20)
+    ]);
+    if (pendientes.error) throw pendientes.error;
+    if (colgados.error) throw colgados.error;
+    for (const correo of [...(colgados.data || []), ...(pendientes.data || [])]) {
+      // Se "reclama" con la condición del estado anterior: si otra vuelta ya lo tomó, no se repite
+      const reclamo = supabase.from('correos_pendientes')
+        .update({ estado: 'enviando', reclamado_hasta: new Date(Date.now() + 5 * 60 * 1000).toISOString() })
+        .eq('id', correo.id).eq('estado', correo.estado);
+      const { data: tomado, error: errorReclamo } = await (correo.estado === 'enviando'
+        ? reclamo.lt('reclamado_hasta', ahora) : reclamo).select('id');
+      if (errorReclamo) throw errorReclamo;
+      if (!tomado || tomado.length === 0) continue;
+
+      const ok = await enviarEmail({ to: correo.destinatarios, subject: correo.asunto, html: correo.html, text: correo.texto || undefined, responderA: correo.responder_a });
+      const intentos = (correo.intentos || 0) + 1;
+      let cambios;
+      if (ok) {
+        cambios = { estado: 'enviado', enviado_en: new Date().toISOString(), intentos, html: '', texto: null, destinatarios: [], ultimo_error: null };
+      } else if (intentos > REINTENTOS_CORREO_MIN.length) {
+        // Se da por perdido: queda a quién y qué asunto (para el correo de alertas), sin el contenido
+        cambios = { estado: 'fallido', intentos, html: '', texto: null, ultimo_error: ultimoErrorEmail };
+        anotarAlerta('error', `Correo no enviado después de ${intentos} intentos: "${correo.asunto}" (${ultimoErrorEmail})`);
+      } else {
+        const espera = REINTENTOS_CORREO_MIN[intentos - 1] * 60 * 1000;
+        cambios = { estado: 'pendiente', intentos, ultimo_error: ultimoErrorEmail, proximo_intento: new Date(Date.now() + espera).toISOString() };
+      }
+      const { error: errorFinal } = await supabase.from('correos_pendientes').update(cambios).eq('id', correo.id);
+      if (errorFinal) console.error('⚠️ No se pudo actualizar la cola de correos:', errorFinal);
+    }
+  } finally {
+    colaCorreosEnCurso = false;
+  }
+}
+
+// Se borran las filas ya resueltas (enviadas o perdidas) de hace más de 7 días
+async function limpiarColaCorreos() {
+  const { error } = await supabase.from('correos_pendientes').delete()
+    .in('estado', ['enviado', 'fallido']).lt('creado_en', new Date(Date.now() - 7 * 86400000).toISOString());
+  if (error && error.code !== '42P01' && error.code !== 'PGRST205') throw error;
 }
 
 // Configuración de seguridad
@@ -1335,7 +1419,7 @@ app.post('/api/reservas', crearReservaLimiter, async (req, res) => {
     // Se responde al usuario APENAS se guardó la reserva, y los emails se mandan
     // después, en segundo plano. Antes se esperaba a Brevo (2 emails en serie) antes
     // de contestar: la confirmación tardaba varios segundos, la gente creía que había
-    // fallado y volvía a reservar. enviarEmail() nunca lanza error (lo captura y loguea).
+    // fallado y volvía a reservar. encolarCorreo() nunca lanza error (lo captura y loguea).
     res.status(201).json({
       mensaje: 'Reserva creada exitosamente',
       reserva: nuevaReserva[0],
@@ -1344,7 +1428,7 @@ app.post('/api/reservas', crearReservaLimiter, async (req, res) => {
 
     // Enviar email al usuario (si existe email)
     if (email) {
-      enviarEmail({
+      encolarCorreo({
         to: email,
         subject: `✓ Confirmación de Reserva - CEQ #${reservaId}`,
         responderA: correoRespuesta(espacioIdNum),
@@ -1372,7 +1456,7 @@ app.post('/api/reservas', crearReservaLimiter, async (req, res) => {
     }
     
     // Enviar email al moderador correspondiente (Altillo o Frente)
-    enviarEmail({
+    encolarCorreo({
       to: getEmailModerador(espacioIdNum),
       subject: `📌 Nueva Reserva (${nombreEspacio}) - CEQ #${reservaId}`,
       responderA: correoDeContacto(contacto),
@@ -1447,7 +1531,7 @@ async function cancelarComoUsuario(reserva, res) {
   if (Number(reserva.espacio_id) === 3 && diferenciaDias < 2) {
     const emailUsuario = reserva.contacto.split('|')[1]?.trim();
     if (emailUsuario) {
-      enviarEmail({
+      encolarCorreo({
         to: emailUsuario,
         subject: `Período de Cancelación Gratuita Finalizado - CEQ #${reserva.id}`,
         responderA: correoRespuesta(reserva.espacio_id),
@@ -1465,7 +1549,7 @@ async function cancelarComoUsuario(reserva, res) {
     }
 
     // Aviso al moderador: hubo un intento de cancelación fuera del período gratuito
-    enviarEmail({
+    encolarCorreo({
       to: getEmailModerador(reserva.espacio_id),
       subject: `Intento de Cancelación Fuera de Plazo - CEQ #${reserva.id}`,
       responderA: correoDeContacto(reserva.contacto),
@@ -1505,7 +1589,7 @@ async function cancelarComoUsuario(reserva, res) {
   // el email del propio usuario; solo se le muestra como texto de contacto)
   const email = reserva.contacto.split('|')[1]?.trim();
   if (email) {
-    enviarEmail({
+    encolarCorreo({
       to: email,
       subject: `Cancelación Confirmada - CEQ Reservas #${reserva.id}`,
       responderA: correoRespuesta(reserva.espacio_id),
@@ -1525,7 +1609,7 @@ async function cancelarComoUsuario(reserva, res) {
   // Email al moderador. Antes solo se mandaba para Frente; ahora se manda siempre —
   // getEmailModerador() ya se encarga de que a Altillo le llegue solo a ceq.informatica,
   // y a Frente le siga llegando también a Monse, sin tocar nada más.
-  enviarEmail({
+  encolarCorreo({
     to: getEmailModerador(reserva.espacio_id),
     subject: `Cancelación de Reserva - CEQ #${reserva.id}`,
     responderA: correoDeContacto(reserva.contacto),
@@ -1792,7 +1876,7 @@ app.post('/api/reportes', reportesLimiter, async (req, res) => {
     // El email sale después de responder, igual que en las reservas (enviarEmail nunca lanza error)
     if (puedeAvisarReporte()) {
       const reporteId = reporteCreado?.[0]?.id;
-      enviarEmail({
+      encolarCorreo({
         to: EMAIL_MODERADOR,
         subject: `⚠️ Nuevo reporte de error${reporteId ? ` #${reporteId}` : ''} - CEQ Reservas`,
         html: `
@@ -2291,7 +2375,7 @@ app.post('/api/admin/reservas', verifyAdminToken, verificarCSRF, async (req, res
     // formulario público, al email que se haya cargado en el contacto de la reserva
     // de prioridad — para que la Comisión Directiva también tenga registro/código.
     const email = contacto.split('|')[1].trim();
-    enviarEmail({
+    encolarCorreo({
       to: email,
       subject: `✓ Confirmación de Reserva - CEQ #${nuevaReserva[0].id}`,
       responderA: correoRespuesta(espacioIdNum),
@@ -2377,7 +2461,7 @@ app.post('/api/admin/cancelar/:reserva_id', verifyAdminToken, verificarCSRF, asy
     // al contacto de Frente en el email del propio usuario)
     const email = reserva.contacto.split('|')[1]?.trim();
     if (email) {
-      enviarEmail({
+      encolarCorreo({
         to: email,
         subject: `Tu Reserva Fue Cancelada por el Moderador - CEQ #${reserva.id}`,
         responderA: correoRespuesta(reserva.espacio_id),
@@ -2402,7 +2486,7 @@ app.post('/api/admin/cancelar/:reserva_id', verifyAdminToken, verificarCSRF, asy
       ? [...new Set([EMAIL_MODERADOR, config.contacto_email_frente])]
       : [EMAIL_MODERADOR];
 
-    enviarEmail({
+    encolarCorreo({
       to: destinatariosAviso,
       subject: `🔔 Un moderador canceló una reserva (${getEspacioNombre(reserva.espacio_id)}) - CEQ #${reserva.id}`,
       responderA: correoDeContacto(reserva.contacto),
@@ -2933,14 +3017,14 @@ async function enviarRecordatorios() {
     if (errorTomar) throw errorTomar;
     if (!tomada || tomada.length === 0 || !email) continue;
 
-    const enviado = await enviarEmail({
+    const enviado = await encolarCorreo({
       to: email,
       subject: `⏰ Recordatorio: ${getEspacioNombre(r.espacio_id)}, ${fechaLarga(r.fecha)} - CEQ #${r.id}`,
       responderA: correoRespuesta(r.espacio_id),
       html: htmlRecordatorio(r)
     });
     if (!enviado) {
-      // Si Brevo falló, se desmarca para reintentar en la próxima vuelta
+      // Si no se pudo guardar en la cola ni mandar directo, se desmarca para la próxima vuelta
       await supabase.from('reservas').update({ recordatorio_enviado_en: null }).eq('id', r.id);
     }
   }
@@ -3144,6 +3228,7 @@ async function correrTareasPeriodicas() {
     ['aperturas programadas', abrirMesesProgramados],
     ['recordatorios', enviarRecordatorios],
     ['lista de espera', limpiarListaEspera],
+    ['cola de correos', limpiarColaCorreos],
     ['copia mensual', enviarCopiaMensual],
     ['plazos de conservación', aplicarPlazosDeConservacion],
     ['alertas', enviarAlertas]
@@ -3173,10 +3258,15 @@ app.use((err, req, res, next) => {
 
 cargarConfiguracion().catch(error => console.error('⚠️ No se pudo leer la configuración, se usan los valores por defecto:', error));
 setInterval(tareasPeriodicas, INTERVALO_TAREAS_MS);
+// La cola de correos se revisa aparte, cada minuto (los reintentos no esperan a las otras tareas)
+setInterval(() => procesarColaCorreos().catch(err => {
+  if (!['42P01', 'PGRST205'].includes(err && err.code)) console.error('⚠️ Cola de correos:', err);
+}), INTERVALO_COLA_CORREOS_MS);
 setTimeout(tareasPeriodicas, Math.min(20 * 1000, INTERVALO_TAREAS_MS));
 
 app.listen(PORT, () => {
   console.log(`✅ Servidor corriendo en puerto ${PORT}`);
   console.log(`🔒 Modo seguro: JWT, bcrypt y validaciones activadas`);
+  console.log(`⚙️ NODE_ENV: ${process.env.NODE_ENV || '(sin definir)'}`);
   console.log(`📊 Sincronización con Google Sheets: ${SINCRONIZACION_ACTIVA ? 'activada' : 'desactivada (falta CLAVE_SINCRONIZACION)'}`);
 });

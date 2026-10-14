@@ -179,6 +179,28 @@ create table public.configuracion (
 );
 
 -- ---------------------------------------------------------------------
+-- CORREOS_PENDIENTES: cola de correos con reintentos (CEQ-06). El contenido se borra al enviarse.
+-- ---------------------------------------------------------------------
+create table public.correos_pendientes (
+  id              bigint generated always as identity primary key,
+  destinatarios   jsonb not null default '[]'::jsonb,
+  asunto          text not null,
+  html            text not null default '',
+  texto           text,
+  responder_a     text,
+  estado          text not null default 'pendiente',
+  intentos        integer not null default 0,
+  proximo_intento timestamptz not null default now(),
+  reclamado_hasta timestamptz,
+  ultimo_error    text,
+  creado_en       timestamptz not null default now(),
+  enviado_en      timestamptz,
+  constraint correos_estado_valido check (estado in ('pendiente', 'enviando', 'enviado', 'fallido'))
+);
+
+create index idx_correos_pendientes_estado on public.correos_pendientes (estado, proximo_intento);
+
+-- ---------------------------------------------------------------------
 -- TRIGGERS: impiden, de forma atómica, una reserva sobre un bloqueo y un bloqueo
 -- sobre una reserva activa (el servidor también lo revisa antes, pero esta es la
 -- garantía final si las dos cosas pasan en el mismo instante).
@@ -353,6 +375,7 @@ alter table public.meses_habilitados enable row level security;
 alter table public.registro_actividad enable row level security;
 alter table public.configuracion     enable row level security;
 alter table public.lista_espera      enable row level security;
+alter table public.correos_pendientes enable row level security;
 
 -- ---------------------------------------------------------------------
 -- DATOS INICIALES: los 3 espacios con sus números fijos (solo el Frente abierto al público)
