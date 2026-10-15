@@ -360,7 +360,8 @@ async function enviarEmail({ to, subject, html, text, responderA, adjuntos }) {
         sender: { name: 'CEQ Reservas', email: 'reservas@ceq-una.com' },
         to: destinatarios.map(email => ({ email })),
         subject,
-        htmlContent: html,
+        // Sin HTML se manda solo el texto (algunos correos van así a propósito, ver la lista de espera)
+        ...(html ? { htmlContent: html } : {}),
         replyTo: { email: EMAIL_REGEX.test(String(responderA || '')) ? responderA : EMAIL_MODERADOR },
         ...(text ? { textContent: text } : {}),
         ...(adjuntos && adjuntos.length ? { attachment: adjuntos } : {})
@@ -388,8 +389,9 @@ let ultimoErrorEmail = '';
 // mandan. Si Brevo falla, se reintenta a los 1, 5, 15, 60 y 180 minutos; si el servidor se
 // reinicia en el medio, se retoma al volver. Antes, si Brevo fallaba justo en ese momento, el
 // correo se perdía (la reserva quedaba guardada igual, pero la persona no recibía su código).
-// Privacidad: cuando un correo sale (o se da por perdido), se borra su contenido de la tabla
-// (tiene el código de cancelación en claro), y las filas se borran a los 7 días.
+// Privacidad: cuando un correo sale, se borra su contenido de la tabla (tiene el código de
+// cancelación en claro). Los que se dan por perdidos lo conservan para poder reintentarlos desde
+// el panel. Todas las filas se borran a los 7 días.
 // Si la tabla no está (o la base no responde), se manda directo, como antes.
 const REINTENTOS_CORREO_MIN = [1, 5, 15, 60, 180];
 const INTERVALO_COLA_CORREOS_MS = Number(process.env.INTERVALO_COLA_CORREOS_MS) || 60 * 1000;
@@ -435,14 +437,15 @@ async function procesarColaCorreos() {
       if (errorReclamo) throw errorReclamo;
       if (!tomado || tomado.length === 0) continue;
 
-      const ok = await enviarEmail({ to: correo.destinatarios, subject: correo.asunto, html: correo.html, text: correo.texto || undefined, responderA: correo.responder_a });
+      const ok = await enviarEmail({ to: correo.destinatarios, subject: correo.asunto, html: correo.html || undefined, text: correo.texto || undefined, responderA: correo.responder_a });
       const intentos = (correo.intentos || 0) + 1;
       let cambios;
       if (ok) {
         cambios = { estado: 'enviado', enviado_en: new Date().toISOString(), intentos, html: '', texto: null, destinatarios: [], ultimo_error: null };
       } else if (intentos > REINTENTOS_CORREO_MIN.length) {
-        // Se da por perdido: queda a quién y qué asunto (para el correo de alertas), sin el contenido
-        cambios = { estado: 'fallido', intentos, html: '', texto: null, ultimo_error: ultimoErrorEmail };
+        // Se da por perdido. Conserva el contenido para poder reintentarlo desde el panel ("Hoy");
+        // igual se borra con la fila a los 7 días
+        cambios = { estado: 'fallido', intentos, ultimo_error: ultimoErrorEmail };
         anotarAlerta('error', `Correo no enviado después de ${intentos} intentos: "${correo.asunto}" (${ultimoErrorEmail})`);
       } else {
         const espera = REINTENTOS_CORREO_MIN[intentos - 1] * 60 * 1000;
@@ -1751,7 +1754,49 @@ app.post('/api/lista-espera', listaEsperaLimiter, async (req, res) => {
         { onConflict: 'espacio_id,email' });
     if (errorGuardar) throw errorGuardar;
 
+    // Confirmación con el enlace para salir de la lista. Solo texto (sin HTML ni botones), como un
+    // correo personal, para que Gmail lo deje en "Principal" y no en "Promociones".
+    const espacio = getEspacioNombre(espacioIdNum);
+    encolarCorreo({
+      to: correo,
+      subject: `Te anotaste en la lista de espera del ${espacio}`,
+      responderA: correoRespuesta(espacioIdNum),
+      text: `Hola,\n\nTe anotaste en la lista de espera del ${espacio}. Si se libera un turno, te avisamos una sola vez a este correo.\n\nSi ya no querés el aviso, podés salir de la lista acá:\n${enlaceBajaListaEspera(espacioIdNum, correo)}\n\nCentro de Estudiantes de Química`
+    });
+
     res.status(201).json({ mensaje: 'Listo: si se libera un lugar, te avisamos por correo.' });
+  } catch (error) {
+    manejarError(res, error);
+  }
+});
+
+// Salir de la lista de espera con el enlace del correo (firmado: nadie puede sacar a otra persona
+// sabiendo solo su correo). La página pide confirmar con un botón, así los programas que abren
+// los enlaces de los correos para revisarlos no dan de baja a nadie sin querer.
+const CLAVE_LISTA_ESPERA = crypto.createHmac('sha256', JWT_SECRET).update('lista-de-espera-baja-v1').digest();
+function tokenBajaListaEspera(espacioId, email) {
+  return crypto.createHmac('sha256', CLAVE_LISTA_ESPERA).update(`baja:${Number(espacioId)}:${String(email).toLowerCase()}`).digest('base64url').slice(0, 32);
+}
+function enlaceBajaListaEspera(espacioId, email) {
+  const q = new URLSearchParams({ s: String(Number(espacioId)), e: String(email).toLowerCase(), t: tokenBajaListaEspera(espacioId, email) });
+  return `https://reservas.ceq-una.com/lista-espera.html?${q}`;
+}
+
+app.post('/api/lista-espera/baja', cancelarLimiter, async (req, res) => {
+  try {
+    const { s, e, t } = req.body || {};
+    const espacioIdNum = Number(s);
+    const correo = String(e || '').trim().toLowerCase();
+    const esperado = Buffer.from(tokenBajaListaEspera(espacioIdNum, correo));
+    const recibido = Buffer.from(typeof t === 'string' ? t : '');
+    if (![1, 3].includes(espacioIdNum) || !EMAIL_REGEX.test(correo) ||
+        esperado.length !== recibido.length || !crypto.timingSafeEqual(esperado, recibido)) {
+      return res.status(400).json({ error: 'El enlace no es válido. Copialo completo desde el correo.' });
+    }
+    const { error } = await supabase.from('lista_espera').delete().eq('espacio_id', espacioIdNum).eq('email', correo);
+    if (error) throw error;
+    // La misma respuesta aunque ya no estuviera anotado: el resultado es el mismo
+    res.json({ mensaje: `Listo: saliste de la lista de espera del ${getEspacioNombre(espacioIdNum)}. No vas a recibir más avisos.` });
   } catch (error) {
     manejarError(res, error);
   }
@@ -1803,22 +1848,15 @@ async function avisarListaEspera(reserva) {
         await devolver(tomadas.slice(i).map(x => x.id));
         break;
       }
-      // Correo simple, como de una persona (sin botón ni emoji), para que Gmail lo deje en
-      // "Principal" y no en "Promociones". El asunto lleva el día, el turno y el número de la
-      // reserva cancelada: cada aviso tiene un asunto distinto y Gmail no los agrupa.
+      // SOLO TEXTO, como un correo escrito por una persona: sin HTML, botones, negritas ni emoji.
+      // Con HTML, Brevo agrega la imagen de seguimiento de aperturas y Gmail lo mandaba a
+      // "Promociones". El asunto lleva el día, el turno y el número de la reserva cancelada:
+      // cada aviso tiene un asunto distinto y Gmail no los agrupa.
       const dia = fechaLarga(reserva.fecha);
       const enviado = await enviarEmail({
         to: correo,
         subject: `Se liberó un turno en el ${espacio}: ${dia}, ${horario} (aviso #${reserva.id})`,
         responderA: correoRespuesta(reserva.espacio_id),
-        html: `
-          <p>Hola,</p>
-          <p>Se canceló una reserva del ${espacio} y quedó libre el <strong>${dia}, ${horario}</strong>.</p>
-          <p>Si te sirve, podés reservarlo acá: <a href="${enlace}">${enlace}</a></p>
-          <p>El turno es de quien reserve primero.</p>
-          <p>Te escribimos porque te anotaste en la lista de espera del ${espacio}. Este es el único aviso; si querés otro, volvé a anotarte en la página.</p>
-          <p>Centro de Estudiantes de Química</p>
-        `,
         text: `Hola,\n\nSe canceló una reserva del ${espacio} y quedó libre el ${dia}, ${horario}.\n\nSi te sirve, podés reservarlo acá: ${enlace}\n\nEl turno es de quien reserve primero.\n\nTe escribimos porque te anotaste en la lista de espera del ${espacio}. Este es el único aviso; si querés otro, volvé a anotarte en la página.\n\nCentro de Estudiantes de Química`
       });
       if (!enviado) {
@@ -2253,6 +2291,124 @@ app.delete('/api/bloqueos/:id', verifyAdminToken, verificarCSRF, async (req, res
   }
 });
 
+// ===== BLOQUEOS DE VARIOS DÍAS =====
+// Bloquea un intervalo de fechas (por ejemplo, del 3 al 28 de noviembre), todos los días hábiles
+// o solo algunos (por ejemplo, martes y jueves), todo el día o en un horario. Primero se pide una
+// vista previa (qué días se bloquean y qué reservas lo impiden) y después se confirma. Los días
+// con reservas activas en ese horario NO se bloquean (no se cancela nada sin avisar): se informan
+// para que el moderador decida. Todos los bloqueos creados juntos comparten un "lote" y se pueden
+// borrar juntos.
+const MAX_DIAS_LOTE_BLOQUEOS = 184; // medio año
+
+// Valida el horario de un bloqueo para el espacio. Devuelve { completo } o lanza un Error.
+function validarHorarioBloqueo(espacioId, horaInicio, horaFin) {
+  if (typeof horaInicio !== 'string' || typeof horaFin !== 'string' ||
+      !/^\d{2}:\d{2}(:\d{2})?$/.test(horaInicio) || !/^\d{2}:\d{2}(:\d{2})?$/.test(horaFin)) {
+    throw new Error('Formato de hora inválido');
+  }
+  const aMin = hhmm => { const [h, m] = hhmm.split(':').map(Number); return h * 60 + m; };
+  const ini = aMin(horaInicio), fin = aMin(horaFin);
+  if (ini === 0 && fin === 23 * 60 + 59) return { completo: true, ini, fin };
+  const [desde, hasta] = Number(espacioId) === 3
+    ? [Math.min(...config.turnos_frente.map(t => aMin(t.inicio))), Math.max(...config.turnos_frente.map(t => aMin(t.fin)))]
+    : [ALTILLO_HORA_DESDE * 60, ALTILLO_HORA_HASTA * 60];
+  const texto = m => `${String(Math.floor(m / 60)).padStart(2, '0')}:${String(m % 60).padStart(2, '0')}`;
+  if (ini < desde || fin > hasta || ini >= fin) throw new Error(`Horario inválido (${texto(desde)}-${texto(hasta)})`);
+  return { completo: false, ini, fin };
+}
+
+app.post('/api/bloqueos/lote', verifyAdminToken, verificarCSRF, async (req, res) => {
+  try {
+    const { espacio_id, desde, hasta, dias, hora_inicio, hora_fin, motivo, confirmar } = req.body || {};
+    const espacioIdNum = Number(espacio_id);
+    if (![1, 3].includes(espacioIdNum)) return res.status(400).json({ error: 'Espacio inválido' });
+    if (!esFechaValida(desde) || !esFechaValida(hasta)) return res.status(400).json({ error: 'Fechas inválidas' });
+    if (desde > hasta) return res.status(400).json({ error: 'La fecha "desde" tiene que ser anterior a "hasta"' });
+    if (new Date(desde + 'T00:00:00Z') < hoyEnAsuncion()) return res.status(400).json({ error: 'No se puede bloquear una fecha que ya pasó' });
+    const totalDias = (new Date(hasta + 'T00:00:00Z') - new Date(desde + 'T00:00:00Z')) / 86400000 + 1;
+    if (totalDias > MAX_DIAS_LOTE_BLOQUEOS) return res.status(400).json({ error: 'El intervalo puede ser de hasta 6 meses' });
+    // Días de la semana: 1 = lunes … 5 = viernes (sábados y domingos no se reservan)
+    const diasSemana = Array.isArray(dias) ? [...new Set(dias.map(Number))] : [];
+    if (diasSemana.length === 0 || diasSemana.some(d => !Number.isInteger(d) || d < 1 || d > 5)) {
+      return res.status(400).json({ error: 'Elegí al menos un día de la semana (de lunes a viernes)' });
+    }
+    let horario;
+    try {
+      horario = validarHorarioBloqueo(espacioIdNum, hora_inicio, hora_fin);
+    } catch (err) {
+      return res.status(400).json({ error: err.message });
+    }
+
+    const fechas = [];
+    for (let d = new Date(desde + 'T00:00:00Z'); d.toISOString().slice(0, 10) <= hasta; d.setUTCDate(d.getUTCDate() + 1)) {
+      if (diasSemana.includes(d.getUTCDay())) fechas.push(d.toISOString().slice(0, 10));
+    }
+    if (fechas.length === 0) return res.status(400).json({ error: 'En ese intervalo no hay ningún día de los elegidos' });
+
+    const [{ data: reservas, error: e1 }, { data: existentes, error: e2 }] = await Promise.all([
+      supabase.from('reservas').select('id, fecha, nombre_solicitante, hora_inicio, hora_fin')
+        .eq('espacio_id', espacioIdNum).eq('estado', 'activa').gte('fecha', desde).lte('fecha', hasta),
+      supabase.from('bloqueos').select('fecha, hora_inicio, hora_fin')
+        .eq('espacio_id', espacioIdNum).gte('fecha', desde).lte('fecha', hasta)
+    ]);
+    if (e1) throw e1;
+    if (e2) throw e2;
+    const aMin = hhmm => { const [h, m] = String(hhmm).split(':').map(Number); return h * 60 + m; };
+    const choca = x => horario.ini < aMin(x.hora_fin) && horario.fin > aMin(x.hora_inicio);
+    const conflictos = [];
+    const yaBloqueadas = [];
+    const aCrear = [];
+    for (const fecha of fechas) {
+      const enConflicto = (reservas || []).filter(r => r.fecha === fecha && choca(r));
+      if (enConflicto.length) {
+        conflictos.push({ fecha, reservas: enConflicto.map(r => ({ id: r.id, nombre: r.nombre_solicitante, horario: `${r.hora_inicio.substring(0, 5)} - ${r.hora_fin.substring(0, 5)}` })) });
+      } else if ((existentes || []).some(b => b.fecha === fecha && choca(b))) {
+        yaBloqueadas.push(fecha);
+      } else {
+        aCrear.push(fecha);
+      }
+    }
+
+    if (confirmar !== true) {
+      return res.json({ fechas: aCrear, conflictos, ya_bloqueadas: yaBloqueadas });
+    }
+    if (aCrear.length === 0) return res.status(400).json({ error: 'No queda ningún día para bloquear', conflictos, ya_bloqueadas: yaBloqueadas });
+
+    const lote = crypto.randomUUID();
+    const textoMotivo = motivo ? String(motivo).slice(0, 300) : 'Sin especificar';
+    const { error } = await supabase.from('bloqueos').insert(aCrear.map(fecha => ({
+      espacio_id: espacioIdNum, fecha, hora_inicio, hora_fin, motivo: textoMotivo, lote
+    })));
+    if (error) {
+      // Se insertan todos juntos (o ninguno): si justo alguien reservó o bloqueó, se pide repetir
+      if (['23505', 'CEQ02'].includes(error.code)) {
+        return res.status(409).json({ error: 'Mientras tanto cambió algo en esas fechas. Volvé a ver la vista previa.' });
+      }
+      throw error;
+    }
+    registrarActividad(req.admin.rol, 'Creó bloqueos de varios días',
+      `${getEspacioNombre(espacioIdNum)}, ${aCrear.length} día(s) del ${fechaDMY(aCrear[0])} al ${fechaDMY(aCrear[aCrear.length - 1])}, ${horario.completo ? 'todo el día' : `${hora_inicio.substring(0, 5)} - ${hora_fin.substring(0, 5)}`}`);
+    res.status(201).json({ mensaje: `Se bloquearon ${aCrear.length} día(s)`, lote, creados: aCrear.length, conflictos, ya_bloqueadas: yaBloqueadas });
+  } catch (error) {
+    manejarError(res, error);
+  }
+});
+
+// Borrar todos los bloqueos de un lote (los creados juntos con "varios días")
+app.delete('/api/bloqueos/lote/:lote', verifyAdminToken, verificarCSRF, async (req, res) => {
+  try {
+    const { lote } = req.params;
+    if (!/^[0-9a-f-]{36}$/i.test(lote)) return res.status(400).json({ error: 'Lote inválido' });
+    const { data, error } = await supabase.from('bloqueos').delete().eq('lote', lote).select('espacio_id, fecha');
+    if (error) throw error;
+    if (!data || data.length === 0) return res.status(404).json({ error: 'No se encontraron esos bloqueos' });
+    registrarActividad(req.admin.rol, 'Eliminó bloqueos de varios días', `${getEspacioNombre(data[0].espacio_id)}, ${data.length} día(s)`);
+    res.json({ mensaje: `Se eliminaron ${data.length} bloqueo(s)`, eliminados: data.length });
+  } catch (error) {
+    manejarError(res, error);
+  }
+});
+
 // POST cancelar reserva (admin)
 // POST crear reserva de PRIORIDAD (admin) — para que la Comisión Directiva pueda
 // reservar un turno de Frente (o Altillo) ANTES de que ese mes se habilite
@@ -2574,6 +2730,66 @@ app.get('/api/admin/reportes', verifyAdminToken, async (req, res) => {
   }
 });
 
+// Estado de un reporte: nuevo → en revisión → resuelto, con una nota (por ejemplo, qué se hizo)
+const ESTADOS_REPORTE = ['nuevo', 'en_revision', 'resuelto'];
+const NOMBRES_ESTADO_REPORTE = { nuevo: 'nuevo', en_revision: 'en revisión', resuelto: 'resuelto' };
+app.post('/api/admin/reportes/:id/estado', verifyAdminToken, verificarCSRF, async (req, res) => {
+  try {
+    const { id } = req.params;
+    if (!esIdValido(id)) return res.status(400).json({ error: 'ID inválido' });
+    const { estado, nota } = req.body || {};
+    if (!ESTADOS_REPORTE.includes(estado)) return res.status(400).json({ error: 'Estado inválido' });
+    if (nota != null && (typeof nota !== 'string' || nota.length > 500)) {
+      return res.status(400).json({ error: 'La nota puede tener hasta 500 caracteres' });
+    }
+    const { data, error } = await supabase.from('reportes_errores')
+      .update({ estado, nota: nota ? nota.trim() : null, leido: estado !== 'nuevo' })
+      .eq('id', id).select('id, estado, nota');
+    if (error) throw error;
+    if (!data || data.length === 0) return res.status(404).json({ error: 'Reporte no encontrado' });
+    registrarActividad(req.admin.rol, 'Cambió el estado de un reporte', `#${id} · ${NOMBRES_ESTADO_REPORTE[estado]}`);
+    res.json({ mensaje: 'Reporte actualizado', reporte: data[0] });
+  } catch (error) {
+    manejarError(res, error);
+  }
+});
+
+// Correos de los últimos 7 días que no salieron (pendientes de reintento o perdidos), para el
+// panel "Hoy". No se manda el contenido (tiene códigos de cancelación): solo a quién y el asunto.
+app.get('/api/admin/correos', verifyAdminToken, async (req, res) => {
+  try {
+    const { data, error } = await supabase.from('correos_pendientes')
+      .select('id, destinatarios, asunto, estado, intentos, ultimo_error, creado_en, proximo_intento')
+      .in('estado', ['pendiente', 'enviando', 'fallido'])
+      .order('id', { ascending: false }).limit(100);
+    if (error) {
+      if (['42P01', 'PGRST205'].includes(error.code)) return res.json([]);
+      throw error;
+    }
+    res.json(data || []);
+  } catch (error) {
+    manejarError(res, error);
+  }
+});
+
+// Reintentar un correo perdido: vuelve a la cola como nuevo, con todos sus intentos
+app.post('/api/admin/correos/:id/reintentar', verifyAdminToken, verificarCSRF, async (req, res) => {
+  try {
+    const { id } = req.params;
+    if (!esIdValido(id)) return res.status(400).json({ error: 'ID inválido' });
+    const { data, error } = await supabase.from('correos_pendientes')
+      .update({ estado: 'pendiente', intentos: 0, proximo_intento: new Date().toISOString(), ultimo_error: null })
+      .eq('id', id).eq('estado', 'fallido').select('id, asunto');
+    if (error) throw error;
+    if (!data || data.length === 0) return res.status(404).json({ error: 'Ese correo no está entre los fallidos' });
+    registrarActividad(req.admin.rol, 'Reintentó un correo', data[0].asunto);
+    procesarColaCorreos().catch(err => console.error('⚠️ Cola de correos:', err));
+    res.json({ mensaje: 'El correo volvió a la cola' });
+  } catch (error) {
+    manejarError(res, error);
+  }
+});
+
 // POST marcar reporte como leído
 app.post('/api/admin/reportes/:id/leer', verifyAdminToken, verificarCSRF, async (req, res) => {
   try {
@@ -2588,6 +2804,10 @@ app.post('/api/admin/reportes/:id/leer', verifyAdminToken, verificarCSRF, async 
       .update({ leido: true })
       .eq('id', id)
       .select();
+    // Un reporte "nuevo" que se lee pasa a "en revisión" (con la columna estado; si no existe, se ignora)
+    if (!error && data && data.length) {
+      await supabase.from('reportes_errores').update({ estado: 'en_revision' }).eq('id', id).eq('estado', 'nuevo');
+    }
     
     if (error) throw error;
     if (!data || data.length === 0) {

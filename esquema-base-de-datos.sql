@@ -99,8 +99,10 @@ create table public.bloqueos (
   hora_fin    time not null,
   motivo      text default '',
   created_at  timestamp default now(),
+  lote        text,  -- los bloqueos creados juntos ("varios días") comparten el lote
   unique (espacio_id, fecha, hora_inicio)
 );
+create index idx_bloqueos_lote on public.bloqueos (lote) where lote is not null;
 
 -- ---------------------------------------------------------------------
 -- CANCELACIONES: tabla en desuso (el servidor actual no la usa; el estado de la
@@ -123,7 +125,10 @@ create table public.reportes_errores (
   url        text,
   navegador  text,
   leido      boolean default false,
-  created_at timestamp default now()
+  created_at timestamp default now(),
+  estado     text not null default 'nuevo',  -- nuevo → en_revision → resuelto
+  nota       text,                           -- qué se hizo (la escribe el moderador)
+  constraint reportes_estado_valido check (estado in ('nuevo', 'en_revision', 'resuelto'))
 );
 
 -- ---------------------------------------------------------------------
