@@ -120,7 +120,7 @@ const filasDe = email => db.correos_pendientes.filter(c => c.asunto && JSON.stri
   await hasta(() => perdidas.every(c => c.estado === 'fallido'));
   anotar('Con Brevo caído siempre: 6 intentos (1, 5, 15, 60 y 180 min) y queda "fallido"', perdidas.every(c => c.estado === 'fallido' && c.intentos === 6),
     JSON.stringify(perdidas.map(c => [c.estado, c.intentos])));
-  anotar('El fallido queda sin contenido pero con a quién y el asunto (para revisar)', perdidas.every(c => c.html === '' && c.destinatarios.length > 0 && c.asunto),
+  anotar('El fallido conserva a quién, el asunto y el contenido (para poder reintentarlo desde el panel)', perdidas.every(c => c.html.length > 0 && c.destinatarios.length > 0 && c.asunto),
     JSON.stringify(perdidas.map(c => [c.html.length, c.destinatarios])));
   levantarBrevo();
 

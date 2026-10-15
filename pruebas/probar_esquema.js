@@ -114,6 +114,16 @@ const anotar = (nombre, ok, detalle = '') => resultados.push({ nombre, ok, detal
   anotar('Cupo: sigue valiendo la regla anti-superposición (23P01)', await ok(cupo('2026-12-01', '08:00', '10:00', '0984 1 | x@ejemplo.com', 'x@ejemplo.com', null)) === '23P01');
   await db.query(bloqueo(3, '2026-12-10', '00:00', '23:59'));
   anotar('Cupo: siguen valiendo los bloqueos (CEQ01)', await ok(cupo('2026-12-10', '07:00', '10:00', '0985 555 555 | y@ejemplo.com', 'y@ejemplo.com', '985555555')) === 'CEQ01');
+  // Panel de octubre: estado de los reportes y lote de los bloqueos de varios días
+  await db.query(`insert into reportes_errores (mensaje) values ('estado por defecto')`);
+  anotar('Reportes: uno nuevo queda con estado "nuevo"; un estado inventado se rechaza (23514)',
+    (await db.query(`select estado from reportes_errores where mensaje = 'estado por defecto'`)).rows[0].estado === 'nuevo'
+    && await ok(`update reportes_errores set estado = 'archivado' where mensaje = 'estado por defecto'`) === '23514'
+    && await ok(`update reportes_errores set estado = 'en_revision', nota = 'mirando' where mensaje = 'estado por defecto'`) === 'ok');
+  anotar('Bloqueos: dos días con el mismo lote', await ok(`insert into bloqueos (espacio_id, fecha, hora_inicio, hora_fin, motivo, lote)
+    values (1, '2026-12-14', '00:00', '23:59', 'serie', 'lote-1'), (1, '2026-12-15', '00:00', '23:59', 'serie', 'lote-1')`) === 'ok'
+    && (await db.query(`select count(*)::int n from bloqueos where lote = 'lote-1'`)).rows[0].n === 2);
+
   // Cola de correos (CEQ-06)
   anotar('Cola de correos: un correo nuevo queda "pendiente" con 0 intentos', await ok(`insert into correos_pendientes (destinatarios, asunto, html) values ('["a@b.com"]', 'Hola', '<p>x</p>')`) === 'ok'
     && (await db.query(`select estado, intentos from correos_pendientes`)).rows.every(f => f.estado === 'pendiente' && f.intentos === 0));
