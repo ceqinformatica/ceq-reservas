@@ -81,7 +81,7 @@ Si falta una obligatoria, el servidor no arranca y lo dice en los Logs de Render
 | **Programar la apertura de un mes** | Meses → Programar la apertura de un mes | Se elige el mes (el que sigue al último habilitado) y la fecha y hora (de Paraguay). A esa hora exacta se abre solo, aunque nadie esté conectado, y la página muestra mientras tanto una cuenta regresiva. Se puede cancelar desde la misma pantalla. Habilitar o deshabilitar el mes a mano borra la programación. |
 | Buscar a una persona | Reservas → "Buscar persona" | Por nombre (sin importar tildes), email o celular (con o sin espacios). Muestra un resumen: próximas, pasadas, canceladas y asistencia. |
 | Marcar asistencia | Reservas → botones **✓ Vino / ✗ No vino** | Aparecen en las reservas activas cuyo día ya llegó (también en el detalle del calendario). Tocar la opción marcada la borra. Sale en el Excel y en la planilla. |
-| Bloquear un día u horario | Bloqueos | No se puede bloquear una fecha pasada ni un horario con reservas activas: primero hay que cancelarlas. El horario tiene que estar dentro del espacio: el Frente, entre el primer y el último turno; el Altillo, de 08:00 a 20:00. |
+| Bloquear un día u horario | Bloqueos | No se puede bloquear una fecha pasada ni un horario con reservas activas: primero hay que cancelarlas. El horario tiene que estar dentro del espacio: el Frente, entre el primer y el último turno; el Altillo, de 07:00 a 19:00. |
 | Reserva de prioridad (Comisión Directiva) | Prioridad | Solo Frente. Se puede hacer aunque el mes no esté habilitado y no cuenta para el límite por persona. Le llega la confirmación al correo que se cargue. |
 | Cancelar una reserva | Reservas → Cancelar | Pide un motivo; se avisa por correo a quien reservó y a los moderadores. Así se ayuda a quien perdió su código. |
 | Revisar reportes | Reportes | Cada reporte nuevo también llega por correo a `EMAIL_MODERADOR` (hasta 20 avisos por día). Marcalos como leídos. |
@@ -152,7 +152,7 @@ Si falla la actualización automática, Google manda un correo a la cuenta. La c
 | Espacios que se pueden reservar desde la página | Solo Frente (3). Altillo (1) se gestiona con planilla. | Panel → Avanzado → Espacios (admin supremo). Se guarda en la columna `publico` de la tabla `espacios` (ver sección 7). |
 | Turnos del Frente | Desayuno 07–10, Almuerzo 10–13, Merienda 14–18 | Panel → Avanzado → Configuración (admin supremo). Se guarda en la tabla `configuracion`. |
 | Motivo en el Frente | Se elige de una lista: Actividad Personal; Recaudación - Asociación Estudiantil; Recaudación - Secretaría CEQ; Recaudación - Padrinaje; Recaudación - Congreso o Evento Académico. En el Altillo el motivo es libre. | `MOTIVOS_FRENTE` en `server.js` (la página la toma de ahí) |
-| Horario del Altillo | Bloques de 1 hora de 08:00 a 20:00 (el último empieza a las 19:00), de 1 a 2 horas por reserva. Hoy se puede tomar el bloque en curso mientras no haya terminado (a las 11:30, el de las 11:00 sí; a las 12:00, ya no). | `ALTILLO_HORA_DESDE`, `ALTILLO_HORA_HASTA` y `ALTILLO_MAX_HORAS` en `server.js` (la página los toma de ahí) |
+| Horario del Altillo | Bloques de 1 hora de 07:00 a 19:00 (el último empieza a las 18:00), de 1 a 2 horas por reserva. Hoy se puede tomar el bloque en curso mientras no haya terminado (a las 11:30, el de las 11:00 sí; a las 12:00, ya no). | `ALTILLO_HORA_DESDE`, `ALTILLO_HORA_HASTA` y `ALTILLO_MAX_HORAS` en `server.js` (la página los toma de ahí) |
 | Acompañantes | Solo en el Altillo (en el Frente no se piden). Opcional, hasta 4 por reserva, con nombre y celular. Se ven en el panel, el Excel y los correos (en la planilla, solo los nombres); nunca en la página pública. | `MAX_ACOMPANANTES` en `server.js` y el límite `reservas_acompanantes_validos` de la base |
 | Días | Lunes a viernes, desde hoy, solo en meses habilitados | `server.js` (`POST /api/reservas`) |
 | Límite por persona | Solo en el Frente: 2 reservas activas por mes (se reconoce a la persona por correo o por celular). El Altillo no tiene límite. No cuentan las canceladas ni las de prioridad del panel. La base cuenta y guarda en un solo paso (función `crear_reserva_con_cupo`), así varios pedidos al mismo tiempo no pasan el límite. | Panel → Avanzado → Configuración (admin supremo) |
@@ -168,7 +168,7 @@ Ya no hace falta tocar código:
 
 1. Entrar al panel con la contraseña del **admin supremo** → pestaña **Avanzado** → **Espacios**.
 2. En la tarjeta del Altillo, marcar **Se puede reservar desde la página** y tocar **Guardar**.
-3. Abrir la página (o recargarla) y hacer una reserva de prueba en el Altillo (de 1 a 2 horas, entre 08:00 y 20:00). Después cancelarla y, si se quiere, eliminarla desde Avanzado.
+3. Abrir la página (o recargarla) y hacer una reserva de prueba en el Altillo (de 1 a 2 horas, entre 07:00 y 19:00). Después cancelarla y, si se quiere, eliminarla desde Avanzado.
 
 Para volver a cerrarlo: desmarcar la casilla, escribir el aviso que tiene que ver la gente y **Guardar**. Lo mismo sirve para cerrar el Frente por un tiempo (por ejemplo, en vacaciones). La página muestra el aviso una vez por visita y el botón del espacio dice "No disponible"; el servidor rechaza cualquier reserva en un espacio cerrado.
 

@@ -280,9 +280,9 @@ const MOTIVOS_FRENTE = [
   'Recaudación - Congreso o Evento Académico'
 ];
 
-// Altillo: bloques de 1 hora entre las 08:00 y las 20:00, de 1 a 2 horas por reserva
-const ALTILLO_HORA_DESDE = 8;
-const ALTILLO_HORA_HASTA = 20;
+// Altillo: bloques de 1 hora; el primero empieza a las 07:00 y el último a las 18:00 (se usa hasta las 19:00), de 1 a 2 horas por reserva
+const ALTILLO_HORA_DESDE = 7;
+const ALTILLO_HORA_HASTA = 19;
 const ALTILLO_MAX_HORAS = 2;
 
 // Acompañantes (opcional, hasta 4, solo en el Altillo): [{ nombre, celular }]. Devuelve la lista limpia o lanza un
@@ -1257,7 +1257,7 @@ app.post('/api/reservas', crearReservaLimiter, async (req, res) => {
         return res.status(400).json({ error: 'Elegí el motivo de la lista' });
       }
     } else {
-      // Altillo: bloques de 1 hora entre las 08:00 y las 20:00, de 1 a 2 horas. Solo horas
+      // Altillo: bloques de 1 hora entre las 07:00 y las 19:00, de 1 a 2 horas. Solo horas
       // completas (CEQ-04): el calendario de la página trabaja por horas enteras.
       if (horaIniM !== 0 || horaFinM !== 0) {
         return res.status(400).json({ error: 'El Altillo se reserva en bloques de horas completas (por ejemplo, 09:00 a 11:00)' });
@@ -2145,7 +2145,7 @@ app.post('/api/bloqueos', verifyAdminToken, verificarCSRF, async (req, res) => {
     
     if (!isBloqueCompleto) {
       // El rango sale de la configuración de cada espacio (CEQ-04): el Frente, de sus turnos;
-      // el Altillo, de 08:00 a 20:00. Antes había un tope fijo de 18:00 para los dos.
+      // el Altillo, de 07:00 a 19:00. Antes había un tope fijo de 18:00 para los dos.
       const aMin = hhmm => { const [h, m] = hhmm.split(':').map(Number); return h * 60 + m; };
       const [desdeMin, hastaMin] = Number(espacio_id) === 3
         ? [Math.min(...config.turnos_frente.map(t => aMin(t.inicio))), Math.max(...config.turnos_frente.map(t => aMin(t.fin)))]
