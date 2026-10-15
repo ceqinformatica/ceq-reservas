@@ -151,6 +151,19 @@ const CONFIG_POR_DEFECTO = {
   contacto_email_frente: 'Monsegonza511@gmail.com',
   contacto_whatsapp_frente: '595972753471', // formato wa.me: código de país + número, sin +, espacios ni guiones
   email_alertas: EMAIL_MODERADOR,
+  // Motivos del Frente (la persona elige uno de la lista; en el Altillo el motivo es libre)
+  motivos_frente: [
+    'Actividad Personal',
+    'Recaudación - Asociación Estudiantil',
+    'Recaudación - Secretaría CEQ',
+    'Recaudación - Padrinaje',
+    'Recaudación - Congreso o Evento Académico'
+  ],
+  // Altillo: bloques de 1 hora; el primero empieza a las 07:00 y el último a las 18:00 (se usa
+  // hasta las 19:00), de 1 a 2 horas por reserva
+  altillo_hora_desde: 7,
+  altillo_hora_hasta: 19,
+  altillo_max_horas: 2,
   // Espacios deshabilitados cuyo aviso NO se muestra al entrar a la página (se guarda el texto igual)
   avisos_ocultos: [],
   // Ventana de novedades que ve la gente al entrar (una vez por navegador y por versión). Se
@@ -158,6 +171,8 @@ const CONFIG_POR_DEFECTO = {
   ventana_novedades: {
     activa: true,
     version: '2026-10',
+    frecuencia: 'una_vez', // 'una_vez' (una vez por navegador) o 'cada_visita'
+    hasta: null,           // "AAAA-MM-DD": después de ese día deja de mostrarse sola
     titulo: '¡Actualizamos la página de reservas!',
     intro: 'Renovamos el sistema de reservas del CEQ para que sea más fácil de usar. Esto es lo nuevo:',
     bloques: [
@@ -170,7 +185,7 @@ const CONFIG_POR_DEFECTO = {
 };
 let config = { ...CONFIG_POR_DEFECTO };
 // Las que se guardan en la tabla como JSON (el resto, como texto simple)
-const CLAVES_CONFIG_JSON = ['turnos_frente', 'avisos_ocultos', 'ventana_novedades'];
+const CLAVES_CONFIG_JSON = ['turnos_frente', 'avisos_ocultos', 'ventana_novedades', 'motivos_frente'];
 const LIMITES_NOVEDADES = { titulo: 80, intro: 600, bloques: 6, bloqueTitulo: 60, bloqueTexto: 400, cierre: 600 };
 
 // Valida cada valor de configuración. Devuelve el valor normalizado o lanza un Error con un
@@ -218,6 +233,31 @@ const VALIDADORES_CONFIG = {
     if (!EMAIL_REGEX.test(email) || email.length > 100) throw new Error('El correo para las alertas no es válido');
     return email;
   },
+  motivos_frente(valor) {
+    if (!Array.isArray(valor) || valor.length < 1 || valor.length > 10) throw new Error('Tiene que haber entre 1 y 10 motivos');
+    const motivos = valor.map(m => String(m == null ? '' : m).trim().replace(/\s+/g, ' '));
+    motivos.forEach(m => {
+      if (m.length < 2 || m.length > 60) throw new Error('Cada motivo tiene que tener entre 2 y 60 caracteres');
+      if (/["\\]/.test(m)) throw new Error('Los motivos no pueden tener comillas dobles ni barras invertidas');
+    });
+    if (new Set(motivos.map(m => m.toLowerCase())).size !== motivos.length) throw new Error('Hay motivos repetidos');
+    return motivos;
+  },
+  altillo_hora_desde(valor) {
+    const n = Number(valor);
+    if (!Number.isInteger(n) || n < 5 || n > 22) throw new Error('El Altillo tiene que abrir entre las 05:00 y las 22:00');
+    return n;
+  },
+  altillo_hora_hasta(valor) {
+    const n = Number(valor);
+    if (!Number.isInteger(n) || n < 6 || n > 23) throw new Error('El Altillo tiene que cerrar entre las 06:00 y las 23:00');
+    return n;
+  },
+  altillo_max_horas(valor) {
+    const n = Number(valor);
+    if (!Number.isInteger(n) || n < 1 || n > 12) throw new Error('El máximo de horas del Altillo tiene que ser entre 1 y 12');
+    return n;
+  },
   avisos_ocultos(valor) {
     if (!Array.isArray(valor)) throw new Error('avisos_ocultos tiene que ser una lista');
     const ids = [...new Set(valor.map(Number))];
@@ -238,9 +278,15 @@ const VALIDADORES_CONFIG = {
     if (bloques.length > L.bloques) throw new Error(`Puede haber hasta ${L.bloques} bloques`);
     const version = String(v.version || '');
     if (!/^[\w.:-]{1,40}$/.test(version)) throw new Error('Versión de la ventana inválida');
+    const frecuencia = v.frecuencia == null ? 'una_vez' : v.frecuencia;
+    if (!['una_vez', 'cada_visita'].includes(frecuencia)) throw new Error('Frecuencia inválida');
+    const hasta = v.hasta == null || v.hasta === '' ? null : v.hasta;
+    if (hasta !== null && !esFechaValida(hasta)) throw new Error('La fecha "mostrar hasta" no es válida');
     return {
       activa: v.activa === true,
       version,
+      frecuencia,
+      hasta,
       titulo,
       intro: texto(v.intro, L.intro, 'El texto de introducción'),
       bloques: bloques.map((b, i) => {
@@ -271,19 +317,8 @@ async function cargarConfiguracion() {
   config = nueva;
 }
 
-// Motivos del Frente: la persona elige uno de la lista (en el Altillo el motivo sigue siendo libre)
-const MOTIVOS_FRENTE = [
-  'Actividad Personal',
-  'Recaudación - Asociación Estudiantil',
-  'Recaudación - Secretaría CEQ',
-  'Recaudación - Padrinaje',
-  'Recaudación - Congreso o Evento Académico'
-];
-
-// Altillo: bloques de 1 hora; el primero empieza a las 07:00 y el último a las 18:00 (se usa hasta las 19:00), de 1 a 2 horas por reserva
-const ALTILLO_HORA_DESDE = 7;
-const ALTILLO_HORA_HASTA = 19;
-const ALTILLO_MAX_HORAS = 2;
+// Los motivos del Frente y el horario del Altillo están en la configuración (config.motivos_frente,
+// config.altillo_hora_desde/hasta, config.altillo_max_horas): los cambia el admin supremo.
 
 // Acompañantes (opcional, hasta 4, solo en el Altillo): [{ nombre, celular }]. Devuelve la lista limpia o lanza un
 // Error con el mensaje para la persona.
@@ -1188,15 +1223,23 @@ app.get('/api/aperturas-programadas', lecturaPublicaLimiter, async (req, res) =>
 
 // Configuración que necesitan las páginas (turnos del Frente, límite por persona y contacto
 // del Frente). Es información pública: ya se ve en la página y en los correos.
+// La ventana de novedades, si está activa y no pasó su fecha "mostrar hasta" (en Paraguay)
+function ventanaNovedadesVigente() {
+  const v = config.ventana_novedades;
+  if (!v || !v.activa) return null;
+  if (v.hasta && v.hasta < hoyEnAsuncion().toISOString().slice(0, 10)) return null;
+  return v;
+}
+
 app.get('/api/configuracion', lecturaPublicaLimiter, (req, res) => {
   res.json({
     turnos_frente: config.turnos_frente,
     max_reservas_por_persona_mes: config.max_reservas_por_persona_mes,
     contacto_frente: { email: config.contacto_email_frente, whatsapp: config.contacto_whatsapp_frente },
-    motivos_frente: MOTIVOS_FRENTE,
-    altillo: { hora_desde: ALTILLO_HORA_DESDE, hora_hasta: ALTILLO_HORA_HASTA, max_horas: ALTILLO_MAX_HORAS },
+    motivos_frente: config.motivos_frente,
+    altillo: { hora_desde: config.altillo_hora_desde, hora_hasta: config.altillo_hora_hasta, max_horas: config.altillo_max_horas },
     max_acompanantes: MAX_ACOMPANANTES,
-    ventana_novedades: config.ventana_novedades && config.ventana_novedades.activa ? config.ventana_novedades : null
+    ventana_novedades: ventanaNovedadesVigente()
   });
 });
 
@@ -1256,7 +1299,7 @@ app.post('/api/reservas', crearReservaLimiter, async (req, res) => {
       if (!nombreTurnoFrente(hora_inicio, hora_fin)) {
         return res.status(400).json({ error: `Turno inválido para Frente. Los turnos son: ${listaTurnosFrenteTexto()}` });
       }
-      if (!MOTIVOS_FRENTE.includes(String(motivo).trim())) {
+      if (!config.motivos_frente.includes(String(motivo).trim())) {
         return res.status(400).json({ error: 'Elegí el motivo de la lista' });
       }
     } else {
@@ -1266,12 +1309,12 @@ app.post('/api/reservas', crearReservaLimiter, async (req, res) => {
         return res.status(400).json({ error: 'El Altillo se reserva en bloques de horas completas (por ejemplo, 09:00 a 11:00)' });
       }
       const duracionHoras = (finMin - inicioMin) / 60;
-      if (duracionHoras < 1 || duracionHoras > ALTILLO_MAX_HORAS) {
-        return res.status(400).json({ error: `La duración debe ser entre 1 y ${ALTILLO_MAX_HORAS} horas` });
+      if (duracionHoras < 1 || duracionHoras > config.altillo_max_horas) {
+        return res.status(400).json({ error: `La duración debe ser entre 1 y ${config.altillo_max_horas} horas` });
       }
 
-      if (inicioMin < ALTILLO_HORA_DESDE * 60 || finMin > ALTILLO_HORA_HASTA * 60) {
-        return res.status(400).json({ error: `Horario fuera de rango (${String(ALTILLO_HORA_DESDE).padStart(2, '0')}:00-${ALTILLO_HORA_HASTA}:00)` });
+      if (inicioMin < config.altillo_hora_desde * 60 || finMin > config.altillo_hora_hasta * 60) {
+        return res.status(400).json({ error: `Horario fuera de rango (${String(config.altillo_hora_desde).padStart(2, '0')}:00-${config.altillo_hora_hasta}:00)` });
       }
     }
 
@@ -2187,7 +2230,7 @@ app.post('/api/bloqueos', verifyAdminToken, verificarCSRF, async (req, res) => {
       const aMin = hhmm => { const [h, m] = hhmm.split(':').map(Number); return h * 60 + m; };
       const [desdeMin, hastaMin] = Number(espacio_id) === 3
         ? [Math.min(...config.turnos_frente.map(t => aMin(t.inicio))), Math.max(...config.turnos_frente.map(t => aMin(t.fin)))]
-        : [ALTILLO_HORA_DESDE * 60, ALTILLO_HORA_HASTA * 60];
+        : [config.altillo_hora_desde * 60, config.altillo_hora_hasta * 60];
       const texto = m => `${String(Math.floor(m / 60)).padStart(2, '0')}:${String(m % 60).padStart(2, '0')}`;
       const iniMin = horaI * 60 + minI;
       const finMin = horaF * 60 + minF;
@@ -2311,7 +2354,7 @@ function validarHorarioBloqueo(espacioId, horaInicio, horaFin) {
   if (ini === 0 && fin === 23 * 60 + 59) return { completo: true, ini, fin };
   const [desde, hasta] = Number(espacioId) === 3
     ? [Math.min(...config.turnos_frente.map(t => aMin(t.inicio))), Math.max(...config.turnos_frente.map(t => aMin(t.fin)))]
-    : [ALTILLO_HORA_DESDE * 60, ALTILLO_HORA_HASTA * 60];
+    : [config.altillo_hora_desde * 60, config.altillo_hora_hasta * 60];
   const texto = m => `${String(Math.floor(m / 60)).padStart(2, '0')}:${String(m % 60).padStart(2, '0')}`;
   if (ini < desde || fin > hasta || ini >= fin) throw new Error(`Horario inválido (${texto(desde)}-${texto(hasta)})`);
   return { completo: false, ini, fin };
@@ -2974,7 +3017,11 @@ const NOMBRES_CONFIG = {
   max_reservas_por_persona_mes: 'límite por persona',
   contacto_email_frente: 'correo de contacto del Frente',
   contacto_whatsapp_frente: 'WhatsApp del Frente',
-  email_alertas: 'correo de alertas'
+  email_alertas: 'correo de alertas',
+  motivos_frente: 'motivos del Frente',
+  altillo_hora_desde: 'apertura del Altillo',
+  altillo_hora_hasta: 'cierre del Altillo',
+  altillo_max_horas: 'máximo de horas del Altillo'
 };
 
 const comoTexto = (clave, valor) => CLAVES_CONFIG_JSON.includes(clave) ? JSON.stringify(valor) : String(valor);
@@ -3034,6 +3081,11 @@ app.post('/api/superadmin/configuracion', verifyAdminToken, verifySuperAdmin, ve
       }
       filas.push({ clave, valor: comoTexto(clave, valor) });
     }
+    // El horario del Altillo se revisa junto: abre antes de cerrar y el máximo entra en el horario
+    const nuevo = clave => { const f = filas.find(x => x.clave === clave); return f ? Number(f.valor) : config[clave]; };
+    const abre = nuevo('altillo_hora_desde'), cierra = nuevo('altillo_hora_hasta'), maximo = nuevo('altillo_max_horas');
+    if (cierra - abre < 1) return res.status(400).json({ error: 'El Altillo tiene que cerrar al menos 1 hora después de abrir' });
+    if (maximo > cierra - abre) return res.status(400).json({ error: `El máximo de horas del Altillo no puede ser mayor que su horario (${cierra - abre} h)` });
     const cambiadas = filas.filter(f => f.valor !== comoTexto(f.clave, config[f.clave]));
     if (cambiadas.length > 0) {
       const { error } = await supabase.from('configuracion').upsert(cambiadas, { onConflict: 'clave' });
@@ -3042,6 +3094,123 @@ app.post('/api/superadmin/configuracion', verifyAdminToken, verifySuperAdmin, ve
       registrarActividad(req.admin.rol, 'Cambió la configuración', cambiadas.map(f => NOMBRES_CONFIG[f.clave]).join(', '));
     }
     res.json({ mensaje: cambiadas.length > 0 ? 'Configuración guardada' : 'No había cambios', config });
+  } catch (error) {
+    manejarError(res, error);
+  }
+});
+
+// ===== DATOS DE UNA PERSONA (Política de Privacidad, art. 11) =====
+// Para responder pedidos de acceso o de borrado: busca por correo o por celular todo lo que hay
+// de una persona (sus reservas, las reservas donde figura como acompañante y la lista de espera)
+// y, si lo pide, borra sus datos. Solo el admin supremo.
+function criterioPersona(q) {
+  const texto = String(q || '').trim().toLowerCase();
+  if (texto.includes('@')) return EMAIL_REGEX.test(texto) ? { email: texto, celular: null } : null;
+  const digitos = texto.replace(/\D/g, '');
+  return digitos.length >= 7 ? { email: null, celular: digitos.slice(-9) } : null;
+}
+
+async function buscarDatosPersona(criterio) {
+  const reservas = await leerTodasLasFilas(() => supabase.from('reservas')
+    .select('id, espacio_id, fecha, hora_inicio, hora_fin, nombre_solicitante, contacto, motivo, acompanantes, estado, reservado_por_admin, asistencia, created_at, cancelada_en, cancelada_por, motivo_cancelacion')
+    .order('fecha', { ascending: true }).order('id', { ascending: true }));
+  const coincide = ident => (criterio.email && ident.email === criterio.email) || (criterio.celular && ident.celular === criterio.celular);
+  const propias = reservas.filter(r => coincide(identidadContacto(r.contacto)));
+  const comoAcompanante = criterio.celular ? reservas.filter(r => !propias.includes(r) &&
+    (Array.isArray(r.acompanantes) ? r.acompanantes : []).some(a => String(a && a.celular || '').replace(/\D/g, '').slice(-9) === criterio.celular)) : [];
+  let listaEspera = [];
+  if (criterio.email) {
+    const { data, error } = await supabase.from('lista_espera').select('id, espacio_id, email, creado_en, avisado_en').eq('email', criterio.email);
+    if (error) throw error;
+    listaEspera = data || [];
+  }
+  return { propias, comoAcompanante, listaEspera };
+}
+
+app.get('/api/superadmin/persona', verifyAdminToken, verifySuperAdmin, async (req, res) => {
+  try {
+    const criterio = criterioPersona(req.query.q);
+    if (!criterio) return res.status(400).json({ error: 'Escribí un correo o un celular (al menos 7 números)' });
+    const { propias, comoAcompanante, listaEspera } = await buscarDatosPersona(criterio);
+    res.set('Cache-Control', 'no-store');
+    res.json({
+      reservas: propias,
+      como_acompanante: comoAcompanante.map(r => ({
+        id: r.id, espacio_id: r.espacio_id, fecha: r.fecha, hora_inicio: r.hora_inicio, hora_fin: r.hora_fin, estado: r.estado,
+        titular: r.nombre_solicitante,
+        acompanante: (r.acompanantes || []).filter(a => String(a && a.celular || '').replace(/\D/g, '').slice(-9) === criterio.celular)
+      })),
+      lista_espera: listaEspera
+    });
+  } catch (error) {
+    manejarError(res, error);
+  }
+});
+
+// Borra los datos de la persona: sus reservas quedan anónimas (como a los 6 meses), se la quita
+// de las listas de acompañantes y de la lista de espera. Si tiene reservas activas a futuro, primero
+// hay que cancelarlas (así le llega el aviso y no queda un turno ocupado sin dueño).
+app.post('/api/superadmin/persona/borrar', verifyAdminToken, verifySuperAdmin, verificarCSRF, async (req, res) => {
+  try {
+    const { q, confirmar } = req.body || {};
+    const criterio = criterioPersona(q);
+    if (!criterio) return res.status(400).json({ error: 'Escribí un correo o un celular (al menos 7 números)' });
+    if (confirmar !== 'BORRAR') return res.status(400).json({ error: 'Para borrar hay que escribir BORRAR' });
+    const { propias, comoAcompanante, listaEspera } = await buscarDatosPersona(criterio);
+    const hoy = hoyEnAsuncion().toISOString().slice(0, 10);
+    const futuras = propias.filter(r => r.estado === 'activa' && r.fecha >= hoy);
+    if (futuras.length) {
+      return res.status(409).json({
+        error: 'Tiene reservas activas que todavía no pasaron. Cancelalas primero (así le llega el aviso) y después borrá sus datos.',
+        reservas: futuras.map(r => ({ id: r.id, fecha: r.fecha, espacio: getEspacioNombre(r.espacio_id) }))
+      });
+    }
+    for (const r of propias) {
+      const motivoQueda = Number(r.espacio_id) === 3 && config.motivos_frente.includes(r.motivo) ? r.motivo : '';
+      const { error } = await supabase.from('reservas')
+        .update({ nombre_solicitante: NOMBRE_ANONIMIZADO, contacto: '-', acompanantes: [], motivo_cancelacion: null, motivo: motivoQueda })
+        .eq('id', r.id);
+      if (error) throw error;
+    }
+    for (const r of comoAcompanante) {
+      const restantes = (r.acompanantes || []).filter(a => String(a && a.celular || '').replace(/\D/g, '').slice(-9) !== criterio.celular);
+      const { error } = await supabase.from('reservas').update({ acompanantes: restantes }).eq('id', r.id);
+      if (error) throw error;
+    }
+    if (listaEspera.length) {
+      const { error } = await supabase.from('lista_espera').delete().in('id', listaEspera.map(l => l.id));
+      if (error) throw error;
+    }
+    // Sin datos personales en el registro: solo cuántas cosas se borraron
+    registrarActividad(req.admin.rol, 'Borró los datos de una persona',
+      `${propias.length} reserva(s), ${comoAcompanante.length} como acompañante, ${listaEspera.length} en lista de espera`);
+    res.json({ mensaje: 'Datos borrados', reservas: propias.length, como_acompanante: comoAcompanante.length, lista_espera: listaEspera.length });
+  } catch (error) {
+    manejarError(res, error);
+  }
+});
+
+// ===== LISTA DE ESPERA (ver y sacar a alguien) =====
+app.get('/api/superadmin/lista-espera', verifyAdminToken, verifySuperAdmin, async (req, res) => {
+  try {
+    const { data, error } = await supabase.from('lista_espera')
+      .select('id, espacio_id, email, creado_en, avisado_en').order('creado_en', { ascending: true });
+    if (error) throw error;
+    res.json(data || []);
+  } catch (error) {
+    manejarError(res, error);
+  }
+});
+
+app.delete('/api/superadmin/lista-espera/:id', verifyAdminToken, verifySuperAdmin, verificarCSRF, async (req, res) => {
+  try {
+    const { id } = req.params;
+    if (!esIdValido(id)) return res.status(400).json({ error: 'ID inválido' });
+    const { data, error } = await supabase.from('lista_espera').delete().eq('id', id).select('espacio_id');
+    if (error) throw error;
+    if (!data || data.length === 0) return res.status(404).json({ error: 'No está en la lista' });
+    registrarActividad(req.admin.rol, 'Sacó a alguien de la lista de espera', getEspacioNombre(data[0].espacio_id));
+    res.json({ mensaje: 'Listo: ya no está en la lista de espera' });
   } catch (error) {
     manejarError(res, error);
   }
@@ -3290,7 +3459,7 @@ async function aplicarPlazosDeConservacion() {
   // personal). Las reservas de prioridad del panel pueden tener motivo libre: ese se borra.
   const { error: e4 } = await supabase.from('reservas').update({ motivo: '' })
     .lt('fecha', fechaLimite).eq('espacio_id', 3).neq('motivo', '')
-    .not('motivo', 'in', `(${MOTIVOS_FRENTE.map(m => `"${m}"`).join(',')})`);
+    .not('motivo', 'in', `(${config.motivos_frente.map(m => `"${m}"`).join(',')})`);
   if (e4) throw e4;
   const { data: reportes, error: e3 } = await supabase.from('reportes_errores').delete().lt('created_at', fechaLimite + 'T00:00:00').select('id');
   if (e3) throw e3;
