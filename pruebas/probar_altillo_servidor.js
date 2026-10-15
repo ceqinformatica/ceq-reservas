@@ -1,6 +1,6 @@
 // Prueba el server.js real (Node 24) con el Altillo habilitado: Supabase simulado, Brevo interceptado
 // y el reloj del servidor puesto el martes 20/10/2026 a las 11:30 de Asunción.
-// Cubre: horario del Altillo 08-20 con máximo 2 horas, bloque en curso, motivos del Frente y acompañantes.
+// Cubre: horario del Altillo 07-19 con máximo 2 horas, bloque en curso, motivos del Frente y acompañantes.
 // Uso: node probar_altillo_servidor.js <carpeta con node_modules> <server.js> <interceptar_brevo.js> <reloj_falso.js>
 const http = require('http');
 const fs = require('fs');
@@ -83,7 +83,7 @@ const anotar = (nombre, ok, detalle = '') => resultados.push({ nombre, ok, detal
   // --- /api/configuracion publica lo que necesita la página ---
   const conf = await (await fetch('http://127.0.0.1:3998/api/configuracion')).json();
   anotar('Configuración: 5 motivos del Frente', Array.isArray(conf.motivos_frente) && conf.motivos_frente.length === 5 && conf.motivos_frente[0] === 'Actividad Personal', JSON.stringify(conf.motivos_frente));
-  anotar('Configuración: Altillo 08-20, máximo 2 horas', conf.altillo && conf.altillo.hora_desde === 8 && conf.altillo.hora_hasta === 20 && conf.altillo.max_horas === 2, JSON.stringify(conf.altillo));
+  anotar('Configuración: Altillo 07-19, máximo 2 horas', conf.altillo && conf.altillo.hora_desde === 7 && conf.altillo.hora_hasta === 19 && conf.altillo.max_horas === 2, JSON.stringify(conf.altillo));
   anotar('Configuración: hasta 4 acompañantes', conf.max_acompanantes === 4);
 
   // --- Altillo: horario y duración ---
@@ -95,14 +95,15 @@ const anotar = (nombre, ok, detalle = '') => resultados.push({ nombre, ok, detal
   anotar('Sin acompañantes: se guarda la lista vacía', Array.isArray(insertados.at(-1).acompanantes) && insertados.at(-1).acompanantes.length === 0);
   r = await reservar(1, '10:00', '12:00'); anotar('Altillo 2 horas: aceptada', ok201(r), det(r));
   r = await reservar(1, '18:00', '19:00'); anotar('Altillo 18:00-19:00: aceptada (nuevo)', ok201(r), det(r));
-  r = await reservar(1, '19:00', '20:00'); anotar('Altillo 19:00-20:00: aceptada (nuevo)', ok201(r), det(r));
-  r = await reservar(1, '18:00', '20:00'); anotar('Altillo 18:00-20:00: aceptada', ok201(r), det(r));
+  r = await reservar(1, '17:00', '19:00', { fecha: OTRO_DIA }); anotar('Altillo 17:00-19:00 (último bloque de 2 horas): aceptada', ok201(r), det(r));
+  r = await reservar(1, '19:00', '20:00'); anotar('Altillo 19:00-20:00: rechazada (cierra a las 19:00)', err(r, 'fuera de rango'), det(r));
+  r = await reservar(1, '18:00', '20:00'); anotar('Altillo 18:00-20:00: rechazada', err(r, 'fuera de rango'), det(r));
   r = await reservar(1, '08:00', '11:00'); anotar('Altillo 3 horas: rechazada', err(r, 'entre 1 y 2 horas'), det(r));
   r = await reservar(1, '08:30', '09:00'); anotar('Altillo 30 minutos: rechazada', err(r, 'horas completas'), det(r));
   r = await reservar(1, '08:30', '10:00'); anotar('Altillo 08:30-10:00 (no es hora completa): rechazada', err(r, 'horas completas'), det(r));
   r = await reservar(1, '09:00', '10:30'); anotar('Altillo 09:00-10:30 (no es hora completa): rechazada', err(r, 'horas completas'), det(r));
-  r = await reservar(1, '07:00', '08:00'); anotar('Altillo antes de las 08:00: rechazada', err(r, 'fuera de rango'), det(r));
-  r = await reservar(1, '19:00', '21:00'); anotar('Altillo después de las 20:00: rechazada', err(r, 'fuera de rango'), det(r));
+  r = await reservar(1, '07:00', '08:00'); anotar('Altillo 07:00-08:00 (primer bloque): aceptada', ok201(r), det(r));
+  r = await reservar(1, '06:00', '07:00'); anotar('Altillo antes de las 07:00: rechazada', err(r, 'fuera de rango'), det(r));
 
   // --- Altillo hoy a las 11:30: el bloque en curso todavía se puede tomar ---
   r = await reservar(1, '11:00', '13:00', { fecha: HOY }); anotar('Hoy 11:30: 11:00-13:00 aceptada (el bloque de 11 no terminó)', ok201(r), det(r));

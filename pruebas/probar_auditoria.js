@@ -165,10 +165,10 @@ const reservasDe = email => db.reservas.filter(r => String(r.contacto).toLowerCa
   r = await pedir('POST', '/api/reservas', { espacio_id: 1, nombre_solicitante: 'Dani Altillo', contacto: '0984 777 888 | dani@example.com',
     fecha: '2026-11-23', hora_inicio: '08:30', hora_fin: '10:00', motivo: 'Estudiar' });
   anotar('Altillo 08:30-10:00: rechazado (solo horas completas)', r.status === 400 && /horas completas/.test(r.datos.error), `${r.status} ${r.datos.error}`);
-  r = await pedir('POST', '/api/bloqueos', { espacio_id: 1, fecha: '2026-11-24', hora_inicio: '19:00', hora_fin: '20:00', motivo: 'Limpieza' }, { admin: true });
-  anotar('Bloquear el Altillo de 19:00 a 20:00 ahora se puede', [200, 201].includes(r.status), `${r.status} ${JSON.stringify(r.datos).slice(0, 100)}`);
-  r = await pedir('POST', '/api/bloqueos', { espacio_id: 1, fecha: '2026-11-24', hora_inicio: '19:00', hora_fin: '21:00' }, { admin: true });
-  anotar('Bloquear el Altillo hasta las 21:00: rechazado (cierra a las 20:00)', r.status === 400 && /08:00-20:00/.test(r.datos.error), `${r.status} ${r.datos.error}`);
+  r = await pedir('POST', '/api/bloqueos', { espacio_id: 1, fecha: '2026-11-24', hora_inicio: '18:00', hora_fin: '19:00', motivo: 'Limpieza' }, { admin: true });
+  anotar('Bloquear el Altillo de 18:00 a 19:00 (antes el tope era 18:00) ahora se puede', [200, 201].includes(r.status), `${r.status} ${JSON.stringify(r.datos).slice(0, 100)}`);
+  r = await pedir('POST', '/api/bloqueos', { espacio_id: 1, fecha: '2026-11-24', hora_inicio: '18:00', hora_fin: '20:00' }, { admin: true });
+  anotar('Bloquear el Altillo hasta las 20:00: rechazado (cierra a las 19:00)', r.status === 400 && /07:00-19:00/.test(r.datos.error), `${r.status} ${r.datos.error}`);
   r = await pedir('POST', '/api/bloqueos', { espacio_id: 3, fecha: '2026-11-24', hora_inicio: '06:00', hora_fin: '07:00' }, { admin: true });
   anotar('Bloquear el Frente fuera de sus turnos (06:00): rechazado con el rango de los turnos', r.status === 400 && /07:00-18:00/.test(r.datos.error), `${r.status} ${r.datos.error}`);
   r = await pedir('POST', '/api/bloqueos', { espacio_id: 3, fecha: '2026-02-30', hora_inicio: '07:00', hora_fin: '10:00' }, { admin: true });
