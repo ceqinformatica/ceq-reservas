@@ -3495,27 +3495,36 @@ async function enviarRecordatorios() {
     .limit(MAX_RECORDATORIOS_POR_TANDA);
   if (error) throw error;
 
+  // Primero se guarda el correo en la cola y DESPUÉS se marca la reserva (CEQ-06). Antes era al
+  // revés: si el servidor se reiniciaba entre los dos pasos, la reserva quedaba marcada y el
+  // recordatorio no salía nunca. Ahora, en ese caso, la próxima vuelta lo encuentra sin marcar y,
+  // como el asunto lleva el número de la reserva, ve que ya está en la cola y solo la marca (no
+  // se manda dos veces).
   for (const r of data || []) {
     const email = String(r.contacto || '').split('|')[1]?.trim();
-    // Se marca ANTES de mandar, así un reinicio a mitad de camino no manda dos veces
-    const { data: tomada, error: errorTomar } = await supabase
-      .from('reservas')
+    const marcar = () => supabase.from('reservas')
       .update({ recordatorio_enviado_en: new Date().toISOString() })
-      .eq('id', r.id).eq('estado', 'activa').is('recordatorio_enviado_en', null)
-      .select('id');
-    if (errorTomar) throw errorTomar;
-    if (!tomada || tomada.length === 0 || !email) continue;
+      .eq('id', r.id).is('recordatorio_enviado_en', null);
+    if (!email) {
+      const { error: errorMarcar } = await marcar();
+      if (errorMarcar) throw errorMarcar;
+      continue;
+    }
+    const asunto = `⏰ Recordatorio: ${getEspacioNombre(r.espacio_id)}, ${fechaLarga(r.fecha)} - CEQ #${r.id}`;
+    const { data: yaEnCola, error: errorCola } = await supabase.from('correos_pendientes')
+      .select('id').eq('asunto', asunto).limit(1);
+    const encolado = !errorCola && yaEnCola && yaEnCola.length > 0;
 
-    const enviado = await encolarCorreo({
+    const enviado = encolado || await encolarCorreo({
       to: email,
-      subject: `⏰ Recordatorio: ${getEspacioNombre(r.espacio_id)}, ${fechaLarga(r.fecha)} - CEQ #${r.id}`,
+      subject: asunto,
       responderA: correoRespuesta(r.espacio_id),
       html: htmlRecordatorio(r)
     });
-    if (!enviado) {
-      // Si no se pudo guardar en la cola ni mandar directo, se desmarca para la próxima vuelta
-      await supabase.from('reservas').update({ recordatorio_enviado_en: null }).eq('id', r.id);
-    }
+    // Si no se pudo guardar en la cola ni mandar directo, queda sin marcar para la próxima vuelta
+    if (!enviado) continue;
+    const { error: errorMarcar } = await marcar();
+    if (errorMarcar) throw errorMarcar;
   }
 }
 
@@ -3627,10 +3636,16 @@ async function enviarCopiaMensual() {
   const anterior = data ? data.valor : null;
   if (anterior === mes) return;
 
-  // Se anota ANTES de mandar (no se manda dos veces); si el envío falla, se vuelve atrás y se
-  // reintenta en la próxima vuelta
+  // Antes de mandar se anota "mes|enviando|hora" (CEQ-06): mientras tanto no se manda otra vez.
+  // Cuando sale, queda "mes". Si el envío falla, se vuelve atrás y se reintenta en la próxima
+  // vuelta. Si el servidor se reinicia en el medio, la marca "enviando" queda colgada: pasados
+  // 30 minutos se toma como no enviada y se reintenta (antes el mes se daba por enviado y la
+  // copia no llegaba nunca).
+  const enviando = String(anterior || '').match(/^(\d{4}-\d{2})\|enviando\|(.+)$/);
+  if (enviando && enviando[1] === mes && Date.now() - Date.parse(enviando[2]) < 30 * 60 * 1000) return;
+  const hecho = enviando ? '' : (anterior || '');
   const marcar = valor => supabase.from('configuracion').upsert({ clave: CLAVE_COPIA_MENSUAL, valor }, { onConflict: 'clave' });
-  const { error: errorMarcar } = await marcar(mes);
+  const { error: errorMarcar } = await marcar(`${mes}|enviando|${new Date().toISOString()}`);
   if (errorMarcar) throw errorMarcar;
 
   let enviado = false;
@@ -3652,7 +3667,8 @@ async function enviarCopiaMensual() {
       adjuntos: [{ name: `reservas-ceq-${mes}.csv`, content: Buffer.from(csv, 'utf8').toString('base64') }]
     });
   } finally {
-    if (!enviado) await marcar(anterior || '');
+    const { error: errorFinal } = await marcar(enviado ? mes : hecho);
+    if (errorFinal) console.error('⚠️ No se pudo anotar la copia mensual:', errorFinal.message || errorFinal.code);
   }
 }
 
