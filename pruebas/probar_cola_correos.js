@@ -73,6 +73,8 @@ const filasDe = email => db.correos_pendientes.filter(c => c.asunto && JSON.stri
 
   // ===== 1. Camino normal =====
   let r = await reservar('2026-11-17', 'ana@example.com');
+  // CEQ-06: cuando llega el 201, los dos correos ya están guardados en la cola
+  anotar('Al responder 201 los dos correos ya están en la cola', r.status === 201 && db.correos_pendientes.length === 2, String(db.correos_pendientes.length));
   const llego = await hasta(() => delCorreo('ana@example.com').length === 1 && delCorreo('frente@example.com').length === 1);
   anotar('Reserva normal: llegan la confirmación y el aviso al moderador', r.status === 201 && llego, `${r.status} ${correos().map(c => c.subject).join(' | ')}`);
   await hasta(() => db.correos_pendientes.length >= 2 && db.correos_pendientes.every(c => c.estado === 'enviado'));

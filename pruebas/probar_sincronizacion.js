@@ -51,13 +51,14 @@ const db = { reservas, configuracion: [{ clave: 'version_sesiones', valor: '1' }
 // ---------- Mini PostgREST (como Supabase: máximo 1000 filas por respuesta) ----------
 const pedidos = [];
 function cumple(f, col, expr) {
-  const m = expr.match(/^(eq|neq|in|is|gte|lte)\.(.*)$/s);
+  const m = expr.match(/^(eq|neq|in|is|gte|lte|gt|lt)\.(.*)$/s);
   if (!m) throw new Error('filtro no soportado ' + col + '=' + expr);
   const v = String(f[col]);
   if (m[1] === 'eq') return v === m[2]; if (m[1] === 'neq') return v !== m[2];
   if (m[1] === 'in') return m[2].replace(/^\(|\)$/g, '').split(',').includes(v);
   if (m[1] === 'is') return m[2] === 'null' ? f[col] == null : v === m[2];
-  if (m[1] === 'gte') return v >= m[2]; return v <= m[2];
+  if (m[1] === 'gte') return v >= m[2]; if (m[1] === 'gt') return v > m[2];
+  if (m[1] === 'lt') return v < m[2]; return v <= m[2];
 }
 const supa = http.createServer((rq, rs) => {
   let cuerpo = ''; rq.on('data', c => cuerpo += c);
@@ -85,7 +86,9 @@ async function arrancar(env, puerto) {
   const brevoLog = path.join(os.tmpdir(), 'ceq-brevo-sinc.log'); fs.writeFileSync(brevoLog, '');
   const hijo = spawn(process.execPath, ['--require', path.join(path.dirname(interceptor), 'reloj_falso.js'), '--require', interceptor, path.join(carpeta, 'server.js')], {
     cwd: carpeta, env: { ...process.env, PORT: String(puerto), SUPABASE_URL: 'http://127.0.0.1:54326', SUPABASE_KEY: 'x', BREVO_API_KEY: 'x',
-      JWT_SECRET: 'secreto', ADMIN_PASSWORD_HASH: 'x', BREVO_LOG: brevoLog, RELOJ_FALSO: relojArchivo, NODE_OPTIONS: '', ...env } });
+      JWT_SECRET: 'secreto', ADMIN_PASSWORD_HASH: 'x', BREVO_LOG: brevoLog, RELOJ_FALSO: relojArchivo, NODE_OPTIONS: '',
+      // Las tareas periódicas (cola de correos, limpiezas) no corren en el medio de la prueba
+      INTERVALO_TAREAS_MS: '3600000', INTERVALO_COLA_CORREOS_MS: '3600000', ...env } });
   let salida = ''; hijo.stdout.on('data', d => salida += d); hijo.stderr.on('data', d => salida += d);
   for (let i = 0; i < 600 && !salida.includes('Sincronización con Google Sheets'); i++) await esperar(100);
   hijo.salida = () => salida;

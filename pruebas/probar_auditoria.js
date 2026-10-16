@@ -66,7 +66,9 @@ async function arrancar() {
     cwd: carpeta,
     env: { ...process.env, PORT: '3991', SUPABASE_URL: 'http://127.0.0.1:54328', SUPABASE_KEY: 'x', BREVO_API_KEY: 'x', JWT_SECRET: SECRETO,
       ADMIN_PASSWORD_HASH: bcrypt.hashSync(CLAVE, 4), SUPERADMIN_PASSWORD_HASH: '', EMAIL_MODERADOR: '', BREVO_LOG: brevoLog,
-      RELOJ_FALSO: relojArchivo, INTERVALO_TAREAS_MS: '600000', EMAILS_SIN_LIMITE: '', NODE_ENV: 'development', NODE_OPTIONS: '' }
+      RELOJ_FALSO: relojArchivo, INTERVALO_TAREAS_MS: '600000',
+      // Ya no hay correos exentos (CEQ-01): aunque quede la variable vieja en Render, beto tiene límite
+      EMAILS_SIN_LIMITE: 'beto@example.com', NODE_ENV: 'development', NODE_OPTIONS: '' }
   });
   let salida = ''; hijo.stdout.on('data', d => salida += d); hijo.stderr.on('data', d => salida += d);
   for (let i = 0; i < 600 && !salida.includes('Servidor corriendo'); i++) await esperar(100);

@@ -154,6 +154,26 @@ const reservar = extra => pedir('POST', '/api/reservas', { espacio_id: 1, nombre
     r.datos.reservas.length === 3 && r.datos.como_acompanante.length === 1 && r.datos.como_acompanante[0].id === 703 && r.datos.como_acompanante[0].acompanante[0].nombre === 'Paula Pérez',
     JSON.stringify(r.datos.como_acompanante));
   anotar('No se mandan los códigos de cancelación', !JSON.stringify(r.datos).includes('codigo'));
+  // CEQ-16: el archivo para la persona lleva solo sus datos
+  const ent = r.datos.entrega || {};
+  const textoEnt = JSON.stringify(ent);
+  anotar('El archivo para la persona: sus reservas, donde fue acompañante y su lista de espera',
+    (ent.reservas || []).length === 3 && (ent.como_acompanante || []).length === 1 && (ent.lista_espera || []).length === 1 &&
+    ent.como_acompanante[0].como_figura.length === 1 && ent.como_acompanante[0].como_figura[0].nombre === 'Paula Pérez', textoEnt);
+  anotar('...sin el nombre de quien reservó ni los otros acompañantes', !/Tomás|Titular|Luis|0983|tomas@/i.test(textoEnt), textoEnt);
+  anotar('...de sus reservas solo va cuántos acompañantes tenía', ent.reservas.every(x => typeof x.cantidad_acompanantes === 'number' && !('acompanantes' in x)));
+  // CEQ-17: se la encuentra por los otros datos que dejó en sus reservas
+  r = await pedir('GET', '/api/superadmin/persona?q=paula@example.com', null, 'superadmin');
+  anotar('Buscando por correo también aparece donde figura como acompañante (por su celular)',
+    r.datos.como_acompanante.length === 1 && r.datos.como_acompanante[0].id === 703, JSON.stringify(r.datos.como_acompanante));
+  // Correos en la cola que todavía guardan contenido
+  db.correos_pendientes.push(
+    { id: 9001, destinatarios: ['paula@example.com'], asunto: 'Confirmación', html: '<p>Hola Paula</p>', texto: null, estado: 'fallido', intentos: 6, proximo_intento: '2026-11-01T00:00:00Z' },
+    { id: 9002, destinatarios: ['moderador@example.com'], asunto: 'Nueva Reserva', html: '<p>Contacto: 0981 777 888 | paula@example.com</p>', texto: null, estado: 'fallido', intentos: 6, proximo_intento: '2026-11-01T00:00:00Z' },
+    { id: 9003, destinatarios: ['otra@example.com'], asunto: 'Confirmación', html: '<p>Hola Otra</p>', texto: null, estado: 'fallido', intentos: 6, proximo_intento: '2026-11-01T00:00:00Z' }
+  );
+  r = await pedir('GET', '/api/superadmin/persona?q=0981777888', null, 'superadmin');
+  anotar('Cuenta los correos para ella que siguen en la cola', r.datos.correos_en_cola === 2, String(r.datos.correos_en_cola));
   const malasP = [await pedir('GET', '/api/superadmin/persona?q=123', null, 'superadmin'), await pedir('GET', '/api/superadmin/persona?q=no-es-correo@', null, 'superadmin')];
   anotar('Búsqueda demasiado corta o correo inválido: 400', malasP.every(m => m.status === 400), malasP.map(m => m.status).join(','));
   r = await pedir('GET', '/api/superadmin/persona?q=paula@example.com', null, 'admin');
@@ -171,11 +191,14 @@ const reservar = extra => pedir('POST', '/api/reservas', { espacio_id: 1, nombre
   const r703 = db.reservas.find(x => x.id === 703);
   anotar('...se la quita como acompañante sin tocar al titular ni a los demás', r703.acompanantes.length === 1 && r703.acompanantes[0].nombre === 'Luis' && r703.nombre_solicitante === 'Tomás Titular');
   anotar('...las reservas de otras personas no se tocan', db.reservas.find(x => x.id === 705).nombre_solicitante === 'Otra Persona');
+  anotar('...buscando por celular también sale de la lista de espera (que es por correo)', r.datos.lista_espera === 1 && !db.lista_espera.some(l => l.email === 'paula@example.com'), JSON.stringify(r.datos));
+  anotar('...y se borran sus correos de la cola (el suyo y el aviso al moderador), no los de otros',
+    r.datos.correos === 2 && !db.correos_pendientes.some(c => c.id === 9001 || c.id === 9002) && db.correos_pendientes.some(c => c.id === 9003), JSON.stringify(db.correos_pendientes.map(c => c.id)));
   await esperar(300);
   const act = db.registro_actividad.find(a => a.accion === 'Borró los datos de una persona');
   anotar('El registro de actividad no guarda datos personales', act && !/paula|0981|777/i.test(JSON.stringify(act)), JSON.stringify(act));
   r = await pedir('POST', '/api/superadmin/persona/borrar', { q: 'paula@example.com', confirmar: 'BORRAR' }, 'superadmin');
-  anotar('Por correo: ya no queda ninguna reserva suya, y sale de la lista de espera', r.status === 200 && r.datos.reservas === 0 && r.datos.lista_espera === 1 && !db.lista_espera.some(l => l.email === 'paula@example.com'), JSON.stringify(r.datos));
+  anotar('Repetir el borrado no falla y no queda nada más', r.status === 200 && r.datos.reservas === 0 && r.datos.lista_espera === 0 && r.datos.correos === 0, JSON.stringify(r.datos));
 
   hijo.kill();
   mini.servidor.close();

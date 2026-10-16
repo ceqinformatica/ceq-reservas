@@ -127,11 +127,25 @@ async function pedir(metodo, ruta, cuerpo, { admin = false } = {}) {
     [{ ...lote, hora_inicio: '18:00', hora_fin: '20:00' }, 'Altillo hasta las 20'],
     [{ ...lote, desde: '2026-11-13' }, 'fecha pasada'],
     [{ ...lote, espacio_id: 2 }, 'espacio 2'],
-    [{ ...lote, desde: '2026-02-30' }, 'fecha inexistente']
+    [{ ...lote, desde: '2026-02-30' }, 'fecha inexistente'],
+    // CEQ-18: horas que antes pasaban la forma y se convertían en otra hora
+    [{ ...lote, hora_inicio: '08:99' }, '08:99'],
+    [{ ...lote, hora_inicio: '25:00', hora_fin: '26:00' }, '25:00'],
+    [{ ...lote, hora_inicio: '14:00:30' }, 'con segundos'],
+    [{ ...lote, hora_fin: '16:60' }, '16:60']
   ];
   const estados = [];
   for (const [cuerpo] of malos) estados.push((await pedir('POST', '/api/bloqueos/lote', cuerpo, { admin: true })).status);
-  anotar('Datos inválidos (sin días, sábado, al revés, más de 6 meses, fuera de horario, pasado…): 400', estados.every(s => s === 400), malos.map(([, n], i) => `${n}=${estados[i]}`).join(', '));
+  anotar('Datos inválidos (sin días, sábado, al revés, más de 6 meses, fuera de horario, pasado, 08:99, 25:00, segundos…): 400', estados.every(s => s === 400), malos.map(([, n], i) => `${n}=${estados[i]}`).join(', '));
+  anotar('...y con una hora inválida no se crea nada', db.bloqueos.length === 3, String(db.bloqueos.length));
+  r = await pedir('POST', '/api/bloqueos/lote', { ...lote, desde: '2026-12-01', hasta: '2026-12-03', hora_inicio: '14:00:00', hora_fin: '16:00:00' }, { admin: true });
+  anotar('Con segundos en 00 sí se acepta (vista previa)', r.status === 200, `${r.status} ${r.datos.error}`);
+
+  // CEQ-08: el calendario público solo recibe bloqueos desde el mes actual
+  db.bloqueos.push({ id: 7999, espacio_id: 1, fecha: '2026-10-20', hora_inicio: '14:00:00', hora_fin: '16:00:00', motivo: 'Viejo', lote: null });
+  r = await pedir('GET', '/api/bloqueos');
+  anotar('Bloqueos públicos: solo desde el mes actual (no los de octubre)', r.status === 200 && r.datos.some(b => b.fecha === '2026-11-24') && !r.datos.some(b => b.fecha === '2026-10-20'), JSON.stringify(r.datos.map(b => b.fecha)));
+  db.bloqueos.splice(db.bloqueos.findIndex(b => b.id === 7999), 1);
 
   r = await pedir('POST', '/api/bloqueos/lote', { espacio_id: 3, desde: '2026-11-30', hasta: '2026-12-04', dias: [1, 2, 3, 4, 5], hora_inicio: '00:00:00', hora_fin: '23:59:00', confirmar: true }, { admin: true });
   anotar('Frente todo el día, una semana entera: 5 bloqueos', r.status === 201 && r.datos.creados === 5, JSON.stringify(r.datos));
