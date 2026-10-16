@@ -135,7 +135,7 @@ const valorConfig = clave => (db.configuracion.find(c => c.clave === clave) || {
   await esperar(500);
   nuevos = correos().slice(antes2);
   const confA = nuevos.find(c => c.subject.startsWith('✓ Confirmación'));
-  anotar('Altillo: la respuesta va al correo general del CEQ', x.status === 201 && confA && confA.replyTo.email === 'ceq.informatica@gmail.com', confA && JSON.stringify(confA.replyTo));
+  anotar('Altillo: la respuesta va a reservas@ceq-una.com (el contacto general)', x.status === 201 && confA && confA.replyTo.email === 'reservas@ceq-una.com', confA && JSON.stringify(confA.replyTo));
   const antes3 = correos().length;
   x = await post('/api/cancelar-por-codigo', { codigo: 'CODIGOFRENTE1234' });
   await esperar(500);
@@ -143,7 +143,11 @@ const valorConfig = clave => (db.configuracion.find(c => c.clave === clave) || {
   const canc = nuevos.find(c => c.subject.startsWith('Cancelación Confirmada'));
   const cancMod = nuevos.find(c => c.subject.startsWith('Cancelación de Reserva'));
   anotar('Cancelación: la persona responde al Frente y el moderador a la persona', x.status === 200 && canc && canc.replyTo.email === 'frente-contacto@example.com' && cancMod && cancMod.replyTo.email === 'frente@example.com', `${x.status} ${canc && canc.replyTo.email} ${cancMod && cancMod.replyTo.email}`);
-  anotar('Todos los correos enviados tienen "Responder a" (ninguno a reservas@ sin buzón)', correos().every(c => c.replyTo && /@/.test(c.replyTo.email) && c.replyTo.email !== 'reservas@ceq-una.com'), correos().filter(c => !c.replyTo).map(c => c.subject).join(' | '));
+  // reservas@ceq-una.com recibe desde el 16/10/2026 (reenvío de Cloudflare), así que ahora es un "Responder a" válido
+  anotar('Todos los correos enviados tienen un "Responder a" con un correo', correos().every(c => c.replyTo && /@/.test(c.replyTo.email)), correos().filter(c => !c.replyTo).map(c => c.subject).join(' | '));
+  anotar('Ningún correo le muestra a la gente el Gmail de la Secretaría (el contacto es reservas@ceq-una.com)',
+    correos().every(c => !/ceq\.informatica@gmail\.com/.test(`${c.htmlContent || ''} ${c.textContent || ''}`) || /Copia de seguridad|Alerta|reporte/i.test(c.subject)),
+    correos().filter(c => /ceq\.informatica@gmail\.com/.test(`${c.htmlContent || ''} ${c.textContent || ''}`)).map(c => c.subject).join(' | '));
   anotar('Sin errores en el servidor', !/❌|Error interno|TypeError|ReferenceError/.test(hijo.salida()), (hijo.salida().match(/.*(❌|Error).*/g) || []).slice(0, 3).join(' / '));
 
   hijo.kill(); mini.servidor.close();
