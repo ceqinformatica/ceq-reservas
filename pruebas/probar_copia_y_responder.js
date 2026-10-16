@@ -109,6 +109,15 @@ const valorConfig = clave => (db.configuracion.find(c => c.clave === clave) || {
   db.configuracion.find(c => c.clave === 'email_alertas').valor = 'alertas@example.com';
   await esperar(2500);
   anotar('Cuando el correo vuelve a andar, se manda', copias().some(c => c.subject.includes('enero 2027')) && valorConfig('copia_mensual_enviada') === '2027-01', valorConfig('copia_mensual_enviada'));
+  // CEQ-06: el servidor se reinició mientras mandaba la copia de febrero (quedó "enviando")
+  const fila = db.configuracion.find(c => c.clave === 'copia_mensual_enviada');
+  fila.valor = '2027-02|enviando|2027-02-01T11:00:00.000Z';
+  ponerHora('2027-02-01T11:10:00Z');
+  await esperar(2500);
+  anotar('Si la marca "enviando" es reciente (10 min), no se manda otra vez', !copias().some(c => c.subject.includes('febrero 2027')), valorConfig('copia_mensual_enviada'));
+  fila.valor = '2027-02|enviando|2027-02-01T10:00:00.000Z';
+  await esperar(2500);
+  anotar('Si quedó colgada más de 30 minutos, se manda y queda anotado el mes', copias().filter(c => c.subject.includes('febrero 2027')).length === 1 && valorConfig('copia_mensual_enviada') === '2027-02', valorConfig('copia_mensual_enviada'));
   ponerHora('2026-11-16T13:00:00Z'); // lunes 16/11, 10:00
   await esperar(1000);
 

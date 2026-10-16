@@ -152,6 +152,25 @@ const filasDe = email => db.correos_pendientes.filter(c => c.asunto && JSON.stri
   anotar('A los 7 días se borran las filas enviadas y fallidas', db.correos_pendientes.filter(c => ['enviado', 'fallido'].includes(c.estado)).length === 0,
     `${totalAntes} -> ${db.correos_pendientes.length}`);
 
+  // ===== 7. Recordatorios: primero a la cola, después se marca (CEQ-06) =====
+  ponerHora('2026-11-25T13:00:00Z'); // miércoles 25/11, 10:00 en Paraguay → recordatorios del 27
+  const resRec = (id, email) => ({ id, espacio_id: 3, nombre_solicitante: 'Rec ' + id, contacto: `0981 200 ${id % 1000} | ${email}`, fecha: '2026-11-27',
+    hora_inicio: '07:00:00', hora_fin: '10:00:00', estado: 'activa', motivo: 'Actividad Personal', reservado_por_admin: false, acompanantes: [],
+    asistencia: null, recordatorio_enviado_en: null, created_at: '2026-11-20T12:00:00', cancelada_en: null, cancelada_por: null, motivo_cancelacion: null });
+  db.reservas.push(resRec(9502, 'rec2@example.com'));
+  const llegoRec = await hasta(() => delCorreo('rec2@example.com').some(c => c.subject.includes('Recordatorio')), 8000);
+  const filaRec = db.reservas.find(x => x.id === 9502);
+  anotar('El recordatorio sale y la reserva queda marcada', llegoRec && !!filaRec.recordatorio_enviado_en, String(filaRec.recordatorio_enviado_en));
+  // Simula un reinicio justo después de guardar en la cola: el correo ya está, la reserva sin marcar
+  const asuntoRec = (db.correos_pendientes.find(c => (c.asunto || '').includes('CEQ #9502')) || {}).asunto || '';
+  db.correos_pendientes.push({ id: 9601, destinatarios: [], asunto: asuntoRec.replace('#9502', '#9501'), html: '', texto: null, responder_a: null, estado: 'enviado', intentos: 1,
+    proximo_intento: new Date(Date.now() + desfase).toISOString(), reclamado_hasta: null, ultimo_error: null, creado_en: new Date(Date.now() + desfase).toISOString(), enviado_en: new Date(Date.now() + desfase).toISOString() });
+  db.reservas.push(resRec(9501, 'rec1@example.com'));
+  await hasta(() => !!db.reservas.find(x => x.id === 9501).recordatorio_enviado_en, 8000);
+  await esperar(1500);
+  anotar('Si el recordatorio ya estaba en la cola, solo se marca la reserva (no se manda dos veces)',
+    asuntoRec && !!db.reservas.find(x => x.id === 9501).recordatorio_enviado_en && delCorreo('rec1@example.com').length === 0, asuntoRec);
+
   anotar('El servidor dice su NODE_ENV al arrancar', /NODE_ENV: /.test(hijo.salida()), (hijo.salida().match(/.*NODE_ENV.*/) || [''])[0]);
   hijo.kill();
   levantarBrevo();
