@@ -65,7 +65,7 @@ const db = {
 };
 let fallarBloqueos = false;
 const mini = crearMiniPostgrest(db, {
-  unicas: { lista_espera: [['espacio_id', 'email']] },
+  unicas: { lista_espera: [['espacio_id', 'email', 'mes']] },
   porDefecto: {
     reservas: () => ({ created_at: new Date(ahoraFalso()).toISOString().replace('Z', ''), recordatorio_enviado_en: null, asistencia: null, reservado_por_admin: false }),
     registro_actividad: () => ({ creado_en: new Date(ahoraFalso()).toISOString() }),
@@ -216,45 +216,65 @@ const actividad = () => db.registro_actividad.map(a => `${a.rol}|${a.accion}|${a
   const sinc = await fetch(API + '/api/sincronizacion/reservas', { headers: { 'x-clave-sincronizacion': CLAVE_SINC } }).then(q => q.json());
   anotar('La planilla recibe la asistencia', sinc.reservas.find(q => q.id === R.pasada.id).asistencia === 'vino');
 
-  // ===== Lista de espera (general, por espacio) =====
-  const anotarse = (email, espacio_id = 3, ip) => llamar('POST', '/api/lista-espera', { cuerpo: { espacio_id, email }, ip });
+  // ===== Lista de espera (por espacio y mes, con nombre) =====
+  const anotarse = (email, espacio_id = 3, ip, extra = {}) => llamar('POST', '/api/lista-espera', { cuerpo: { espacio_id, email, nombre: 'Ana María Espera', mes: '2026-11', ...extra }, ip });
   x = await anotarse('Espera1@Example.com');
-  const e2 = await anotarse('espera2@example.com');
+  const e2 = await anotarse('espera2@example.com', 3, undefined, { nombre: '  Beto   Ruiz  ' });
   const e3 = await anotarse('espera3@example.com', 1);
-  anotar('Tres personas se anotan (dos al Frente, una al Altillo)', x.status === 201 && e2.status === 201 && e3.status === 201 && db.lista_espera.length === 3, `${x.status} ${e2.status} ${e3.status} filas=${db.lista_espera.length}`);
-  anotar('Se guarda solo espacio y correo (en minúsculas), sin día ni turno', db.lista_espera.some(f => f.email === 'espera1@example.com' && f.espacio_id === 3 && !('fecha' in f)));
+  anotar('Tres personas se anotan para noviembre (dos al Frente, una al Altillo)', x.status === 201 && e2.status === 201 && e3.status === 201 && db.lista_espera.length === 3, `${x.status} ${e2.status} ${e3.status} filas=${db.lista_espera.length}`);
+  anotar('Se guarda espacio, mes, nombre (sin espacios de más) y correo en minúsculas, sin día ni turno',
+    db.lista_espera.some(f => f.email === 'espera1@example.com' && f.espacio_id === 3 && f.mes === '2026-11' && f.nombre === 'Ana María Espera' && !('fecha' in f)) &&
+    db.lista_espera.some(f => f.email === 'espera2@example.com' && f.nombre === 'Beto Ruiz'), JSON.stringify(db.lista_espera));
+  const confLE = correos().filter(c => c.to[0].email === 'espera1@example.com' && c.subject.startsWith('Lista de espera del Frente'));
+  anotar('Confirmación: asunto claro con el mes, saludo con el primer nombre, solo texto',
+    confLE.length === 1 && confLE[0].subject === 'Lista de espera del Frente: te avisamos si se libera un lugar en noviembre de 2026' &&
+    confLE[0].textContent.startsWith('Hola, Ana:') && confLE[0].htmlContent === undefined, confLE[0] && confLE[0].subject);
   x = await anotarse('espera1@example.com');
-  anotar('Anotarse dos veces al mismo espacio no duplica', x.status === 201 && db.lista_espera.filter(f => f.email === 'espera1@example.com').length === 1, String(db.lista_espera.length));
-  const listaMalas = [await anotarse('no-es-correo'), await anotarse('t@example.com', 2), await anotarse('t@example.com', 9), await anotarse('')];
-  anotar('Correo inválido, espacio cerrado o inexistente = 400', listaMalas.every(m => m.status === 400), listaMalas.map(m => `${m.status} ${m.datos.error}`).join(' ; '));
+  anotar('Anotarse dos veces al mismo espacio y mes no duplica', x.status === 201 && db.lista_espera.filter(f => f.email === 'espera1@example.com').length === 1, String(db.lista_espera.length));
+  const listaMalas = [await anotarse('no-es-correo'), await anotarse('t@example.com', 2), await anotarse('t@example.com', 9), await anotarse(''),
+    await anotarse('t@example.com', 3, undefined, { nombre: '' }), await anotarse('t@example.com', 3, undefined, { nombre: 'A' }), await anotarse('t@example.com', 3, undefined, { nombre: ['x'] }),
+    await anotarse('t@example.com', 3, undefined, { mes: '2026-12' }), await anotarse('t@example.com', 3, undefined, { mes: '2026-10' }),
+    await anotarse('t@example.com', 3, undefined, { mes: '2026-13' }), await anotarse('t@example.com', 3, undefined, { mes: undefined })];
+  anotar('400 si: correo inválido, espacio cerrado o inexistente, sin nombre, mes no habilitado (dic.), mes pasado (oct.), mes inválido o sin mes',
+    listaMalas.every(m => m.status === 400), listaMalas.map(m => `${m.status} ${m.datos.error}`).join(' ; '));
+  // Alguien anotado para diciembre (de antes de que se deshabilitara): no tiene que recibir el aviso de noviembre
+  db.lista_espera.push({ id: 949, espacio_id: 3, email: 'diciembre@example.com', nombre: 'Dani', mes: '2026-12', creado_en: new Date(ahoraFalso()).toISOString(), avisado_en: null });
 
   const antes = correos().length;
   x = await llamar('POST', `/api/admin/cancelar/${R.llenoD.id}`, { rol: 'admin', cuerpo: { motivo: 'prueba' } });
   await esperar(500);
-  const avisos = correos().slice(antes).filter(c => c.subject.includes('Se liberó un turno'));
-  anotar('Se cancela una reserva del Frente: avisan a los 2 anotados al Frente (no al del Altillo)', x.status === 200 && avisos.map(c => c.to[0].email).sort().join() === 'espera1@example.com,espera2@example.com', avisos.map(c => c.to[0].email).join());
-  anotar('Asunto con día, turno y número de reserva (no se agrupan en Gmail), sin emoji, y SOLO texto (sin HTML, para no caer en Promociones)', avisos[0] && avisos[0].subject === `Se liberó un turno en el Frente: viernes 20/11/2026, Desayuno (07:00 - 10:00) (aviso #${R.llenoD.id})` && !/[\u{1F300}-\u{1FAFF}]/u.test(avisos[0].subject) && (avisos[0].textContent || '').includes('https://reservas.ceq-una.com/?fecha=2026-11-20&espacio=3') && avisos[0].htmlContent === undefined, avisos[0] && avisos[0].subject);
-  anotar('El aviso dice qué día y turno se liberó y trae el enlace directo', avisos[0] && avisos[0].subject.includes('Frente') && avisos[0].textContent.includes('viernes 20/11/2026') && avisos[0].textContent.includes('Desayuno') && avisos[0].textContent.includes('https://reservas.ceq-una.com/?fecha=2026-11-20&espacio=3'), avisos[0] && avisos[0].subject);
-  anotar('Quedan marcadas como avisadas; la del Altillo sigue pendiente', db.lista_espera.filter(f => f.espacio_id === 3).every(f => f.avisado_en) && db.lista_espera.find(f => f.email === 'espera3@example.com').avisado_en === null);
+  const avisos = correos().slice(antes).filter(c => c.subject.startsWith('Se liberó un lugar'));
+  anotar('Se cancela una reserva del Frente de noviembre: avisan a los 2 anotados al Frente para noviembre (no al del Altillo ni al de diciembre)',
+    x.status === 200 && avisos.map(c => c.to[0].email).sort().join() === 'espera1@example.com,espera2@example.com', avisos.map(c => c.to[0].email).join());
+  const avisoAna = avisos.find(c => c.to[0].email === 'espera1@example.com');
+  anotar('Asunto corto con día y turno, sin emoji, y SOLO texto (sin HTML, para no caer en Promociones)',
+    avisoAna && avisoAna.subject === 'Se liberó un lugar en el Frente: viernes 20/11, Desayuno' && !/[\u{1F300}-\u{1FAFF}]/u.test(avisoAna.subject) && avisoAna.htmlContent === undefined, avisoAna && avisoAna.subject);
+  anotar('El aviso saluda por el nombre, dice día y horario, trae el enlace directo y el mes de la inscripción',
+    avisoAna && avisoAna.textContent.startsWith('Hola, Ana:') && avisoAna.textContent.includes('Día: viernes 20/11/2026') && avisoAna.textContent.includes('Desayuno') &&
+    avisoAna.textContent.includes('https://reservas.ceq-una.com/?fecha=2026-11-20&espacio=3') && avisoAna.textContent.includes('para noviembre de 2026'), avisoAna && avisoAna.textContent);
+  anotar('Quedan marcadas como avisadas; la del Altillo y la de diciembre siguen pendientes',
+    db.lista_espera.filter(f => f.espacio_id === 3 && f.mes === '2026-11').every(f => f.avisado_en) && db.lista_espera.find(f => f.email === 'espera3@example.com').avisado_en === null &&
+    db.lista_espera.find(f => f.id === 949).avisado_en === null);
   const antes2 = correos().length;
   x = await llamar('POST', '/api/cancelar-por-codigo', { cuerpo: { codigo: 'codigo12' } });
   await esperar(500);
-  anotar('Otra cancelación del Frente: no se vuelve a avisar (un solo aviso por inscripción)', x.status === 200 && !correos().slice(antes2).some(c => c.subject.includes('Se liberó un turno')), String(x.status));
+  anotar('Otra cancelación del Frente: no se vuelve a avisar (un solo aviso por inscripción)', x.status === 200 && !correos().slice(antes2).some(c => c.subject.startsWith('Se liberó un lugar')), String(x.status));
   x = await anotarse('espera1@example.com');
   anotar('Volver a anotarse reactiva la inscripción', x.status === 201 && db.lista_espera.find(f => f.email === 'espera1@example.com').avisado_en === null);
   const antes3 = correos().length;
   await llamar('POST', `/api/admin/cancelar/${R.altillo.id}`, { rol: 'admin', cuerpo: {} });
   await esperar(500);
-  const avisos3 = correos().slice(antes3).filter(c => c.subject.includes('Se liberó un turno'));
-  anotar('Se cancela una del Altillo: avisan solo al anotado al Altillo', avisos3.map(c => c.to[0].email).join() === 'espera3@example.com' && avisos3[0].subject.includes('Altillo'), avisos3.map(c => c.to[0].email).join());
+  const avisos3 = correos().slice(antes3).filter(c => c.subject.startsWith('Se liberó un lugar'));
+  anotar('Se cancela una del Altillo: avisan solo al anotado al Altillo (asunto con el horario)', avisos3.map(c => c.to[0].email).join() === 'espera3@example.com' && avisos3[0].subject === 'Se liberó un lugar en el Altillo: miércoles 18/11, 09:00 a 11:00', avisos3.map(c => c.subject).join());
+  db.lista_espera.splice(db.lista_espera.findIndex(f => f.id === 949), 1);
   const haceDias = d => new Date(ahoraFalso() - d * 86400000).toISOString();
-  db.lista_espera.push({ id: 950, espacio_id: 3, email: 'avisado-viejo@example.com', creado_en: haceDias(20), avisado_en: haceDias(10) });
-  db.lista_espera.push({ id: 951, espacio_id: 3, email: 'pendiente-viejo@example.com', creado_en: haceDias(70), avisado_en: null });
-  db.lista_espera.push({ id: 952, espacio_id: 3, email: 'avisado-reciente@example.com', creado_en: haceDias(3), avisado_en: haceDias(2) });
+  db.lista_espera.push({ id: 950, espacio_id: 3, email: 'avisado-viejo@example.com', mes: '2026-11', creado_en: haceDias(20), avisado_en: haceDias(10) });
+  db.lista_espera.push({ id: 951, espacio_id: 3, email: 'pendiente-viejo@example.com', mes: '2026-11', creado_en: haceDias(70), avisado_en: null });
+  db.lista_espera.push({ id: 952, espacio_id: 3, email: 'avisado-reciente@example.com', mes: '2026-11', creado_en: haceDias(3), avisado_en: haceDias(2) });
   const antes4 = correos().length;
   await llamar('POST', `/api/admin/cancelar/${R.hoy.id}`, { rol: 'admin', cuerpo: {} });
   await esperar(2300);
-  anotar('Si el turno liberado ya empezó (hoy 07:00, son las 10:00), no se avisa', !correos().slice(antes4).some(c => c.subject.includes('Se liberó un turno')) && db.lista_espera.find(f => f.email === 'espera1@example.com').avisado_en === null);
+  anotar('Si el turno liberado ya empezó (hoy 07:00, son las 10:00), no se avisa', !correos().slice(antes4).some(c => c.subject.startsWith('Se liberó un lugar')) && db.lista_espera.find(f => f.email === 'espera1@example.com').avisado_en === null);
   anotar('Limpieza: se borran las avisadas hace más de 7 días y las pendientes de más de 60', !db.lista_espera.some(f => f.id === 950 || f.id === 951) && db.lista_espera.some(f => f.id === 952) && db.lista_espera.some(f => f.email === 'espera1@example.com'), db.lista_espera.map(f => f.id).join(','));
 
   // ===== Apertura programada =====

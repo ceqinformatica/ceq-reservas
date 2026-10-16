@@ -53,7 +53,7 @@ const db = {
 };
 // 61 inscriptos en la lista del Frente, uno con un correo que Brevo rechaza
 for (let i = 1; i <= 61; i++) {
-  db.lista_espera.push({ id: i, espacio_id: 3, email: i === 3 ? 'falla-brevo@example.com' : `espera${i}@example.com`,
+  db.lista_espera.push({ id: i, espacio_id: 3, email: i === 3 ? 'falla-brevo@example.com' : `espera${i}@example.com`, mes: '2026-11',
     creado_en: new Date(Date.UTC(2026, 10, 10, 12, i)).toISOString(), avisado_en: null });
 }
 const mini = crearMiniPostgrest(db, {

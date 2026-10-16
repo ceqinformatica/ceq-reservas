@@ -105,7 +105,7 @@ const valorConfig = clave => (db.configuracion.find(c => c.clave === clave) || {
   await esperar(1500); // relee la configuración
   ponerHora('2027-01-01T11:10:00Z');
   await esperar(2500);
-  anotar('Si el envío falla, no sale ninguna copia (y se reintenta después)', !copias().some(c => c.subject.includes('enero 2027')) && ['2026-12', '2027-01'].includes(valorConfig('copia_mensual_enviada')), valorConfig('copia_mensual_enviada'));
+  anotar('Si el envío falla, no sale ninguna copia (y se reintenta después)', !copias().some(c => c.subject.includes('enero 2027')) && (['2026-12', '2027-01'].includes(valorConfig('copia_mensual_enviada')) || /^2027-01\|enviando\|/.test(valorConfig('copia_mensual_enviada'))), valorConfig('copia_mensual_enviada'));
   db.configuracion.find(c => c.clave === 'email_alertas').valor = 'alertas@example.com';
   await esperar(2500);
   anotar('Cuando el correo vuelve a andar, se manda', copias().some(c => c.subject.includes('enero 2027')) && valorConfig('copia_mensual_enviada') === '2027-01', valorConfig('copia_mensual_enviada'));

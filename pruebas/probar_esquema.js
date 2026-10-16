@@ -84,9 +84,36 @@ const anotar = (nombre, ok, detalle = '') => resultados.push({ nombre, ok, detal
   const lista = n => JSON.stringify(Array.from({ length: n }, (_, i) => ({ nombre: 'A' + i, celular: '098100000' + i })));
   anotar('Altillo con 4 acompañantes: permitido', await ok(`update reservas set acompanantes = '${lista(4)}' where id = ${idAltillo}`) === 'ok');
   anotar('Altillo con 5 acompañantes: rechazado (23514)', await ok(`update reservas set acompanantes = '${lista(5)}' where id = ${idAltillo}`) === '23514');
-  anotar('Lista de espera: un correo por espacio (23505 si se repite)', await ok(`insert into lista_espera (espacio_id, email) values (3, 'a@b.com')`) === 'ok'
-    && await ok(`insert into lista_espera (espacio_id, email) values (3, 'a@b.com')`) === '23505'
-    && await ok(`insert into lista_espera (espacio_id, email) values (1, 'a@b.com')`) === 'ok');
+  anotar('Lista de espera: una inscripción por correo, espacio y mes (23505 si se repite)', await ok(`insert into lista_espera (espacio_id, email, nombre, mes) values (3, 'a@b.com', 'Ana', '2026-11')`) === 'ok'
+    && await ok(`insert into lista_espera (espacio_id, email, mes) values (3, 'a@b.com', '2026-11')`) === '23505'
+    && await ok(`insert into lista_espera (espacio_id, email, mes) values (3, 'a@b.com', '2026-12')`) === 'ok'
+    && await ok(`insert into lista_espera (espacio_id, email, mes) values (1, 'a@b.com', '2026-11')`) === 'ok');
+  const malasLE = [await ok(`insert into lista_espera (espacio_id, email) values (3, 'sin-mes@b.com')`),
+    await ok(`insert into lista_espera (espacio_id, email, mes) values (3, 'x@b.com', '2026-13')`),
+    await ok(`insert into lista_espera (espacio_id, email, nombre, mes) values (3, 'y@b.com', 'A', '2026-11')`)];
+  anotar('Lista de espera: sin mes, mes inválido o nombre de 1 letra se rechazan', malasLE.join() === '23502,23514,23514', malasLE.join());
+
+  // La migración de la lista de espera sobre la tabla vieja (con una inscripción ya guardada)
+  try {
+    const vieja = new PGlite();
+    await vieja.exec(`create table espacios (id bigint primary key); insert into espacios values (1), (3);
+      create table lista_espera (id bigint generated always as identity primary key, espacio_id bigint not null references espacios(id),
+        email text not null, creado_en timestamptz not null default now(), avisado_en timestamptz, unique (espacio_id, email));
+      insert into lista_espera (espacio_id, email, creado_en) values (3, 'vieja@b.com', '2026-10-31 23:30:00-03');`
+      .replace(/ espacios/g, ' public.espacios').replace(/table lista_espera/g, 'table public.lista_espera').replace(/into lista_espera/g, 'into public.lista_espera'));
+    const migracion = fs.readFileSync(path.join(path.dirname(archivoSql), 'migracion-lista-espera-por-mes.sql'), 'utf8');
+    await vieja.exec(migracion);
+    await vieja.exec(migracion); // se puede correr dos veces
+    const fila = (await vieja.query(`select mes, nombre from public.lista_espera where email = 'vieja@b.com'`)).rows[0];
+    let repetida = 'ok';
+    try { await vieja.query(`insert into public.lista_espera (espacio_id, email, mes) values (3, 'vieja@b.com', '2026-10')`); } catch (e) { repetida = e.code; }
+    let otroMes = 'ok';
+    try { await vieja.query(`insert into public.lista_espera (espacio_id, email, mes) values (3, 'vieja@b.com', '2026-11')`); } catch (e) { otroMes = e.code; }
+    anotar('Migración de la lista de espera: corre dos veces, la inscripción vieja queda con su mes (hora de Paraguay) y sin nombre',
+      fila && fila.mes === '2026-10' && fila.nombre === null && repetida === '23505' && otroMes === 'ok', JSON.stringify({ fila, repetida, otroMes }));
+  } catch (e) {
+    anotar('Migración de la lista de espera', false, e.message);
+  }
 
   // Función crear_reserva_con_cupo (CEQ-02): cuenta el límite del mes y guarda en un solo paso
   const cupo = (fecha, ini, fin, contacto, email, celular, limite = 2, espacio = 3) =>

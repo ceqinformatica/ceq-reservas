@@ -82,9 +82,9 @@ async function pedir(metodo, ruta, cuerpo, { admin = false } = {}) {
   await esperar(800);
 
   // ===== 1. Lista de espera: confirmación con enlace para salir =====
-  let r = await pedir('POST', '/api/lista-espera', { espacio_id: 3, email: 'Espera@Example.com' });
-  await hasta(() => correos().some(c => c.subject.includes('lista de espera')));
-  const conf = correos().find(c => c.subject === 'Te anotaste en la lista de espera del Frente');
+  let r = await pedir('POST', '/api/lista-espera', { espacio_id: 3, email: 'Espera@Example.com', nombre: 'Elena Espera', mes: '2026-11' });
+  await hasta(() => correos().some(c => c.subject.startsWith('Lista de espera')));
+  const conf = correos().find(c => c.subject === 'Lista de espera del Frente: te avisamos si se libera un lugar en noviembre de 2026');
   const enlace = conf && (conf.textContent.match(/https:\/\/reservas\.ceq-una\.com\/lista-espera\.html\?\S+/) || [])[0];
   anotar('Al anotarse llega una confirmación', r.status === 201 && !!conf, `${r.status} ${correos().map(c => c.subject).join(' | ')}`);
   anotar('La confirmación es solo texto (sin HTML) y trae el enlace para salir', conf && conf.htmlContent === undefined && !!enlace, conf && conf.textContent);

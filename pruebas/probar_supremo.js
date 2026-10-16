@@ -40,8 +40,8 @@ const db = {
   configuracion: [{ clave: 'version_sesiones', valor: '1' }],
   registro_actividad: [], bloqueos: [], reportes_errores: [], correos_pendientes: [],
   lista_espera: [
-    { id: 801, espacio_id: 3, email: 'paula@example.com', creado_en: '2026-11-05T12:00:00Z', avisado_en: null },
-    { id: 802, espacio_id: 1, email: 'otro@example.com', creado_en: '2026-11-06T12:00:00Z', avisado_en: null }
+    { id: 801, espacio_id: 3, email: 'paula@example.com', nombre: 'Paula Pérez', mes: '2026-11', creado_en: '2026-11-05T12:00:00Z', avisado_en: null },
+    { id: 802, espacio_id: 1, email: 'otro@example.com', nombre: 'Otro', mes: '2026-11', creado_en: '2026-11-06T12:00:00Z', avisado_en: null }
   ]
 };
 const mini = crearMiniPostgrest(db, {
