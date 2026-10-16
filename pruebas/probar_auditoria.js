@@ -176,6 +176,16 @@ const reservasDe = email => db.reservas.filter(r => String(r.contacto).toLowerCa
   r = await pedir('POST', '/api/bloqueos', { espacio_id: 3, fecha: '2026-02-30', hora_inicio: '07:00', hora_fin: '10:00' }, { admin: true });
   anotar('Bloqueo en una fecha que no existe (30/02): rechazado', r.status === 400, String(r.status));
 
+  // ===== Cancelar con el código en dos pasos: primero se consultan los datos =====
+  r = await pedir('POST', '/api/cancelar-por-codigo/consultar', { codigo: 'altillomastarde' });
+  anotar('Consultar con el código: muestra la reserva, saluda por el primer nombre y "se puede cancelar"',
+    r.status === 200 && r.datos.id === 802 && r.datos.se_puede_cancelar === true && typeof r.datos.nombre === 'string' && !/@|\|/.test(JSON.stringify(r.datos)), JSON.stringify(r.datos));
+  anotar('...y consultar no cancela nada', db.reservas.find(x => x.id === 802).estado === 'activa');
+  r = await pedir('POST', '/api/cancelar-por-codigo/consultar', { codigo: 'ALTILLOTERMINADO' });
+  anotar('Consultar una que ya terminó: avisa que ya pasó y no deja cancelar', r.status === 200 && r.datos.ya_paso === true && r.datos.se_puede_cancelar === false, JSON.stringify(r.datos));
+  const malasC = [await pedir('POST', '/api/cancelar-por-codigo/consultar', { codigo: 'NOEXISTE123' }), await pedir('POST', '/api/cancelar-por-codigo/consultar', {}), await pedir('POST', '/api/cancelar-por-codigo/consultar', { codigo: ['x'] })];
+  anotar('Código inexistente: 404; sin código o con otro tipo: 400', malasC.map(m => m.status).join() === '404,400,400', malasC.map(m => m.status).join());
+
   // ===== CEQ-05: no se cancela un turno que ya terminó =====
   r = await pedir('POST', '/api/cancelar-por-codigo', { codigo: 'ALTILLOTERMINADO' });
   anotar('Altillo de hoy 08:00-09:00, a las 10:00: no se puede cancelar', r.status === 400 && /ya pasó/.test(r.datos.error), `${r.status} ${r.datos.error}`);

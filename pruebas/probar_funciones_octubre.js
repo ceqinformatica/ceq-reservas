@@ -179,7 +179,8 @@ const actividad = () => db.registro_actividad.map(a => `${a.rol}|${a.accion}|${a
   const tokUno = tokenEsperado(R.uno.id);
   x = await llamar('GET', `/api/cancelar-por-enlace?r=${R.uno.id}&t=${tokUno}`);
   anotar('GET enlace válido: datos mínimos y "se puede cancelar"', x.status === 200 && x.datos.se_puede_cancelar === true && x.datos.espacio === 'Frente' && x.datos.horario.startsWith('Desayuno') && x.datos.fecha_larga === 'miércoles 18/11/2026', JSON.stringify(x.datos));
-  anotar('No muestra nombre, celular ni correo', !JSON.stringify(x.datos).match(/persona1|0981111111|Persona/));
+  // Para el saludo ("Hola, Persona"): solo el primer nombre, sin apellido, celular ni correo
+  anotar('Trae solo el primer nombre para saludar (sin apellido, celular ni correo)', x.datos.nombre === 'Persona' && !JSON.stringify(x.datos).match(/persona\d|@example|0981|Persona \d/), JSON.stringify(x.datos));
   const malos = [await llamar('GET', `/api/cancelar-por-enlace?r=${R.reciente.id}&t=${tokUno}`), await llamar('GET', `/api/cancelar-por-enlace?r=${R.uno.id}&t=${'A'.repeat(32)}`), await llamar('GET', `/api/cancelar-por-enlace?r=abc&t=${tokUno}`), await llamar('POST', '/api/cancelar-por-enlace', { cuerpo: { r: R.reciente.id, t: tokUno } })];
   anotar('Enlace de otra reserva, firma falsa o número inválido: 404 y no cancela nada', malos.every(m => m.status === 404) && fila(R.reciente.id).estado === 'activa', malos.map(m => m.status).join(','));
   x = await llamar('GET', `/api/cancelar-por-enlace?r=${R.manana.id}&t=${tokenEsperado(R.manana.id)}`);
