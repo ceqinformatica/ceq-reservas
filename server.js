@@ -124,6 +124,11 @@ const supabase = createClient(SUPABASE_URL, SUPABASE_KEY);
 // Configuración Brevo (envío de emails)
 const BREVO_API_KEY = process.env.BREVO_API_KEY;
 const EMAIL_MODERADOR = process.env.EMAIL_MODERADOR || 'ceq.informatica@gmail.com';
+// Correo de contacto que ve la gente (en los correos y en los "Responder a"). Desde el 16/10/2026
+// reservas@ceq-una.com recibe correos (Cloudflare los reenvía a ceq.informatica@gmail.com) y la
+// Secretaría responde desde esa misma dirección. EMAIL_MODERADOR sigue siendo a quién le llegan
+// los avisos internos.
+const CORREO_CONTACTO = 'reservas@ceq-una.com';
 // Email específico para avisos del espacio Frente (si no se configura, usa el general)
 const EMAIL_MODERADOR_FRENTE = process.env.EMAIL_MODERADOR_FRENTE || EMAIL_MODERADOR;
 
@@ -357,7 +362,7 @@ function enlaceWhatsappFrente() {
 // Frente: email de contacto + WhatsApp. Altillo: solo el email general del moderador.
 // A quién responde la persona que reservó: Frente -> su contacto (configurable); el resto -> correo general
 function correoRespuesta(espacio_id) {
-  return Number(espacio_id) === 3 ? config.contacto_email_frente : EMAIL_MODERADOR;
+  return Number(espacio_id) === 3 ? config.contacto_email_frente : CORREO_CONTACTO;
 }
 
 // Correo de la persona que reservó ("celular | email"), para que el moderador le responda directo
@@ -370,7 +375,7 @@ function getContactoLineaHtml(espacio_id) {
   if (Number(espacio_id) === 3) {
     return `${escapeHtml(config.contacto_email_frente)} o por <a href="${enlaceWhatsappFrente()}">WhatsApp</a>`;
   }
-  return `${EMAIL_MODERADOR}`;
+  return CORREO_CONTACTO;
 }
 
 // Función helper para enviar emails vía la API de Brevo.
@@ -378,8 +383,8 @@ function getContactoLineaHtml(espacio_id) {
 // endpoints responden al usuario de inmediato y el email sale en segundo plano,
 // en vez de hacer esperar al usuario varios segundos a que conteste Brevo.
 // `text` (opcional): versión en texto simple que va junto al HTML.
-// `responderA` (opcional): a quién le llega si se toca "Responder". reservas@ceq-una.com no tiene
-// buzón (las respuestas rebotaban), así que por defecto las respuestas van al correo general.
+// `responderA` (opcional): a quién le llega si se toca "Responder". Por defecto, a reservas@ceq-una.com
+// (CORREO_CONTACTO), que desde el 16/10/2026 sí recibe (antes no tenía buzón y las respuestas rebotaban).
 // `adjuntos` (opcional): [{ name, content }] con content en base64.
 async function enviarEmail({ to, subject, html, text, responderA, adjuntos }) {
   try {
@@ -397,7 +402,7 @@ async function enviarEmail({ to, subject, html, text, responderA, adjuntos }) {
         subject,
         // Sin HTML se manda solo el texto (algunos correos van así a propósito, ver la lista de espera)
         ...(html ? { htmlContent: html } : {}),
-        replyTo: { email: EMAIL_REGEX.test(String(responderA || '')) ? responderA : EMAIL_MODERADOR },
+        replyTo: { email: EMAIL_REGEX.test(String(responderA || '')) ? responderA : CORREO_CONTACTO },
         ...(text ? { textContent: text } : {}),
         ...(adjuntos && adjuntos.length ? { attachment: adjuntos } : {})
       }),
@@ -1616,7 +1621,7 @@ async function cancelarComoUsuario(reserva, res) {
     });
 
     return res.status(403).json({
-      error: 'EL PERIODO DE CANCELACION GRATUITA HA FINALIZADO. SI DESEA REALIZAR LA CANCELACION CONTACTESE CON ceq.informatica@gmail.com'
+      error: 'EL PERIODO DE CANCELACION GRATUITA HA FINALIZADO. SI DESEA REALIZAR LA CANCELACION CONTACTESE CON reservas@ceq-una.com'
     });
   }
 
