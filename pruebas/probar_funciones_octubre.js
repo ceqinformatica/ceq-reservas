@@ -186,6 +186,8 @@ const actividad = () => db.registro_actividad.map(a => `${a.rol}|${a.accion}|${a
   x = await llamar('GET', `/api/cancelar-por-enlace?r=${R.manana.id}&t=${tokenEsperado(R.manana.id)}`);
   const y = await llamar('POST', '/api/cancelar-por-enlace', { cuerpo: { r: R.manana.id, t: tokenEsperado(R.manana.id) } });
   anotar('Frente para mañana: avisa plazo vencido (con WhatsApp) y no la cancela (403)', x.datos.plazo_vencido === true && x.datos.se_puede_cancelar === false && x.datos.whatsapp === '595981000000' && y.status === 403 && fila(R.manana.id).estado === 'activa', `${JSON.stringify(x.datos)} ${y.status}`);
+  anotar('...y da el correo del contacto del Frente para pedir la cancelación (en la página y en el mensaje)',
+    x.datos.correo_contacto === 'Monsegonza511@gmail.com' && /CONTACTESE CON Monsegonza511@gmail\.com$/.test(y.datos.error || ''), `${x.datos.correo_contacto} | ${y.datos.error}`);
   x = await llamar('POST', '/api/cancelar-por-enlace', { cuerpo: { r: R.uno.id, t: tokUno } });
   anotar('POST con el enlace: cancela y guarda "usuario"', x.status === 200 && fila(R.uno.id).estado === 'cancelada' && fila(R.uno.id).cancelada_por === 'usuario', `${x.status} ${JSON.stringify(x.datos)}`);
   x = await llamar('POST', '/api/cancelar-por-enlace', { cuerpo: { r: R.uno.id, t: tokUno } });
