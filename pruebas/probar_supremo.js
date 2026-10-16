@@ -198,6 +198,12 @@ const reservar = extra => pedir('POST', '/api/reservas', { espacio_id: 1, nombre
   const act = db.registro_actividad.find(a => a.accion === 'Borró los datos de una persona');
   anotar('El registro de actividad no guarda datos personales', act && !/paula|0981|777/i.test(JSON.stringify(act)), JSON.stringify(act));
   r = await pedir('POST', '/api/superadmin/persona/borrar', { q: 'paula@example.com', confirmar: 'BORRAR' }, 'superadmin');
+  // CEQ-08: la lista de espera del admin supremo se lee de a páginas (más de 1000 filas)
+  const antesLista = db.lista_espera.length;
+  for (let i = 0; i < 1100; i++) db.lista_espera.push({ id: 20000 + i, espacio_id: 3, email: `masivo${i}@example.com`, creado_en: '2026-11-07T12:00:00Z', avisado_en: null });
+  const rLista = await pedir('GET', '/api/superadmin/lista-espera', null, 'superadmin');
+  anotar('La lista de espera trae todas las filas aunque sean más de 1000', rLista.status === 200 && rLista.datos.length === antesLista + 1100, `${rLista.status} ${rLista.datos.length}`);
+  db.lista_espera.splice(antesLista);
   anotar('Repetir el borrado no falla y no queda nada más', r.status === 200 && r.datos.reservas === 0 && r.datos.lista_espera === 0 && r.datos.correos === 0, JSON.stringify(r.datos));
 
   hijo.kill();
