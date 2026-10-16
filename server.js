@@ -1710,21 +1710,57 @@ app.get('/api/cancelar-por-enlace', cancelarLimiter, async (req, res) => {
   try {
     const reserva = await reservaDelEnlace(res, req.query.r, req.query.t);
     if (!reserva) return;
-    const dias = diferenciaEnDiasCalendario(reserva.fecha);
-    const plazoVencido = Number(reserva.espacio_id) === 3 && dias < 2;
-    const yaPaso = reservaYaTermino(reserva);
     res.set('Cache-Control', 'no-store');
-    res.json({
-      id: reserva.id,
-      espacio: getEspacioNombre(reserva.espacio_id),
-      fecha_larga: fechaLarga(reserva.fecha),
-      horario: descripcionHorario(reserva.espacio_id, reserva.hora_inicio.substring(0, 5), reserva.hora_fin.substring(0, 5)),
-      estado: reserva.estado,
-      ya_paso: yaPaso,
-      se_puede_cancelar: reserva.estado === 'activa' && !yaPaso && !plazoVencido,
-      plazo_vencido: reserva.estado === 'activa' && !yaPaso && plazoVencido,
-      whatsapp: Number(reserva.espacio_id) === 3 ? config.contacto_whatsapp_frente : null
-    });
+    res.json(datosParaCancelar(reserva));
+  } catch (error) {
+    manejarError(res, error);
+  }
+});
+
+// Lo que ve la persona antes de confirmar la cancelación (con el enlace o con el código)
+function datosParaCancelar(reserva) {
+  const dias = diferenciaEnDiasCalendario(reserva.fecha);
+  const plazoVencido = Number(reserva.espacio_id) === 3 && dias < 2;
+  const yaPaso = reservaYaTermino(reserva);
+  // Para saludar a la persona ("Hola, Ana"): solo el primer nombre, y nada si ya se anonimizó.
+  // El enlace y el código son personales (le llegan a su propio correo), así que no exponen
+  // datos de otras personas.
+  const nombre = String(reserva.nombre_solicitante || '').trim();
+  return {
+    id: reserva.id,
+    nombre: nombre && nombre !== NOMBRE_ANONIMIZADO ? nombre.split(/\s+/)[0].slice(0, 40) : '',
+    espacio: getEspacioNombre(reserva.espacio_id),
+    fecha_larga: fechaLarga(reserva.fecha),
+    horario: descripcionHorario(reserva.espacio_id, reserva.hora_inicio.substring(0, 5), reserva.hora_fin.substring(0, 5)),
+    estado: reserva.estado,
+    ya_paso: yaPaso,
+    se_puede_cancelar: reserva.estado === 'activa' && !yaPaso && !plazoVencido,
+    plazo_vencido: reserva.estado === 'activa' && !yaPaso && plazoVencido,
+    whatsapp: Number(reserva.espacio_id) === 3 ? config.contacto_whatsapp_frente : null
+  };
+}
+
+// Con el código: primero se muestran los datos de la reserva y la persona confirma; recién ahí
+// se llama a POST /api/cancelar-por-codigo. Esto solo consulta, no cancela nada. Va por POST
+// (no en la dirección) para que el código no quede en el historial ni en los registros, y con
+// el mismo límite de intentos que cancelar (no sirve para probar códigos al azar).
+app.post('/api/cancelar-por-codigo/consultar', cancelarLimiter, async (req, res) => {
+  try {
+    const { codigo } = req.body || {};
+    if (!codigo || typeof codigo !== 'string' || codigo.length > 64) {
+      return res.status(400).json({ error: 'Código requerido' });
+    }
+    const { data, error } = await supabase
+      .from('reservas')
+      .select('*')
+      .eq('codigo_cancelacion_hash', hashCodigo(codigo.trim().toUpperCase()))
+      .limit(1);
+    if (error) throw error;
+    if (!data || data.length === 0) {
+      return res.status(404).json({ error: 'Código no válido' });
+    }
+    res.set('Cache-Control', 'no-store');
+    res.json(datosParaCancelar(data[0]));
   } catch (error) {
     manejarError(res, error);
   }
