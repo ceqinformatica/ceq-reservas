@@ -1599,7 +1599,7 @@ async function cancelarComoUsuario(reserva, res) {
             <li>Fecha: ${reserva.fecha}</li>
             <li>Horario: ${descripcionHorario(reserva.espacio_id, reserva.hora_inicio.substring(0,5), reserva.hora_fin.substring(0,5))}</li>
           </ul>
-          <p>Si de todas formas deseás realizar la cancelación, contactate por WhatsApp: <a href="${enlaceWhatsappFrente()}">Contactar por WhatsApp</a></p>
+          <p>Si de todas formas deseás realizar la cancelación, escribí a ${escapeHtml(config.contacto_email_frente)} o contactate por WhatsApp: <a href="${enlaceWhatsappFrente()}">Contactar por WhatsApp</a></p>
         `
       });
     }
@@ -1621,7 +1621,9 @@ async function cancelarComoUsuario(reserva, res) {
     });
 
     return res.status(403).json({
-      error: 'EL PERIODO DE CANCELACION GRATUITA HA FINALIZADO. SI DESEA REALIZAR LA CANCELACION CONTACTESE CON reservas@ceq-una.com'
+      // Solo pasa en el Frente: el contacto es el del Frente (Configuración). La página busca
+      // "PERIODO DE CANCELACION" en este texto, no cambiar ese comienzo.
+      error: `EL PERIODO DE CANCELACION GRATUITA HA FINALIZADO. SI DESEA REALIZAR LA CANCELACION CONTACTESE CON ${config.contacto_email_frente}`
     });
   }
 
@@ -1741,7 +1743,9 @@ function datosParaCancelar(reserva) {
     ya_paso: yaPaso,
     se_puede_cancelar: reserva.estado === 'activa' && !yaPaso && !plazoVencido,
     plazo_vencido: reserva.estado === 'activa' && !yaPaso && plazoVencido,
-    whatsapp: Number(reserva.espacio_id) === 3 ? config.contacto_whatsapp_frente : null
+    whatsapp: Number(reserva.espacio_id) === 3 ? config.contacto_whatsapp_frente : null,
+    // A quién escribir si venció el plazo para cancelar (solo Frente: el contacto del Frente)
+    correo_contacto: Number(reserva.espacio_id) === 3 ? config.contacto_email_frente : null
   };
 }
 
