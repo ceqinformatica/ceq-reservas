@@ -400,7 +400,9 @@ async function enviarEmail({ to, subject, html, text, responderA, adjuntos }) {
         replyTo: { email: EMAIL_REGEX.test(String(responderA || '')) ? responderA : EMAIL_MODERADOR },
         ...(text ? { textContent: text } : {}),
         ...(adjuntos && adjuntos.length ? { attachment: adjuntos } : {})
-      })
+      }),
+      // Si Brevo no contesta, se corta a los 15 s (cuenta como fallo y la cola lo reintenta)
+      signal: AbortSignal.timeout(15000)
     });
 
     if (!res.ok) {
@@ -532,7 +534,9 @@ app.use(cors({
   ],
   credentials: true,
   methods: ['GET', 'POST', 'DELETE', 'PUT'],
-  allowedHeaders: ['Content-Type', 'Authorization', 'X-CSRF-Token']
+  allowedHeaders: ['Content-Type', 'Authorization', 'X-CSRF-Token'],
+  // Para que la página sepa cuánto esperar después de un 429 (CEQ-11)
+  exposedHeaders: ['Retry-After', 'RateLimit-Reset']
 }));
 
 // Limitar tamaño de payloads
@@ -582,9 +586,10 @@ const loginLimiter = rateLimit({
 
 const crearReservaLimiter = rateLimit({
   windowMs: 60 * 60 * 1000, // 1 hora
-  // Antes 15: en una red compartida (WiFi de facultad) varias personas salen con
-  // la misma IP pública, y el día que se habilita un mes nuevo reservan muchas a la vez.
-  max: 30,
+  // Antes 15 y después 30: en una red compartida (WiFi de facultad) varias personas salen
+  // con la misma IP pública, y el día que se habilita un mes nuevo reservan muchas a la vez.
+  // El límite real por persona lo pone el cupo mensual; este solo frena abusos automáticos.
+  max: 150,
   keyGenerator: obtenerIpCliente,
   handler: registrar429,
   standardHeaders: true,
@@ -684,17 +689,7 @@ function aIsoUtc(valor) {
 
 // El máximo de reservas activas por persona por mes (formulario público) ahora está en
 // config.max_reservas_por_persona_mes (se cambia desde el panel del admin supremo).
-
-// Emails exentos del límite anterior (ej. el de quien hace pruebas del sistema).
-// Se configuran en Render como variable de entorno, separados por coma:
-//   EMAILS_SIN_LIMITE=uno@gmail.com,otro@gmail.com
-// No se escriben acá en el código porque el repositorio es público.
-const EMAILS_SIN_LIMITE = new Set(
-  (process.env.EMAILS_SIN_LIMITE || '')
-    .split(',')
-    .map(e => e.trim().toLowerCase())
-    .filter(Boolean)
-);
+// Se aplica a todos por igual: ya no hay correos exentos.
 
 // A partir de un contacto "celular | email" devuelve { email, celular } normalizados,
 // para reconocer a la misma persona aunque escriba distinto el número
@@ -1115,44 +1110,48 @@ app.get('/api/reservas', lecturaPublicaLimiter, async (req, res) => {
   try {
     const { espacio_id, fecha } = req.query;
 
-    let query = supabase
-      .from('reservas')
-      .select('espacio_id, fecha, hora_inicio, hora_fin, nombre_solicitante, motivo')
-      .eq('estado', 'activa');
-    
-    if (espacio_id) query = query.eq('espacio_id', parseInt(espacio_id));
-    if (fecha) {
-      query = query.eq('fecha', fecha);
-    } else {
-      // Solo desde el primer día del mes actual (en Paraguay) en adelante. Antes se
-      // devolvían TODAS las reservas activas de la historia con un tope de 2000: cuando
-      // la base pasara ese número, el calendario iba a empezar a mostrar como libres
-      // turnos que en realidad estaban ocupados, sin ningún aviso. Se arranca desde el
-      // día 1 (y no desde hoy) para que el mes en curso se siga viendo completo.
-      const hoy = hoyEnAsuncion();
-      const primerDiaMes = `${hoy.getUTCFullYear()}-${String(hoy.getUTCMonth() + 1).padStart(2, '0')}-01`;
-      query = query.gte('fecha', primerDiaMes);
-    }
+    // Solo desde el primer día del mes actual (en Paraguay) en adelante. Antes se
+    // devolvían TODAS las reservas activas de la historia con un tope de 2000: cuando
+    // la base pasara ese número, el calendario iba a empezar a mostrar como libres
+    // turnos que en realidad estaban ocupados, sin ningún aviso. Se arranca desde el
+    // día 1 (y no desde hoy) para que el mes en curso se siga viendo completo.
+    // Se lee de a páginas (CEQ-08): ya no hay un tope que deje turnos ocupados afuera.
+    const primerDiaMes = primerDiaMesActual();
+    const armar = () => {
+      let query = supabase
+        .from('reservas')
+        .select('espacio_id, fecha, hora_inicio, hora_fin, nombre_solicitante, motivo')
+        .eq('estado', 'activa');
+      if (espacio_id) query = query.eq('espacio_id', parseInt(espacio_id));
+      query = fecha ? query.eq('fecha', fecha) : query.gte('fecha', primerDiaMes);
+      return query.order('fecha', { ascending: true }).order('id', { ascending: true });
+    };
 
-    const { data, error } = await query.limit(2000);
-    
-    if (error) throw error;
-    res.json(data || []);
+    res.json(await leerTodasLasFilas(armar, 20000));
   } catch (error) {
     manejarError(res, error);
   }
 });
 
-// GET bloqueos (público)
+// Primer día del mes actual en Paraguay ("2026-10-01")
+function primerDiaMesActual() {
+  const hoy = hoyEnAsuncion();
+  return `${hoy.getUTCFullYear()}-${String(hoy.getUTCMonth() + 1).padStart(2, '0')}-01`;
+}
+
+// GET bloqueos (público). Solo desde el mes actual y leído de a páginas (CEQ-08): antes
+// traía todos los de la historia con un tope de 1000, y pasado ese número los más nuevos
+// podían quedar afuera (el calendario mostraba libre un día bloqueado).
 app.get('/api/bloqueos', lecturaPublicaLimiter, async (req, res) => {
   try {
-    const { data, error } = await supabase
+    const desde = primerDiaMesActual();
+    const filas = await leerTodasLasFilas(() => supabase
       .from('bloqueos')
       .select('espacio_id, fecha, hora_inicio, hora_fin')
-      .limit(1000);
-    
-    if (error) throw error;
-    res.json(data || []);
+      .gte('fecha', desde)
+      .order('fecha', { ascending: true })
+      .order('id', { ascending: true }), 20000);
+    res.json(filas);
   } catch (error) {
     manejarError(res, error);
   }
@@ -1363,9 +1362,7 @@ app.post('/api/reservas', crearReservaLimiter, async (req, res) => {
     // celular, y no cuentan las canceladas ni las de prioridad del panel. El conteo y el guardado
     // los hace la base en un solo paso (función crear_reserva_con_cupo, CEQ-02): antes se contaba
     // acá y se guardaba aparte, y varios pedidos simultáneos podían pasar todos el límite.
-    const limiteCupo = espacioIdNum === 3 && !EMAILS_SIN_LIMITE.has(partesContacto[1].toLowerCase())
-      ? config.max_reservas_por_persona_mes
-      : null;
+    const limiteCupo = espacioIdNum === 3 ? config.max_reservas_por_persona_mes : null;
 
     // VAL-001: si la reserva es para hoy, el horario no puede haber pasado. En el Frente, el
     // turno no puede haber empezado; en el Altillo, el primer bloque de 1 hora no puede haber
@@ -1462,19 +1459,10 @@ app.post('/api/reservas', crearReservaLimiter, async (req, res) => {
     const motivoSeguro = escapeHtml(motivo);
     const contactoSeguro = escapeHtml(contacto);
     
-    // Se responde al usuario APENAS se guardó la reserva, y los emails se mandan
-    // después, en segundo plano. Antes se esperaba a Brevo (2 emails en serie) antes
-    // de contestar: la confirmación tardaba varios segundos, la gente creía que había
-    // fallado y volvía a reservar. encolarCorreo() nunca lanza error (lo captura y loguea).
-    res.status(201).json({
-      mensaje: 'Reserva creada exitosamente',
-      reserva: nuevaReserva[0],
-      codigo
-    });
-
     // Enviar email al usuario (si existe email)
+    const correos = [];
     if (email) {
-      encolarCorreo({
+      correos.push(encolarCorreo({
         to: email,
         subject: `✓ Confirmación de Reserva - CEQ #${reservaId}`,
         responderA: correoRespuesta(espacioIdNum),
@@ -1498,11 +1486,11 @@ app.post('/api/reservas', crearReservaLimiter, async (req, res) => {
           ${contactoLinea}
           <p>Centro de Estudiantes de Química</p>
         `
-      });
+      }));
     }
-    
+
     // Enviar email al moderador correspondiente (Altillo o Frente)
-    encolarCorreo({
+    correos.push(encolarCorreo({
       to: getEmailModerador(espacioIdNum),
       subject: `📌 Nueva Reserva (${nombreEspacio}) - CEQ #${reservaId}`,
       responderA: correoDeContacto(contacto),
@@ -1520,6 +1508,17 @@ app.post('/api/reservas', crearReservaLimiter, async (req, res) => {
           <li><strong>Código:</strong> ${codigo}</li>
         </ul>
       `
+    }));
+
+    // CEQ-06: se espera a que los correos queden guardados en la cola (es un insert en la base,
+    // rápido) y recién ahí se responde. Antes se respondía primero: si el servidor se reiniciaba
+    // justo en ese instante, la reserva quedaba guardada pero la persona nunca recibía su código.
+    // El envío a Brevo sigue en segundo plano. encolarCorreo() nunca lanza error.
+    await Promise.all(correos);
+    res.status(201).json({
+      mensaje: 'Reserva creada exitosamente',
+      reserva: nuevaReserva[0],
+      codigo
     });
   } catch (error) {
     manejarError(res, error);
@@ -1895,8 +1894,10 @@ async function avisarListaEspera(reserva) {
       // Con HTML, Brevo agrega la imagen de seguimiento de aperturas y Gmail lo mandaba a
       // "Promociones". El asunto lleva el día, el turno y el número de la reserva cancelada:
       // cada aviso tiene un asunto distinto y Gmail no los agrupa.
+      // Pasa por la cola como los demás correos (CEQ-06): si Brevo falla, se reintenta. Sin HTML
+      // en la cola, sale igual solo con texto. Si ni siquiera se pudo guardar, vuelve a pendiente.
       const dia = fechaLarga(reserva.fecha);
-      const enviado = await enviarEmail({
+      const enviado = await encolarCorreo({
         to: correo,
         subject: `Se liberó un turno en el ${espacio}: ${dia}, ${horario} (aviso #${reserva.id})`,
         responderA: correoRespuesta(reserva.espacio_id),
@@ -2345,8 +2346,11 @@ const MAX_DIAS_LOTE_BLOQUEOS = 184; // medio año
 
 // Valida el horario de un bloqueo para el espacio. Devuelve { completo } o lanza un Error.
 function validarHorarioBloqueo(espacioId, horaInicio, horaFin) {
+  // Estricto (CEQ-18): horas 00-23, minutos 00-59 y, si vienen segundos, tienen que ser 00.
+  // Antes "08:99" pasaba la forma y se convertía en 09:39 sin avisar.
+  const HORA_ESTRICTA = /^([01]\d|2[0-3]):([0-5]\d)(:00)?$/;
   if (typeof horaInicio !== 'string' || typeof horaFin !== 'string' ||
-      !/^\d{2}:\d{2}(:\d{2})?$/.test(horaInicio) || !/^\d{2}:\d{2}(:\d{2})?$/.test(horaFin)) {
+      !HORA_ESTRICTA.test(horaInicio) || !HORA_ESTRICTA.test(horaFin)) {
     throw new Error('Formato de hora inválido');
   }
   const aMin = hhmm => { const [h, m] = hhmm.split(':').map(Number); return h * 60 + m; };
@@ -3110,37 +3114,103 @@ function criterioPersona(q) {
   return digitos.length >= 7 ? { email: null, celular: digitos.slice(-9) } : null;
 }
 
+// Busca a la persona por el correo o el celular que se escribió y, además, por los otros datos
+// de contacto que ella misma dejó en sus reservas (CEQ-17): si se busca por correo, también se
+// encuentra dónde figura como acompañante (que se guarda por celular); si se busca por celular,
+// también su lista de espera (que se guarda por correo). Se amplía una sola vez, con lo que figura
+// en sus propias reservas, para no terminar sumando datos de otras personas.
+const celularDe = x => String(x || '').replace(/\D/g, '').slice(-9);
+
 async function buscarDatosPersona(criterio) {
   const reservas = await leerTodasLasFilas(() => supabase.from('reservas')
     .select('id, espacio_id, fecha, hora_inicio, hora_fin, nombre_solicitante, contacto, motivo, acompanantes, estado, reservado_por_admin, asistencia, created_at, cancelada_en, cancelada_por, motivo_cancelacion')
     .order('fecha', { ascending: true }).order('id', { ascending: true }));
-  const coincide = ident => (criterio.email && ident.email === criterio.email) || (criterio.celular && ident.celular === criterio.celular);
+  const emails = new Set(criterio.email ? [criterio.email] : []);
+  const celulares = new Set(criterio.celular ? [criterio.celular] : []);
+  const coincide = ident => (ident.email && emails.has(ident.email)) || (ident.celular && celulares.has(ident.celular));
+  const directas = reservas.filter(r => coincide(identidadContacto(r.contacto)));
+  for (const r of directas) {
+    const ident = identidadContacto(r.contacto);
+    if (ident.email) emails.add(ident.email);
+    if (ident.celular) celulares.add(ident.celular);
+  }
   const propias = reservas.filter(r => coincide(identidadContacto(r.contacto)));
-  const comoAcompanante = criterio.celular ? reservas.filter(r => !propias.includes(r) &&
-    (Array.isArray(r.acompanantes) ? r.acompanantes : []).some(a => String(a && a.celular || '').replace(/\D/g, '').slice(-9) === criterio.celular)) : [];
+  const esElla = a => celulares.has(celularDe(a && a.celular));
+  const comoAcompanante = celulares.size ? reservas.filter(r => !propias.includes(r) &&
+    (Array.isArray(r.acompanantes) ? r.acompanantes : []).some(esElla)) : [];
   let listaEspera = [];
-  if (criterio.email) {
-    const { data, error } = await supabase.from('lista_espera').select('id, espacio_id, email, creado_en, avisado_en').eq('email', criterio.email);
+  if (emails.size) {
+    const { data, error } = await supabase.from('lista_espera').select('id, espacio_id, email, creado_en, avisado_en').in('email', [...emails]);
     if (error) throw error;
     listaEspera = data || [];
   }
-  return { propias, comoAcompanante, listaEspera };
+  return { propias, comoAcompanante, listaEspera, emails: [...emails], celulares: [...celulares], esElla };
+}
+
+// Correos de la cola que todavía tienen contenido (sin mandar, mandándose o fallidos) y que son
+// para la persona o la mencionan (por ejemplo, el aviso al moderador de una reserva suya). Los ya
+// enviados no guardan contenido. Si la cola no se puede leer, devuelve null (no se sabe).
+async function correosDePersona(emails, contactos) {
+  try {
+    const filas = await leerTodasLasFilas(() => supabase.from('correos_pendientes')
+      .select('id, destinatarios, asunto, html, texto, estado')
+      .in('estado', ['pendiente', 'enviando', 'fallido'])
+      .order('id', { ascending: true }));
+    const buscar = [...emails, ...contactos.filter(c => c && c.length >= 7)].map(x => x.toLowerCase());
+    return filas.filter(f => {
+      const para = (Array.isArray(f.destinatarios) ? f.destinatarios : []).map(d => String(d).toLowerCase());
+      if (para.some(d => emails.includes(d))) return true;
+      const contenido = `${f.asunto || ''}\n${f.html || ''}\n${f.texto || ''}`.toLowerCase();
+      return buscar.some(x => contenido.includes(x));
+    });
+  } catch (err) {
+    console.error('⚠️ No se pudo revisar la cola de correos:', err && (err.message || err.code));
+    return null;
+  }
+}
+
+// Lo que se le entrega a la persona (botón "Descargar sus datos"): SOLO sus datos (CEQ-16). De sus
+// reservas no van los nombres ni los celulares de sus acompañantes (son datos de otras personas),
+// solo cuántos eran; de las reservas donde figura como acompañante va lo que ella misma es en esa
+// lista, sin el nombre de quien reservó.
+function entregaPersona({ propias, comoAcompanante, listaEspera, esElla }) {
+  return {
+    reservas: propias.map(r => ({
+      numero: r.id, espacio: getEspacioNombre(r.espacio_id), fecha: r.fecha,
+      hora_inicio: String(r.hora_inicio || '').slice(0, 5), hora_fin: String(r.hora_fin || '').slice(0, 5),
+      nombre: r.nombre_solicitante, contacto: r.contacto, motivo: r.motivo || '',
+      cantidad_acompanantes: Array.isArray(r.acompanantes) ? r.acompanantes.length : 0,
+      estado: r.estado, asistencia: r.asistencia || null, hecha_desde_el_panel: r.reservado_por_admin === true,
+      creada: aIsoUtc(r.created_at), cancelada_en: aIsoUtc(r.cancelada_en), motivo_cancelacion: r.motivo_cancelacion || null
+    })),
+    como_acompanante: comoAcompanante.map(r => ({
+      numero: r.id, espacio: getEspacioNombre(r.espacio_id), fecha: r.fecha,
+      hora_inicio: String(r.hora_inicio || '').slice(0, 5), hora_fin: String(r.hora_fin || '').slice(0, 5), estado: r.estado,
+      como_figura: (r.acompanantes || []).filter(esElla).map(a => ({ nombre: a.nombre || '', celular: a.celular || '' }))
+    })),
+    lista_espera: listaEspera.map(l => ({ espacio: getEspacioNombre(l.espacio_id), email: l.email, anotada: aIsoUtc(l.creado_en), avisada: aIsoUtc(l.avisado_en) }))
+  };
 }
 
 app.get('/api/superadmin/persona', verifyAdminToken, verifySuperAdmin, async (req, res) => {
   try {
     const criterio = criterioPersona(req.query.q);
     if (!criterio) return res.status(400).json({ error: 'Escribí un correo o un celular (al menos 7 números)' });
-    const { propias, comoAcompanante, listaEspera } = await buscarDatosPersona(criterio);
+    const datos = await buscarDatosPersona(criterio);
+    const { propias, comoAcompanante, listaEspera, esElla } = datos;
+    const correos = await correosDePersona(datos.emails, propias.map(r => r.contacto));
     res.set('Cache-Control', 'no-store');
     res.json({
       reservas: propias,
       como_acompanante: comoAcompanante.map(r => ({
         id: r.id, espacio_id: r.espacio_id, fecha: r.fecha, hora_inicio: r.hora_inicio, hora_fin: r.hora_fin, estado: r.estado,
         titular: r.nombre_solicitante,
-        acompanante: (r.acompanantes || []).filter(a => String(a && a.celular || '').replace(/\D/g, '').slice(-9) === criterio.celular)
+        acompanante: (r.acompanantes || []).filter(esElla)
       })),
-      lista_espera: listaEspera
+      lista_espera: listaEspera,
+      correos_en_cola: correos ? correos.length : null,
+      // Lo que se descarga para mandarle a la persona
+      entrega: entregaPersona(datos)
     });
   } catch (error) {
     manejarError(res, error);
@@ -3148,15 +3218,18 @@ app.get('/api/superadmin/persona', verifyAdminToken, verifySuperAdmin, async (re
 });
 
 // Borra los datos de la persona: sus reservas quedan anónimas (como a los 6 meses), se la quita
-// de las listas de acompañantes y de la lista de espera. Si tiene reservas activas a futuro, primero
-// hay que cancelarlas (así le llega el aviso y no queda un turno ocupado sin dueño).
+// de las listas de acompañantes, de la lista de espera y de los correos de la cola que todavía
+// guardan contenido (CEQ-17). Si tiene reservas activas a futuro, primero hay que cancelarlas
+// (así le llega el aviso y no queda un turno ocupado sin dueño). Se puede repetir: si algo falló
+// a la mitad, otra vez "Borrar" termina lo que faltó.
 app.post('/api/superadmin/persona/borrar', verifyAdminToken, verifySuperAdmin, verificarCSRF, async (req, res) => {
   try {
     const { q, confirmar } = req.body || {};
     const criterio = criterioPersona(q);
     if (!criterio) return res.status(400).json({ error: 'Escribí un correo o un celular (al menos 7 números)' });
     if (confirmar !== 'BORRAR') return res.status(400).json({ error: 'Para borrar hay que escribir BORRAR' });
-    const { propias, comoAcompanante, listaEspera } = await buscarDatosPersona(criterio);
+    const datos = await buscarDatosPersona(criterio);
+    const { propias, comoAcompanante, listaEspera, esElla } = datos;
     const hoy = hoyEnAsuncion().toISOString().slice(0, 10);
     const futuras = propias.filter(r => r.estado === 'activa' && r.fecha >= hoy);
     if (futuras.length) {
@@ -3165,26 +3238,53 @@ app.post('/api/superadmin/persona/borrar', verifyAdminToken, verifySuperAdmin, v
         reservas: futuras.map(r => ({ id: r.id, fecha: r.fecha, espacio: getEspacioNombre(r.espacio_id) }))
       });
     }
-    for (const r of propias) {
-      const motivoQueda = Number(r.espacio_id) === 3 && config.motivos_frente.includes(r.motivo) ? r.motivo : '';
-      const { error } = await supabase.from('reservas')
-        .update({ nombre_solicitante: NOMBRE_ANONIMIZADO, contacto: '-', acompanantes: [], motivo_cancelacion: null, motivo: motivoQueda })
-        .eq('id', r.id);
-      if (error) throw error;
+    // Antes de anonimizar: los contactos tal como figuran sirven para encontrarla en la cola
+    const contactos = propias.map(r => r.contacto);
+    const hecho = { reservas: 0, como_acompanante: 0, lista_espera: 0, correos: 0 };
+    const pendiente = [];
+    try {
+      for (const r of propias) {
+        const motivoQueda = Number(r.espacio_id) === 3 && config.motivos_frente.includes(r.motivo) ? r.motivo : '';
+        const { error } = await supabase.from('reservas')
+          .update({ nombre_solicitante: NOMBRE_ANONIMIZADO, contacto: '-', acompanantes: [], motivo_cancelacion: null, motivo: motivoQueda })
+          .eq('id', r.id);
+        if (error) throw error;
+        hecho.reservas++;
+      }
+      for (const r of comoAcompanante) {
+        const restantes = (r.acompanantes || []).filter(a => !esElla(a));
+        const { error } = await supabase.from('reservas').update({ acompanantes: restantes }).eq('id', r.id);
+        if (error) throw error;
+        hecho.como_acompanante++;
+      }
+      if (listaEspera.length) {
+        const { error } = await supabase.from('lista_espera').delete().in('id', listaEspera.map(l => l.id));
+        if (error) throw error;
+        hecho.lista_espera = listaEspera.length;
+      }
+    } catch (err) {
+      console.error('⚠️ Borrado de datos incompleto:', err && (err.message || err.code));
+      pendiente.push('reservas o lista de espera');
     }
-    for (const r of comoAcompanante) {
-      const restantes = (r.acompanantes || []).filter(a => String(a && a.celular || '').replace(/\D/g, '').slice(-9) !== criterio.celular);
-      const { error } = await supabase.from('reservas').update({ acompanantes: restantes }).eq('id', r.id);
-      if (error) throw error;
-    }
-    if (listaEspera.length) {
-      const { error } = await supabase.from('lista_espera').delete().in('id', listaEspera.map(l => l.id));
-      if (error) throw error;
+    const correos = await correosDePersona(datos.emails, contactos);
+    if (correos === null) {
+      pendiente.push('correos en la cola');
+    } else if (correos.length) {
+      const { error } = await supabase.from('correos_pendientes').delete().in('id', correos.map(c => c.id));
+      if (error) { console.error('⚠️ No se pudieron borrar correos de la cola:', error.message || error.code); pendiente.push('correos en la cola'); }
+      else hecho.correos = correos.length;
     }
     // Sin datos personales en el registro: solo cuántas cosas se borraron
-    registrarActividad(req.admin.rol, 'Borró los datos de una persona',
-      `${propias.length} reserva(s), ${comoAcompanante.length} como acompañante, ${listaEspera.length} en lista de espera`);
-    res.json({ mensaje: 'Datos borrados', reservas: propias.length, como_acompanante: comoAcompanante.length, lista_espera: listaEspera.length });
+    registrarActividad(req.admin.rol, pendiente.length ? 'Borró en parte los datos de una persona' : 'Borró los datos de una persona',
+      `${hecho.reservas} reserva(s), ${hecho.como_acompanante} como acompañante, ${hecho.lista_espera} en lista de espera, ${hecho.correos} correo(s) en cola` +
+      (pendiente.length ? ` — faltó: ${pendiente.join(', ')}` : ''));
+    if (pendiente.length) {
+      return res.status(500).json({
+        error: `No se pudo borrar todo (faltó: ${pendiente.join(', ')}). Probá "Borrar sus datos" otra vez en un rato; lo que ya se borró no se repite.`,
+        ...hecho
+      });
+    }
+    res.json({ mensaje: 'Datos borrados', ...hecho });
   } catch (error) {
     manejarError(res, error);
   }
