@@ -148,17 +148,22 @@ create table public.meses_habilitados (
 );
 
 -- ---------------------------------------------------------------------
--- LISTA DE ESPERA (general, por espacio): correos para avisar si se libera cualquier lugar
--- cuando el espacio ya no tenía ninguno. Una inscripción por correo y espacio.
+-- LISTA DE ESPERA (por espacio y mes): para avisar si se libera un lugar de ese mes cuando ya no
+-- quedaba ninguno. Una inscripción por correo, espacio y mes ('2026-11').
+-- nombre: para saludar en el aviso (las inscripciones viejas pueden no tenerlo).
 -- avisado_en: cuándo se avisó (cada inscripción se avisa una sola vez).
 -- ---------------------------------------------------------------------
 create table public.lista_espera (
   id          bigint generated always as identity primary key,
   espacio_id  bigint not null references public.espacios(id),
   email       text not null,
+  nombre      text,
+  mes         text not null,
   creado_en   timestamptz not null default now(),
   avisado_en  timestamptz,
-  unique (espacio_id, email)
+  constraint lista_espera_mes_valido check (mes ~ '^\d{4}-(0[1-9]|1[0-2])$'),
+  constraint lista_espera_nombre_largo check (nombre is null or char_length(nombre) between 2 and 100),
+  constraint lista_espera_espacio_email_mes_key unique (espacio_id, email, mes)
 );
 
 -- ---------------------------------------------------------------------

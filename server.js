@@ -1780,12 +1780,13 @@ app.post('/api/cancelar-por-enlace', cancelarLimiter, async (req, res) => {
   }
 });
 
-// ========== LISTA DE ESPERA (general, por espacio) ==========
-// Cuando en un espacio ya no queda ningún lugar libre en los meses habilitados, la página muestra
-// "Ya no hay reservas disponibles" y la persona puede dejar su correo. Si después alguien cancela
-// cualquier reserva de ese espacio (de un horario que todavía no empezó), se avisa a todos los
-// anotados a la vez, diciendo qué día y turno se liberó (el lugar es de quien reserve primero).
-// Cada inscripción se avisa una sola vez; para otro aviso hay que volver a anotarse.
+// ========== LISTA DE ESPERA (por espacio y mes) ==========
+// Cuando en un mes habilitado ya no queda ningún lugar libre en un espacio, la página muestra
+// "Ya no hay lugares" y la persona puede anotarse con su nombre y correo para ESE mes. Si después
+// alguien cancela una reserva de ese espacio y ese mes (de un horario que todavía no empezó), se
+// avisa a todos los anotados para ese mes a la vez, diciendo qué día y turno se liberó (el lugar
+// es de quien reserve primero). Cada inscripción se avisa una sola vez; para otro aviso hay que
+// volver a anotarse.
 const MAX_AVISOS_LISTA_ESPERA_POR_DIA = 60; // dentro de los 300 correos diarios de Brevo
 const DIAS_VIGENCIA_LISTA_ESPERA = 60; // las inscripciones sin avisar más viejas se borran solas
 let avisosListaEsperaHoy = { dia: '', cantidad: 0 };
@@ -1812,16 +1813,45 @@ function horarioYaEmpezo(fechaISO, horaInicioHHMM) {
   return h * 60 + m <= horaActualEnAsuncionEnMinutos();
 }
 
+const NOMBRES_MESES = ['enero', 'febrero', 'marzo', 'abril', 'mayo', 'junio', 'julio', 'agosto', 'septiembre', 'octubre', 'noviembre', 'diciembre'];
+// '2026-11' -> 'noviembre de 2026'
+function nombreDelMes(mes) {
+  const [anio, numero] = String(mes).split('-').map(Number);
+  return `${NOMBRES_MESES[numero - 1] || ''} de ${anio}`;
+}
+// Saludo de los correos: "Hola, Ana:" con el primer nombre, o "Hola:" si no hay nombre
+function saludoCorreo(nombre) {
+  const primero = String(nombre || '').trim().split(/\s+/)[0];
+  return primero ? `Hola, ${primero}:` : 'Hola:';
+}
+
 app.post('/api/lista-espera', listaEsperaLimiter, async (req, res) => {
   try {
-    const { espacio_id, email } = req.body || {};
+    const { espacio_id, email, nombre, mes } = req.body || {};
     const correo = String(email || '').trim().toLowerCase();
     if (!EMAIL_REGEX.test(correo) || correo.length > 100) {
       return res.status(400).json({ error: 'Escribí un correo válido' });
     }
+    // Nombre y apellido, como en las reservas (sin saltos de línea ni caracteres de control)
+    const nombreLimpio = typeof nombre === 'string' ? nombre.replace(/[\u0000-\u001f\u007f]/g, ' ').replace(/\s+/g, ' ').trim() : '';
+    if (nombreLimpio.length < 2 || nombreLimpio.length > 100) {
+      return res.status(400).json({ error: 'Escribí tu nombre' });
+    }
     const espacioIdNum = Number(espacio_id);
     if (![1, 3].includes(espacioIdNum)) {
       return res.status(400).json({ error: 'Espacio inválido' });
+    }
+    // El mes tiene que estar habilitado y no haber terminado
+    const mesTexto = typeof mes === 'string' ? mes : '';
+    const partesMes = mesTexto.match(/^(\d{4})-(0[1-9]|1[0-2])$/);
+    if (!partesMes || mesTexto < hoyEnAsuncion().toISOString().slice(0, 7)) {
+      return res.status(400).json({ error: 'Elegí un mes válido' });
+    }
+    const { data: mesData, error: errorMes } = await supabase.from('meses_habilitados')
+      .select('habilitado').eq('anio', Number(partesMes[1])).eq('mes', Number(partesMes[2])).maybeSingle();
+    if (errorMes) throw errorMes;
+    if (!mesData || !mesData.habilitado) {
+      return res.status(400).json({ error: 'Ese mes todavía no está habilitado para reservar' });
     }
 
     const { data: espacioData, error: errorEspacio } = await supabase
@@ -1831,24 +1861,25 @@ app.post('/api/lista-espera', listaEsperaLimiter, async (req, res) => {
       return res.status(400).json({ error: 'Ese espacio no se puede reservar por el momento' });
     }
 
-    // Si ya estaba anotado (por ejemplo, lo avisaron antes y se volvió a llenar), se reactiva
+    // Si ya estaba anotado para ese mes (por ejemplo, lo avisaron antes y se volvió a llenar), se reactiva
     const { error: errorGuardar } = await supabase
       .from('lista_espera')
-      .upsert({ espacio_id: espacioIdNum, email: correo, creado_en: new Date().toISOString(), avisado_en: null },
-        { onConflict: 'espacio_id,email' });
+      .upsert({ espacio_id: espacioIdNum, email: correo, nombre: nombreLimpio, mes: mesTexto, creado_en: new Date().toISOString(), avisado_en: null },
+        { onConflict: 'espacio_id,email,mes' });
     if (errorGuardar) throw errorGuardar;
 
     // Confirmación con el enlace para salir de la lista. Solo texto (sin HTML ni botones), como un
     // correo personal, para que Gmail lo deje en "Principal" y no en "Promociones".
     const espacio = getEspacioNombre(espacioIdNum);
+    const elMes = nombreDelMes(mesTexto);
     encolarCorreo({
       to: correo,
-      subject: `Te anotaste en la lista de espera del ${espacio}`,
+      subject: `Lista de espera del ${espacio}: te avisamos si se libera un lugar en ${elMes}`,
       responderA: correoRespuesta(espacioIdNum),
-      text: `Hola,\n\nTe anotaste en la lista de espera del ${espacio}. Si se libera un turno, te avisamos una sola vez a este correo.\n\nSi ya no querés el aviso, podés salir de la lista acá:\n${enlaceBajaListaEspera(espacioIdNum, correo)}\n\nCentro de Estudiantes de Química`
+      text: `${saludoCorreo(nombreLimpio)}\n\nYa quedaste en la lista de espera del ${espacio} para ${elMes}.\n\nSi alguien cancela una reserva de ese mes, te escribimos a este correo con el día y el turno que se liberó, para que puedas reservarlo. Te avisamos una sola vez.\n\nSi ya no necesitás el aviso, podés salir de la lista acá:\n${enlaceBajaListaEspera(espacioIdNum, correo)}\n\nSaludos,\nCentro de Estudiantes de Química`
     });
 
-    res.status(201).json({ mensaje: 'Listo: si se libera un lugar, te avisamos por correo.' });
+    res.status(201).json({ mensaje: `Listo: si se libera un lugar en ${elMes}, te avisamos por correo.` });
   } catch (error) {
     manejarError(res, error);
   }
@@ -1901,9 +1932,11 @@ async function avisarListaEspera(reserva) {
       console.warn('⚠️ Se alcanzó el tope diario de avisos de lista de espera');
       return;
     }
+    // Solo los anotados para el mes del turno que se liberó
+    const mesLiberado = String(reserva.fecha).slice(0, 7);
     const { data: pendientes, error: errorPendientes } = await supabase
       .from('lista_espera').select('id')
-      .eq('espacio_id', reserva.espacio_id).is('avisado_en', null)
+      .eq('espacio_id', reserva.espacio_id).eq('mes', mesLiberado).is('avisado_en', null)
       .order('creado_en', { ascending: true }).limit(disponibles);
     if (errorPendientes) throw errorPendientes;
     if (!pendientes || pendientes.length === 0) return;
@@ -1912,7 +1945,7 @@ async function avisarListaEspera(reserva) {
     // cancelaciones juntas, nadie recibe dos avisos por la misma inscripción
     const { data: tomadas, error } = await supabase
       .from('lista_espera').update({ avisado_en: new Date().toISOString() })
-      .in('id', pendientes.map(p => p.id)).is('avisado_en', null).select('id, email');
+      .in('id', pendientes.map(p => p.id)).is('avisado_en', null).select('id, email, nombre');
     if (error) throw error;
     if (!tomadas || tomadas.length === 0) return;
     // Si un aviso no se pudo mandar, la inscripción vuelve a quedar pendiente
@@ -1934,16 +1967,26 @@ async function avisarListaEspera(reserva) {
       }
       // SOLO TEXTO, como un correo escrito por una persona: sin HTML, botones, negritas ni emoji.
       // Con HTML, Brevo agrega la imagen de seguimiento de aperturas y Gmail lo mandaba a
-      // "Promociones". El asunto lleva el día, el turno y el número de la reserva cancelada:
-      // cada aviso tiene un asunto distinto y Gmail no los agrupa.
+      // "Promociones". El asunto es corto y natural, con el día y el turno (cada aviso es distinto
+      // y Gmail no los agrupa); antes llevaba también el número de la reserva y quedaba largo.
       // Pasa por la cola como los demás correos (CEQ-06): si Brevo falla, se reintenta. Sin HTML
       // en la cola, sale igual solo con texto. Si ni siquiera se pudo guardar, vuelve a pendiente.
-      const dia = fechaLarga(reserva.fecha);
+      const dia = fechaLarga(reserva.fecha); // "lunes 02/11/2026"
+      const diaCorto = dia.replace(/\/\d{4}$/, ''); // "lunes 02/11"
+      const turno = Number(reserva.espacio_id) === 3 ? nombreTurnoFrente(inicio, fin) : '';
       const enviado = await encolarCorreo({
         to: correo,
-        subject: `Se liberó un turno en el ${espacio}: ${dia}, ${horario} (aviso #${reserva.id})`,
+        subject: `Se liberó un lugar en el ${espacio}: ${diaCorto}${turno ? ', ' + turno : `, ${inicio} a ${fin}`}`,
         responderA: correoRespuesta(reserva.espacio_id),
-        text: `Hola,\n\nSe canceló una reserva del ${espacio} y quedó libre el ${dia}, ${horario}.\n\nSi te sirve, podés reservarlo acá: ${enlace}\n\nEl turno es de quien reserve primero.\n\nTe escribimos porque te anotaste en la lista de espera del ${espacio}. Este es el único aviso; si querés otro, volvé a anotarte en la página.\n\nCentro de Estudiantes de Química`
+        text: `${saludoCorreo(tomadas[i].nombre)}\n\n` +
+          `¡Buenas noticias! Alguien canceló su reserva y se liberó un lugar en el ${espacio}:\n\n` +
+          `Día: ${dia}\n` +
+          `Horario: ${horario}\n\n` +
+          `Para reservarlo, entrá acá:\n${enlace}\n\n` +
+          `El lugar es de quien reserve primero, así que conviene hacerlo cuanto antes.\n\n` +
+          `Te escribimos porque te anotaste en la lista de espera del ${espacio} para ${nombreDelMes(mesLiberado)}. ` +
+          `Este es el único aviso: si después querés otro, volvé a anotarte en la página.\n\n` +
+          `Saludos,\nCentro de Estudiantes de Química`
       });
       if (!enviado) {
         avisosListaEsperaHoy.cantidad = Math.max(avisosListaEsperaHoy.cantidad - 1, 0);
@@ -3182,7 +3225,7 @@ async function buscarDatosPersona(criterio) {
     (Array.isArray(r.acompanantes) ? r.acompanantes : []).some(esElla)) : [];
   let listaEspera = [];
   if (emails.size) {
-    const { data, error } = await supabase.from('lista_espera').select('id, espacio_id, email, creado_en, avisado_en').in('email', [...emails]);
+    const { data, error } = await supabase.from('lista_espera').select('id, espacio_id, email, nombre, mes, creado_en, avisado_en').in('email', [...emails]);
     if (error) throw error;
     listaEspera = data || [];
   }
@@ -3230,7 +3273,7 @@ function entregaPersona({ propias, comoAcompanante, listaEspera, esElla }) {
       hora_inicio: String(r.hora_inicio || '').slice(0, 5), hora_fin: String(r.hora_fin || '').slice(0, 5), estado: r.estado,
       como_figura: (r.acompanantes || []).filter(esElla).map(a => ({ nombre: a.nombre || '', celular: a.celular || '' }))
     })),
-    lista_espera: listaEspera.map(l => ({ espacio: getEspacioNombre(l.espacio_id), email: l.email, anotada: aIsoUtc(l.creado_en), avisada: aIsoUtc(l.avisado_en) }))
+    lista_espera: listaEspera.map(l => ({ espacio: getEspacioNombre(l.espacio_id), mes: l.mes || null, nombre: l.nombre || null, email: l.email, anotada: aIsoUtc(l.creado_en), avisada: aIsoUtc(l.avisado_en) }))
   };
 }
 
@@ -3337,7 +3380,7 @@ app.get('/api/superadmin/lista-espera', verifyAdminToken, verifySuperAdmin, asyn
   try {
     // De a páginas (CEQ-08): Supabase entrega como máximo 1000 filas por pedido
     res.json(await leerTodasLasFilas(() => supabase.from('lista_espera')
-      .select('id, espacio_id, email, creado_en, avisado_en')
+      .select('id, espacio_id, email, nombre, mes, creado_en, avisado_en')
       .order('creado_en', { ascending: true }).order('id', { ascending: true })));
   } catch (error) {
     manejarError(res, error);
