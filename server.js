@@ -665,10 +665,16 @@ const sincronizacionLimiter = rateLimit({
 // Supabase entrega como máximo 1000 filas por pedido: esto pide de a 1000 hasta traer todas.
 // `armarConsulta` tiene que devolver una consulta nueva cada vez, con un orden que no cambie
 // entre páginas (por eso siempre se ordena también por id).
+// Si hay más de `maximo` filas, lanza un error en vez de devolver la lista cortada (CEQ-08):
+// antes se cortaba sin avisar, y un listado, una exportación o el calendario podían parecer
+// completos sin estarlo.
 async function leerTodasLasFilas(armarConsulta, maximo = 50000) {
   const TAM_PAGINA = 1000;
   const filas = [];
-  for (let desde = 0; desde < maximo; desde += TAM_PAGINA) {
+  for (let desde = 0; ; desde += TAM_PAGINA) {
+    if (desde >= maximo) {
+      throw new Error(`Hay más de ${maximo} filas para leer: no se muestra una lista incompleta`);
+    }
     const { data, error } = await armarConsulta().range(desde, desde + TAM_PAGINA - 1);
     if (error) throw error;
     filas.push(...(data || []));
@@ -3293,10 +3299,10 @@ app.post('/api/superadmin/persona/borrar', verifyAdminToken, verifySuperAdmin, v
 // ===== LISTA DE ESPERA (ver y sacar a alguien) =====
 app.get('/api/superadmin/lista-espera', verifyAdminToken, verifySuperAdmin, async (req, res) => {
   try {
-    const { data, error } = await supabase.from('lista_espera')
-      .select('id, espacio_id, email, creado_en, avisado_en').order('creado_en', { ascending: true });
-    if (error) throw error;
-    res.json(data || []);
+    // De a páginas (CEQ-08): Supabase entrega como máximo 1000 filas por pedido
+    res.json(await leerTodasLasFilas(() => supabase.from('lista_espera')
+      .select('id, espacio_id, email, creado_en, avisado_en')
+      .order('creado_en', { ascending: true }).order('id', { ascending: true })));
   } catch (error) {
     manejarError(res, error);
   }
