@@ -1877,15 +1877,17 @@ app.post('/api/lista-espera', listaEsperaLimiter, async (req, res) => {
         { onConflict: 'espacio_id,email,mes' });
     if (errorGuardar) throw errorGuardar;
 
-    // Confirmación con el enlace para salir de la lista. Solo texto (sin HTML ni botones), como un
-    // correo personal, para que Gmail lo deje en "Principal" y no en "Promociones".
+    // Confirmación con el enlace para quitar la inscripción. Solo texto (sin HTML ni botones), como
+    // un correo personal, para que Gmail lo deje en "Principal" y no en "Promociones". El asunto es
+    // una confirmación simple y el enlace no se presenta como "salir de la lista" ni "darse de baja":
+    // esas frases son típicas de los correos masivos y Gmail los manda a Promociones.
     const espacio = getEspacioNombre(espacioIdNum);
     const elMes = nombreDelMes(mesTexto);
     encolarCorreo({
       to: correo,
-      subject: `Lista de espera del ${espacio}: te avisamos si se libera un lugar en ${elMes}`,
+      subject: `Tu inscripción en la lista de espera del ${espacio} (${elMes})`,
       responderA: correoRespuesta(espacioIdNum),
-      text: `${saludoCorreo(nombreLimpio)}\n\nYa quedaste en la lista de espera del ${espacio} para ${elMes}.\n\nSi alguien cancela una reserva de ese mes, te escribimos a este correo con el día y el turno que se liberó, para que puedas reservarlo. Te avisamos una sola vez.\n\nSi ya no necesitás el aviso, podés salir de la lista acá:\n${enlaceBajaListaEspera(espacioIdNum, correo)}\n\nSaludos,\nCentro de Estudiantes de Química`
+      text: `${saludoCorreo(nombreLimpio)}\n\nTe confirmamos que quedaste anotado/a en la lista de espera del ${espacio} para ${elMes}.\n\nSi alguien cancela una reserva de ese mes, te escribimos a este correo con el día y el turno que quedó libre.\n\nSi te anotaste por error o ya conseguiste otro lugar, podés quitar tu inscripción desde este enlace:\n${enlaceBajaListaEspera(espacioIdNum, correo)}\n\nSaludos,\nCentro de Estudiantes de Química`
     });
 
     res.status(201).json({ mensaje: `Listo: si se libera un lugar en ${elMes}, te avisamos por correo.` });
