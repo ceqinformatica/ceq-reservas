@@ -171,6 +171,9 @@ const CONFIG_POR_DEFECTO = {
   altillo_max_horas: 2,
   // Espacios deshabilitados cuyo aviso NO se muestra al entrar a la página (se guarda el texto igual)
   avisos_ocultos: [],
+  // Pausa general (admin supremo > Avanzado > Herramientas): no se puede reservar ni anotarse en la
+  // lista de espera, y la página muestra el mensaje
+  pausa_reservas: { activa: false, mensaje: '' },
   // Ventana de novedades que ve la gente al entrar (una vez por navegador y por versión). Se
   // escribe desde el admin supremo; este es el contenido inicial.
   ventana_novedades: {
@@ -190,7 +193,7 @@ const CONFIG_POR_DEFECTO = {
 };
 let config = { ...CONFIG_POR_DEFECTO };
 // Las que se guardan en la tabla como JSON (el resto, como texto simple)
-const CLAVES_CONFIG_JSON = ['turnos_frente', 'avisos_ocultos', 'ventana_novedades', 'motivos_frente'];
+const CLAVES_CONFIG_JSON = ['turnos_frente', 'avisos_ocultos', 'ventana_novedades', 'motivos_frente', 'pausa_reservas'];
 const LIMITES_NOVEDADES = { titulo: 80, intro: 600, bloques: 6, bloqueTitulo: 60, bloqueTexto: 400, cierre: 600 };
 
 // Valida cada valor de configuración. Devuelve el valor normalizado o lanza un Error con un
@@ -262,6 +265,14 @@ const VALIDADORES_CONFIG = {
     const n = Number(valor);
     if (!Number.isInteger(n) || n < 1 || n > 12) throw new Error('El máximo de horas del Altillo tiene que ser entre 1 y 12');
     return n;
+  },
+  pausa_reservas(valor) {
+    const v = valor || {};
+    const activa = v.activa === true;
+    const mensaje = String(v.mensaje == null ? '' : v.mensaje).replace(/\r\n/g, '\n').trim();
+    if (mensaje.length > 300) throw new Error('El mensaje de la pausa puede tener hasta 300 caracteres');
+    if (activa && mensaje.length < 5) throw new Error('Escribí el mensaje que va a ver la gente (por ejemplo: "Volvemos el lunes")');
+    return { activa, mensaje };
   },
   avisos_ocultos(valor) {
     if (!Array.isArray(valor)) throw new Error('avisos_ocultos tiene que ser una lista');
@@ -993,6 +1004,14 @@ app.get('/api/health', async (req, res) => {
   return res.status(503).json({ status: 'error', db: 'error' });
 });
 
+// Contraseña del panel de los admins: si el admin supremo la cambió desde el panel, está cifrada
+// en la tabla configuracion (admin_password_hash); si no, se usa la de Render (ADMIN_PASSWORD_HASH).
+async function hashClaveAdmin() {
+  const { data, error } = await supabase.from('configuracion').select('valor').eq('clave', 'admin_password_hash').maybeSingle();
+  if (error) throw error;
+  return data && /^\$2[aby]\$/.test(String(data.valor)) ? data.valor : ADMIN_PASSWORD_HASH;
+}
+
 // LOGIN - Endpoint seguro
 app.post('/api/login', loginLimiter, async (req, res) => {
   try {
@@ -1008,7 +1027,7 @@ app.post('/api/login', loginLimiter, async (req, res) => {
 
     // Validar contraseña: primero la del admin supremo (si está configurada), después la normal
     const esSuperadmin = SUPERADMIN_PASSWORD_HASH !== '' && await bcrypt.compare(password, SUPERADMIN_PASSWORD_HASH);
-    const passwordValida = esSuperadmin || await bcrypt.compare(password, ADMIN_PASSWORD_HASH);
+    const passwordValida = esSuperadmin || await bcrypt.compare(password, await hashClaveAdmin());
 
     if (!passwordValida) {
       console.warn(`⚠️ Intento de login fallido a las ${new Date().toISOString()}`);
@@ -1249,12 +1268,16 @@ app.get('/api/configuracion', lecturaPublicaLimiter, (req, res) => {
     motivos_frente: config.motivos_frente,
     altillo: { hora_desde: config.altillo_hora_desde, hora_hasta: config.altillo_hora_hasta, max_horas: config.altillo_max_horas },
     max_acompanantes: MAX_ACOMPANANTES,
-    ventana_novedades: ventanaNovedadesVigente()
+    ventana_novedades: ventanaNovedadesVigente(),
+    pausa_reservas: config.pausa_reservas.activa ? config.pausa_reservas : null
   });
 });
 
 app.post('/api/reservas', crearReservaLimiter, async (req, res) => {
   try {
+    if (config.pausa_reservas.activa) {
+      return res.status(503).json({ error: config.pausa_reservas.mensaje, pausa: true });
+    }
     // Todo se valida ANTES de guardar (CEQ-03): tipos, nombre, celular, correo y fecha. Antes,
     // un contacto mandado como lista pasaba el chequeo, se guardaba y después el servidor
     // fallaba al leerlo, y un nombre de puros espacios o un celular "abc" se aceptaban.
@@ -1836,6 +1859,9 @@ function saludoCorreo(nombre) {
 
 app.post('/api/lista-espera', listaEsperaLimiter, async (req, res) => {
   try {
+    if (config.pausa_reservas.activa) {
+      return res.status(503).json({ error: config.pausa_reservas.mensaje, pausa: true });
+    }
     const { espacio_id, email, nombre, mes } = req.body || {};
     const correo = String(email || '').trim().toLowerCase();
     if (!EMAIL_REGEX.test(correo) || correo.length > 100) {
@@ -3386,6 +3412,321 @@ app.post('/api/superadmin/persona/borrar', verifyAdminToken, verifySuperAdmin, v
   }
 });
 
+// ===== HERRAMIENTAS DEL ADMIN SUPREMO (octubre 2026) =====
+// Editar una reserva, reenviar su confirmación, ver su historial, pausar las reservas, cambiar
+// la contraseña del panel de los admins, ver el estado del sistema y bajar una copia en el momento.
+
+// Correo a la persona sobre su reserva (confirmación reenviada o reserva modificada). Mismo
+// formato que la confirmación original. `codigo`: si se generó uno nuevo, va en el correo.
+function correoReservaHtml({ titulo, intro, reserva, codigo }) {
+  const inicio = String(reserva.hora_inicio).substring(0, 5);
+  const fin = String(reserva.hora_fin).substring(0, 5);
+  const acompanantes = Array.isArray(reserva.acompanantes) ? reserva.acompanantes : [];
+  return `
+    <h2>${escapeHtml(titulo)}</h2>
+    <p>Hola ${escapeHtml(reserva.nombre_solicitante)},</p>
+    <p>${escapeHtml(intro)}</p>
+    <hr>
+    <p><strong>Detalles:</strong></p>
+    <ul>
+      <li><strong>Espacio:</strong> ${getEspacioNombre(reserva.espacio_id)}</li>
+      <li><strong>Fecha:</strong> ${reserva.fecha}</li>
+      <li><strong>Horario:</strong> ${descripcionHorario(reserva.espacio_id, inicio, fin)}</li>
+      <li><strong>Motivo:</strong> ${escapeHtml(reserva.motivo) || 'Sin especificar'}</li>${acompanantes.length ? `
+      <li><strong>Acompañantes:</strong> ${escapeHtml(acompanantesTexto(acompanantes))}</li>` : ''}${codigo ? `
+      <li><strong>Código de cancelación:</strong> ${codigo}</li>` : ''}
+    </ul>
+    <p>Si necesitás cancelar, ${codigo ? 'usá tu código en <a href="https://reservas.ceq-una.com/cancelar.html">Cancelar Reserva</a>, o ' : ''}usá directamente este enlace: <a href="${enlaceCancelacion(reserva.id)}">Cancelar mi reserva</a></p>
+    ${reglaCancelacionHtml(reserva.espacio_id, reserva.fecha)}
+    <p><a href="${escapeHtml(enlaceGoogleCalendar(reserva.espacio_id, reserva.fecha, inicio, fin))}">📅 Agregar a Google Calendar</a></p>
+    <p>Ante cualquier consulta, contactate con: ${getContactoLineaHtml(reserva.espacio_id)}</p>
+    <p>Centro de Estudiantes de Química</p>
+  `;
+}
+
+async function reservaPorId(id) {
+  const { data, error } = await supabase.from('reservas').select('*').eq('id', Number(id)).maybeSingle();
+  if (error) throw error;
+  return data;
+}
+
+// Reenviar la confirmación: para "no me llegó el correo". El código anterior no se puede
+// recuperar (solo se guarda cifrado), así que se genera uno nuevo y el viejo deja de servir.
+app.post('/api/superadmin/reservas/:id/reenviar', verifyAdminToken, verifySuperAdmin, verificarCSRF, async (req, res) => {
+  try {
+    if (!esIdValido(req.params.id)) return res.status(400).json({ error: 'ID inválido' });
+    const reserva = await reservaPorId(req.params.id);
+    if (!reserva) return res.status(404).json({ error: 'La reserva no existe' });
+    if (reserva.estado !== 'activa') return res.status(400).json({ error: 'La reserva está cancelada' });
+    if (reservaYaTermino(reserva)) return res.status(400).json({ error: 'La reserva ya pasó' });
+    const email = correoDeContacto(reserva.contacto);
+    if (!email) return res.status(400).json({ error: 'La reserva no tiene un correo válido. Corregilo con "Editar" y después reenviá.' });
+
+    const codigo = crypto.randomBytes(8).toString('hex').toUpperCase();
+    const { error } = await supabase.from('reservas').update({ codigo_cancelacion_hash: hashCodigo(codigo) }).eq('id', reserva.id).eq('estado', 'activa');
+    if (error) throw error;
+    const enviado = await encolarCorreo({
+      to: email,
+      subject: `✓ Confirmación de Reserva (reenvío) - CEQ #${reserva.id}`,
+      responderA: correoRespuesta(reserva.espacio_id),
+      html: correoReservaHtml({ titulo: 'Tu reserva sigue confirmada', intro: 'Te reenviamos la confirmación de tu reserva, con un código de cancelación nuevo (el anterior ya no sirve).', reserva, codigo })
+    });
+    registrarActividad(req.admin.rol, 'Reenvió la confirmación de una reserva', `#${reserva.id}`);
+    res.json({ mensaje: enviado ? `Listo: se reenvió la confirmación a ${email}` : 'No se pudo enviar el correo ahora; quedó para reintentar' });
+  } catch (error) {
+    manejarError(res, error);
+  }
+});
+
+// Editar una reserva activa que todavía no pasó: nombre, celular, correo, día y horario. No pasa
+// por el límite por persona ni por los meses habilitados (lo decide el admin supremo), pero sí
+// respeta los turnos/horarios del espacio, los bloqueos y que no se superponga con otra reserva.
+app.put('/api/superadmin/reservas/:id', verifyAdminToken, verifySuperAdmin, verificarCSRF, async (req, res) => {
+  try {
+    if (!esIdValido(req.params.id)) return res.status(400).json({ error: 'ID inválido' });
+    const reserva = await reservaPorId(req.params.id);
+    if (!reserva) return res.status(404).json({ error: 'La reserva no existe' });
+    if (reserva.estado !== 'activa') return res.status(400).json({ error: 'Solo se pueden editar reservas activas' });
+    if (reservaYaTermino(reserva)) return res.status(400).json({ error: 'La reserva ya pasó' });
+
+    const b = req.body || {};
+    const [celularActual = '', emailActual = ''] = String(reserva.contacto || '').split('|').map(p => p.trim());
+    const texto = (v, actual) => v === undefined || v === null ? actual : (typeof v === 'string' ? v : null);
+    const campos = {
+      nombre_solicitante: texto(b.nombre_solicitante, reserva.nombre_solicitante),
+      celular: texto(b.celular, celularActual),
+      email: texto(b.email, emailActual),
+      fecha: texto(b.fecha, reserva.fecha),
+      hora_inicio: texto(b.hora_inicio, String(reserva.hora_inicio).substring(0, 5)),
+      hora_fin: texto(b.hora_fin, String(reserva.hora_fin).substring(0, 5))
+    };
+    if (Object.values(campos).some(v => v === null)) return res.status(400).json({ error: 'Tipos de datos inválidos' });
+    let datos;
+    try {
+      // Las mismas reglas que una reserva nueva para nombre, celular, correo y fecha
+      datos = validarDatosDeReserva({
+        espacio_id: reserva.espacio_id, nombre_solicitante: campos.nombre_solicitante, contacto: `${campos.celular} | ${campos.email}`,
+        fecha: campos.fecha, hora_inicio: campos.hora_inicio, hora_fin: campos.hora_fin, motivo: reserva.motivo || 'Sin especificar'
+      });
+    } catch (err) {
+      return res.status(400).json({ error: err.message });
+    }
+    const ini = datos.hora_inicio.substring(0, 5), fin = datos.hora_fin.substring(0, 5);
+    if (!/^([01]\d|2[0-3]):[0-5]\d$/.test(ini) || !/^([01]\d|2[0-3]):[0-5]\d$/.test(fin)) return res.status(400).json({ error: 'Horario inválido' });
+    const espacioId = Number(reserva.espacio_id);
+    if (espacioId === 3) {
+      if (!config.turnos_frente.some(t => t.inicio === ini && t.fin === fin)) return res.status(400).json({ error: 'En el Frente el horario tiene que ser uno de los turnos' });
+    } else {
+      const hI = Number(ini.slice(0, 2)), hF = Number(fin.slice(0, 2));
+      if (ini.slice(3) !== '00' || fin.slice(3) !== '00' || hI < config.altillo_hora_desde || hF > config.altillo_hora_hasta || hF <= hI || hF - hI > config.altillo_max_horas) {
+        return res.status(400).json({ error: `Horario inválido para el Altillo (horas enteras entre ${config.altillo_hora_desde}:00 y ${config.altillo_hora_hasta}:00, hasta ${config.altillo_max_horas} h)` });
+      }
+    }
+    const nueva = { ...reserva, nombre_solicitante: datos.nombre_solicitante, contacto: datos.contacto, fecha: datos.fecha, hora_inicio: ini + ':00', hora_fin: fin + ':00' };
+    if (reservaYaTermino(nueva) || diferenciaEnDiasCalendario(datos.fecha) < 0) return res.status(400).json({ error: 'El nuevo horario ya pasó' });
+
+    const cambiaHorario = datos.fecha !== reserva.fecha || ini !== String(reserva.hora_inicio).substring(0, 5) || fin !== String(reserva.hora_fin).substring(0, 5);
+    if (cambiaHorario) {
+      const aMin = h => { const [x, y] = String(h).split(':').map(Number); return x * 60 + y; };
+      const seSuperpone = o => aMin(ini) < aMin(o.hora_fin) && aMin(fin) > aMin(o.hora_inicio);
+      const [{ data: bloqueos, error: errorBloqueos }, { data: otras, error: errorOtras }] = await Promise.all([
+        supabase.from('bloqueos').select('hora_inicio, hora_fin').eq('espacio_id', espacioId).eq('fecha', datos.fecha),
+        supabase.from('reservas').select('id, hora_inicio, hora_fin').eq('espacio_id', espacioId).eq('fecha', datos.fecha).eq('estado', 'activa').neq('id', reserva.id)
+      ]);
+      if (errorBloqueos) throw errorBloqueos;
+      if (errorOtras) throw errorOtras;
+      if ((bloqueos || []).some(seSuperpone)) return res.status(409).json({ error: 'Ese horario está bloqueado' });
+      // La base también lo impide (restricción no_solapamiento_activo); esto da un mensaje claro antes
+      if ((otras || []).some(seSuperpone)) return res.status(409).json({ error: 'Ese horario ya está ocupado por otra reserva' });
+    }
+    const cambios = [];
+    if (datos.nombre_solicitante !== reserva.nombre_solicitante) cambios.push('nombre');
+    if (datos.contacto !== reserva.contacto) cambios.push('contacto');
+    if (cambiaHorario) cambios.push('día u horario');
+    if (!cambios.length) return res.json({ mensaje: 'No había cambios' });
+
+    const { data: actualizada, error } = await supabase.from('reservas')
+      .update({ nombre_solicitante: datos.nombre_solicitante, contacto: datos.contacto, fecha: datos.fecha, hora_inicio: ini + ':00', hora_fin: fin + ':00' })
+      .eq('id', reserva.id).eq('estado', 'activa').select();
+    if (error) {
+      if (error.code === '23P01' || error.code === '23505') return res.status(409).json({ error: 'Ese horario ya está ocupado por otra reserva' });
+      if (error.code === 'CEQ01') return res.status(409).json({ error: 'Ese horario está bloqueado' });
+      throw error;
+    }
+    if (!actualizada || !actualizada.length) return res.status(409).json({ error: 'La reserva cambió mientras la editabas (por ejemplo, se canceló). Volvé a cargarla.' });
+
+    // Aviso a la persona (al correo nuevo, si se cambió), salvo que se pida no avisar
+    let avisado = false;
+    const email = correoDeContacto(datos.contacto);
+    if (b.avisar !== false && email) {
+      avisado = await encolarCorreo({
+        to: email,
+        subject: `Tu reserva fue modificada - CEQ #${reserva.id}`,
+        responderA: correoRespuesta(espacioId),
+        html: correoReservaHtml({ titulo: 'Tu reserva fue modificada', intro: `Actualizamos tu reserva (${cambios.join(', ')}). Estos son los datos vigentes:`, reserva: actualizada[0] })
+      });
+    }
+    // Sin datos personales en el registro: qué se cambió y nada más
+    registrarActividad(req.admin.rol, 'Modificó una reserva', `#${reserva.id} · ${cambios.join(', ')}${cambiaHorario ? ` · ${fechaDMY(datos.fecha)} ${ini}-${fin}` : ''}`);
+    res.json({ mensaje: `Reserva actualizada${avisado ? ' y se le avisó por correo' : ''}`, reserva: actualizada[0] });
+  } catch (error) {
+    manejarError(res, error);
+  }
+});
+
+// Historial de una reserva: lo guardado en la reserva, el registro de actividad que la menciona
+// (#número) y los correos sobre ella que siguen en la cola (se borran a los 7 días).
+app.get('/api/superadmin/reservas/:id/historial', verifyAdminToken, verifySuperAdmin, async (req, res) => {
+  try {
+    if (!esIdValido(req.params.id)) return res.status(400).json({ error: 'ID inválido' });
+    const reserva = await reservaPorId(req.params.id);
+    if (!reserva) return res.status(404).json({ error: 'La reserva no existe' });
+    const id = Number(reserva.id);
+    const menciona = t => new RegExp(`#${id}(?!\\d)`).test(String(t || ''));
+    const eventos = [];
+    eventos.push({ cuando: aIsoUtc(reserva.created_at), que: reserva.reservado_por_admin ? 'Reserva de prioridad hecha desde el panel' : 'Reserva hecha desde la página' });
+    if (reserva.recordatorio_enviado_en) eventos.push({ cuando: aIsoUtc(reserva.recordatorio_enviado_en), que: 'Se mandó el recordatorio' });
+    if (reserva.cancelada_en) eventos.push({ cuando: aIsoUtc(reserva.cancelada_en), que: `Cancelada por ${reserva.cancelada_por === 'admin' ? 'un moderador' : 'la persona'}${reserva.motivo_cancelacion ? ` (motivo: ${reserva.motivo_cancelacion})` : ''}` });
+
+    const { data: actividad, error: errorActividad } = await supabase.from('registro_actividad')
+      .select('creado_en, rol, accion, detalle').order('id', { ascending: false }).limit(2000);
+    if (errorActividad) throw errorActividad;
+    (actividad || []).filter(a => menciona(a.detalle)).forEach(a => {
+      eventos.push({ cuando: aIsoUtc(a.creado_en), que: `${a.accion}${a.detalle ? ` (${a.detalle})` : ''}`, quien: NOMBRES_ROL[a.rol] || a.rol });
+    });
+    try {
+      const correos = await leerTodasLasFilas(() => supabase.from('correos_pendientes')
+        .select('id, asunto, estado, creado_en, enviado_en').order('id', { ascending: true }), 5000);
+      correos.filter(c => menciona(c.asunto)).forEach(c => {
+        const estado = c.estado === 'enviado' ? 'enviado' : c.estado === 'fallido' ? 'NO SALIÓ' : 'en la cola';
+        eventos.push({ cuando: aIsoUtc(c.enviado_en || c.creado_en), que: `Correo "${c.asunto}" (${estado})` });
+      });
+    } catch (err) {
+      eventos.push({ cuando: null, que: 'No se pudo revisar la cola de correos' });
+    }
+    eventos.sort((a, b) => String(a.cuando || '').localeCompare(String(b.cuando || '')));
+    res.set('Cache-Control', 'no-store');
+    res.json({
+      reserva: {
+        id, espacio: getEspacioNombre(reserva.espacio_id), fecha: reserva.fecha,
+        horario: descripcionHorario(reserva.espacio_id, String(reserva.hora_inicio).substring(0, 5), String(reserva.hora_fin).substring(0, 5)),
+        nombre: reserva.nombre_solicitante, contacto: reserva.contacto, estado: reserva.estado, asistencia: reserva.asistencia || null
+      },
+      eventos
+    });
+  } catch (error) {
+    manejarError(res, error);
+  }
+});
+
+// Pausar las reservas: la página muestra el mensaje y no deja reservar ni anotarse en la lista de
+// espera. Se puede cancelar igual, y el panel sigue pudiendo hacer reservas de prioridad.
+app.post('/api/superadmin/pausa', verifyAdminToken, verifySuperAdmin, verificarCSRF, async (req, res) => {
+  try {
+    let pausa;
+    try {
+      pausa = VALIDADORES_CONFIG.pausa_reservas(req.body || {});
+    } catch (err) {
+      return res.status(400).json({ error: err.message });
+    }
+    const { error } = await supabase.from('configuracion')
+      .upsert({ clave: 'pausa_reservas', valor: comoTexto('pausa_reservas', pausa) }, { onConflict: 'clave' });
+    if (error) throw error;
+    await cargarConfiguracion();
+    registrarActividad(req.admin.rol, pausa.activa ? 'Pausó las reservas' : 'Reanudó las reservas', pausa.activa ? pausa.mensaje : '');
+    res.json({ mensaje: pausa.activa ? 'Reservas pausadas' : 'Reservas reanudadas', pausa_reservas: config.pausa_reservas });
+  } catch (error) {
+    manejarError(res, error);
+  }
+});
+
+// Contraseña del panel de los admins (no la del admin supremo). Se guarda cifrada (bcrypt) en la
+// tabla configuracion y reemplaza a la de Render (ADMIN_PASSWORD_HASH), que queda solo como la
+// inicial. Al cambiarla se cierran todas las sesiones, incluida la propia.
+app.post('/api/superadmin/clave-admin', verifyAdminToken, verifySuperAdmin, verificarCSRF, async (req, res) => {
+  try {
+    const { nueva, confirmar } = req.body || {};
+    if (typeof nueva !== 'string' || nueva.length < 10 || nueva.length > 200) {
+      return res.status(400).json({ error: 'La contraseña tiene que tener entre 10 y 200 caracteres' });
+    }
+    if (nueva !== confirmar) return res.status(400).json({ error: 'Las dos contraseñas no coinciden' });
+    if (SUPERADMIN_PASSWORD_HASH && await bcrypt.compare(nueva, SUPERADMIN_PASSWORD_HASH)) {
+      return res.status(400).json({ error: 'No puede ser igual a la del admin supremo' });
+    }
+    const hash = await bcrypt.hash(nueva, 12);
+    const nuevaVersion = (await obtenerVersionSesiones()) + 1;
+    const { error } = await supabase.from('configuracion').upsert([
+      { clave: 'admin_password_hash', valor: hash },
+      { clave: 'version_sesiones', valor: String(nuevaVersion) }
+    ], { onConflict: 'clave' });
+    if (error) throw error;
+    versionSesiones = nuevaVersion;
+    registrarActividad(req.admin.rol, 'Cambió la contraseña del panel de los admins', 'se cerraron todas las sesiones');
+    borrarCookiesSesion(res);
+    res.json({ mensaje: 'Contraseña cambiada. Se cerraron todas las sesiones: volvé a entrar con la tuya.' });
+  } catch (error) {
+    manejarError(res, error);
+  }
+});
+
+// Estado del sistema: lo que hay que mirar para saber si todo anda bien
+app.get('/api/superadmin/estado', verifyAdminToken, verifySuperAdmin, async (req, res) => {
+  try {
+    const hoy = hoyEnAsuncion().toISOString().slice(0, 10);
+    // Medianoche de Paraguay en UTC (UTC-3)
+    const desde = new Date(hoy + 'T03:00:00Z').toISOString();
+    let correos = null;
+    try {
+      const filas = await leerTodasLasFilas(() => supabase.from('correos_pendientes')
+        .select('id, estado, creado_en').order('id', { ascending: true }), 5000);
+      correos = {
+        hoy: filas.filter(f => f.creado_en >= desde).length,
+        enviados_hoy: filas.filter(f => f.creado_en >= desde && f.estado === 'enviado').length,
+        pendientes: filas.filter(f => f.estado === 'pendiente' || f.estado === 'enviando').length,
+        fallidos: filas.filter(f => f.estado === 'fallido').length
+      };
+    } catch (err) { /* sin cola: se informa null */ }
+    const { data: claves, error } = await supabase.from('configuracion').select('clave, valor')
+      .in('clave', ['copia_mensual_enviada', 'ultima_sincronizacion']);
+    if (error) throw error;
+    const valor = c => ((claves || []).find(x => x.clave === c) || {}).valor || null;
+    const [enEspera, reportesNuevos] = await Promise.all([
+      leerTodasLasFilas(() => supabase.from('lista_espera').select('id').is('avisado_en', null).order('id', { ascending: true }), 20000),
+      leerTodasLasFilas(() => supabase.from('reportes_errores').select('id').eq('estado', 'nuevo').order('id', { ascending: true }), 20000)
+    ]).then(r => r.map(filas => filas.length));
+    res.set('Cache-Control', 'no-store');
+    res.json({
+      // Si llegó hasta acá, las consultas de arriba respondieron: la base anda (si no, da error 500)
+      base: 'ok',
+      servidor_desde: new Date(Date.now() - process.uptime() * 1000).toISOString(),
+      version: String(process.env.RENDER_GIT_COMMIT || '').slice(0, 7) || null,
+      correos, limite_correos_dia: 300,
+      copia_mensual: valor('copia_mensual_enviada'),
+      ultima_sincronizacion: valor('ultima_sincronizacion'),
+      ultima_revision_plazos: ultimaRevisionConservacion || null,
+      lista_espera_pendientes: enEspera,
+      reportes_nuevos: reportesNuevos,
+      pausa_reservas: config.pausa_reservas
+    });
+  } catch (error) {
+    manejarError(res, error);
+  }
+});
+
+// Copia de seguridad en el momento: el mismo archivo que la copia mensual, para bajarlo ya
+app.get('/api/superadmin/copia', verifyAdminToken, verifySuperAdmin, async (req, res) => {
+  try {
+    const { csv, total } = await armarCsvReservas();
+    registrarActividad(req.admin.rol, 'Descargó una copia de seguridad', `${total} reservas`);
+    res.set('Cache-Control', 'no-store');
+    res.set('Content-Type', 'text/csv; charset=utf-8');
+    res.set('Content-Disposition', `attachment; filename="reservas-ceq-${hoyEnAsuncion().toISOString().slice(0, 10)}.csv"`);
+    res.send(csv);
+  } catch (error) {
+    manejarError(res, error);
+  }
+});
+
 // ===== LISTA DE ESPERA (ver y sacar a alguien) =====
 app.get('/api/superadmin/lista-espera', verifyAdminToken, verifySuperAdmin, async (req, res) => {
   try {
@@ -3466,6 +3807,8 @@ app.get('/api/sincronizacion/reservas', sincronizacionLimiter, async (req, res) 
   }
 
   try {
+    supabase.from('configuracion').upsert({ clave: 'ultima_sincronizacion', valor: new Date().toISOString() }, { onConflict: 'clave' })
+      .then(({ error }) => { if (error) console.error('⚠️ No se pudo anotar la sincronización:', error.message); });
     const filas = await leerTodasLasFilas(() => supabase
       .from('reservas')
       .select('id, espacio_id, fecha, hora_inicio, hora_fin, nombre_solicitante, contacto, motivo, estado, created_at, asistencia, acompanantes')
