@@ -29,6 +29,7 @@ const PRUEBAS = [
   ['Cola de correos con reintentos', 'probar_cola_correos.js', [raiz, aqui]],
   ['Panel: lista de espera, bloqueos de varios días, reportes y correos', 'probar_panel.js', [raiz, aqui]],
   ['Admin supremo: horario del Altillo, motivos, novedades, lista de espera y datos de una persona', 'probar_supremo.js', [raiz, aqui]],
+  ['Herramientas del admin supremo: editar, reenviar, historial, pausa, contraseña, estado y copia', 'probar_herramientas.js', [raiz, aqui]],
   ['Plazos de conservación de la Política de Privacidad', 'probar_retencion.js', [raiz, aqui]],
   ['Estructura y reglas de la base de datos', 'probar_esquema.js', [raiz, path.join(raiz, 'esquema-base-de-datos.sql')], '@electric-sql/pglite']
 ];
