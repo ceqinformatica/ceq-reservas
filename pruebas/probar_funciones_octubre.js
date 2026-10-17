@@ -227,9 +227,9 @@ const actividad = () => db.registro_actividad.map(a => `${a.rol}|${a.accion}|${a
   anotar('Se guarda espacio, mes, nombre (sin espacios de más) y correo en minúsculas, sin día ni turno',
     db.lista_espera.some(f => f.email === 'espera1@example.com' && f.espacio_id === 3 && f.mes === '2026-11' && f.nombre === 'Ana María Espera' && !('fecha' in f)) &&
     db.lista_espera.some(f => f.email === 'espera2@example.com' && f.nombre === 'Beto Ruiz'), JSON.stringify(db.lista_espera));
-  const confLE = correos().filter(c => c.to[0].email === 'espera1@example.com' && c.subject.startsWith('Lista de espera del Frente'));
+  const confLE = correos().filter(c => c.to[0].email === 'espera1@example.com' && c.subject.startsWith('Tu inscripción en la lista de espera del Frente'));
   anotar('Confirmación: asunto claro con el mes, saludo con el primer nombre, solo texto',
-    confLE.length === 1 && confLE[0].subject === 'Lista de espera del Frente: te avisamos si se libera un lugar en noviembre de 2026' &&
+    confLE.length === 1 && confLE[0].subject === 'Tu inscripción en la lista de espera del Frente (noviembre de 2026)' && !/salir de la lista|darte de baja|desuscrib/i.test(confLE[0].textContent) &&
     confLE[0].textContent.startsWith('Hola, Ana:') && confLE[0].htmlContent === undefined, confLE[0] && confLE[0].subject);
   x = await anotarse('espera1@example.com');
   anotar('Anotarse dos veces al mismo espacio y mes no duplica', x.status === 201 && db.lista_espera.filter(f => f.email === 'espera1@example.com').length === 1, String(db.lista_espera.length));
