@@ -207,7 +207,16 @@ const TEXTOS_PAGINA = {
   mes_no_habilitado: { nombre: 'Aviso de "mes no habilitado"', max: 300, defecto: 'Este mes todavía no está habilitado para reservas. Probá con "Hoy" o consultá con un moderador.' },
   confirmacion_extra: { nombre: 'Texto extra en la ventana de "reserva confirmada" (opcional)', max: 400, defecto: '' },
   lista_espera: { nombre: 'Texto del cuadro de la lista de espera', max: 400, defecto: 'Todos los lugares del {espacio} de ese mes están ocupados. Anotate y, si alguien cancela una reserva de ese mes, te avisamos por correo para que puedas reservar. El lugar es de quien reserve primero.', comodines: ['espacio', 'mes'] },
-  cancelar_ayuda: { nombre: 'Ayuda de la página "Cancelar"', max: 300, defecto: 'Ingresá el código de cancelación que te llegó en el email de confirmación. Antes de cancelar te mostramos la reserva para que la revises.' }
+  cancelar_ayuda: { nombre: 'Ayuda de la página "Cancelar"', max: 300, defecto: 'Ingresá el código de cancelación que te llegó en el email de confirmación. Antes de cancelar te mostramos la reserva para que la revises.' },
+  // Texto debajo de "Crear reserva", uno por espacio. Vacío: la página lo arma sola con las Reglas
+  ayuda_reserva_frente: {
+    nombre: 'Texto debajo del botón "Crear reserva" en el Frente (opcional)', max: 400, defecto: '', comodines: ['plazo', 'limite'],
+    ayuda: 'Vacío = se arma solo con las Reglas (recomendado). Si lo escribís, usá {plazo} y {limite} en vez de escribir los números: se completan con las Reglas del Frente (por ejemplo "2 días antes" y "2 reservas"), así siguen siendo correctos si las cambiás. Los enlaces a los Términos y a la Política de privacidad se agregan siempre al final.'
+  },
+  ayuda_reserva_altillo: {
+    nombre: 'Texto debajo del botón "Crear reserva" en el Altillo (opcional)', max: 400, defecto: '', comodines: ['plazo', 'limite'],
+    ayuda: 'Igual que el del Frente, con las Reglas del Altillo. Sin plazo, {plazo} dice "el inicio de la reserva"; sin límite, {limite} dice "sin límite".'
+  }
 };
 
 // Comodines {así} que se permiten en un texto: si aparece uno desconocido, es un error de tipeo
@@ -3752,7 +3761,7 @@ app.get('/api/superadmin/personalizacion', verifyAdminToken, verifySuperAdmin, (
     reglas_defecto: REGLAS_POR_DEFECTO,
     max_reservas_por_persona_mes: config.max_reservas_por_persona_mes,
     textos: Object.fromEntries(Object.entries(TEXTOS_PAGINA).map(([k, d]) => [k, {
-      nombre: d.nombre, max: d.max, defecto: d.defecto, comodines: d.comodines || [],
+      nombre: d.nombre, max: d.max, defecto: d.defecto, comodines: d.comodines || [], ayuda: d.ayuda || '',
       valor: config.textos_pagina[k] != null ? config.textos_pagina[k] : d.defecto
     }])),
     anuncio: config.anuncio,
