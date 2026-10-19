@@ -3756,6 +3756,7 @@ app.get('/api/superadmin/personalizacion', verifyAdminToken, verifySuperAdmin, (
       valor: config.textos_pagina[k] != null ? config.textos_pagina[k] : d.defecto
     }])),
     anuncio: config.anuncio,
+    anuncio_visible: !!anuncioVigente(),
     plantillas: Object.fromEntries(Object.keys(PLANTILLAS_CORREO).map(k => [k, plantillaParaEditor(k)]))
   });
 });
@@ -3799,7 +3800,8 @@ app.post('/api/superadmin/textos', verifyAdminToken, verifySuperAdmin, verificar
     const b = req.body || {};
     let textos, anuncio;
     try {
-      textos = validarTextosPagina(b.textos);
+      // Sin `textos` (o sin `anuncio`) se deja lo que estaba
+      textos = b.textos === undefined ? config.textos_pagina : validarTextosPagina(b.textos);
       anuncio = validarAnuncio(b.anuncio === undefined ? config.anuncio : b.anuncio);
     } catch (err) {
       return res.status(400).json({ error: err.message });
@@ -3818,6 +3820,32 @@ app.post('/api/superadmin/textos', verifyAdminToken, verifySuperAdmin, verificar
     ]);
     registrarActividad(req.admin.rol, 'Cambió los textos de la página', cambios.join(' · '));
     res.json({ mensaje: 'Textos guardados', textos_pagina: config.textos_pagina, anuncio: config.anuncio });
+  } catch (error) {
+    manejarError(res, error);
+  }
+});
+
+// Cinta de anuncios sola (admin supremo > Avanzado > Anuncio): publicar ({ activo: true, texto,
+// hasta, tipo }) o quitar ({ activo: false }). Devuelve si se está viendo en la página ahora.
+app.post('/api/superadmin/anuncio', verifyAdminToken, verifySuperAdmin, verificarCSRF, async (req, res) => {
+  try {
+    const b = req.body || {};
+    let anuncio;
+    try {
+      anuncio = validarAnuncio({ ...config.anuncio, ...b });
+    } catch (err) {
+      return res.status(400).json({ error: err.message });
+    }
+    const hoy = hoyEnAsuncion().toISOString().slice(0, 10);
+    if (anuncio.activo && anuncio.hasta && anuncio.hasta < hoy) {
+      return res.status(400).json({ error: 'La fecha "mostrar hasta" ya pasó: elegí hoy o un día que venga (o dejala vacía)' });
+    }
+    if (JSON.stringify(anuncio) !== JSON.stringify(config.anuncio)) {
+      await guardarFilasConfig([{ clave: 'anuncio', valor: comoTexto('anuncio', anuncio) }]);
+      registrarActividad(req.admin.rol, anuncio.activo ? 'Publicó un anuncio' : 'Quitó el anuncio',
+        anuncio.activo ? `"${anuncio.texto}"${anuncio.hasta ? ` (hasta el ${fechaDMY(anuncio.hasta)})` : ''}` : '');
+    }
+    res.json({ mensaje: anuncio.activo ? 'Anuncio publicado' : 'Anuncio quitado', anuncio: config.anuncio, visible: !!anuncioVigente() });
   } catch (error) {
     manejarError(res, error);
   }
