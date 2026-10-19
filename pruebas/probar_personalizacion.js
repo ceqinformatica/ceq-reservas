@@ -251,6 +251,25 @@ const REGLAS_SIEMPRE = {
   await esperar(300);
   anotar('...queda en el registro', db.registro_actividad.some(a => a.accion === 'Cambió los textos de la página' && /Título de la página/.test(a.detalle) && /anuncio: "El viernes 20/.test(a.detalle)));
 
+  // ===== Cinta de anuncios con su propia ruta =====
+  r = await pedir('POST', '/api/superadmin/anuncio', { activo: true, texto: 'Hola', hasta: '2026-11-10' }, 'superadmin');
+  anotar('Anuncio con "mostrar hasta" ya pasado: 400', r.status === 400 && /ya pasó/.test(r.datos.error), `${r.status} ${r.datos.error}`);
+  r = await pedir('POST', '/api/superadmin/anuncio', { activo: true, texto: 'Hoy cerramos a las 15:00.', hasta: null, tipo: 'info' }, 'superadmin');
+  conf = await pedir('GET', '/api/configuracion');
+  anotar('Publicar el anuncio: se ve en la página y avisa que está visible', r.status === 200 && r.datos.visible === true && conf.datos.anuncio && conf.datos.anuncio.texto === 'Hoy cerramos a las 15:00.' && conf.datos.anuncio.tipo === 'info',
+    `${r.status} ${JSON.stringify(r.datos)} ${JSON.stringify(conf.datos.anuncio)}`);
+  r = await pedir('POST', '/api/superadmin/textos', { textos: { titulo_inicio: 'Reservas del CEQ', lista_espera: 'No queda lugar en el {espacio} para {mes}.', cancelar_ayuda: '', intro_inicio: 'Bienvenidos' } }, 'superadmin');
+  conf = await pedir('GET', '/api/configuracion');
+  anotar('Guardar los textos sin mandar el anuncio no lo toca', r.status === 200 && conf.datos.anuncio && conf.datos.anuncio.texto === 'Hoy cerramos a las 15:00.' && conf.datos.textos.intro_inicio === 'Bienvenidos', `${r.status} ${JSON.stringify(conf.datos.anuncio)}`);
+  r = await pedir('POST', '/api/superadmin/anuncio', { activo: false }, 'superadmin');
+  conf = await pedir('GET', '/api/configuracion');
+  p = await pedir('GET', '/api/superadmin/personalizacion', null, 'superadmin');
+  anotar('Quitar el anuncio: ya no se ve (y el texto queda guardado para volver a publicarlo)', r.status === 200 && r.datos.visible === false && conf.datos.anuncio === null &&
+    p.datos.anuncio.texto === 'Hoy cerramos a las 15:00.' && p.datos.anuncio_visible === false, `${r.status} ${JSON.stringify(conf.datos.anuncio)}`);
+  r = await pedir('POST', '/api/superadmin/anuncio', { activo: true, texto: 'El viernes 20 el Frente cierra a las 16:00.', hasta: '2026-11-20', tipo: 'importante' }, 'superadmin');
+  await esperar(300);
+  anotar('...publicar y quitar quedan en el registro', db.registro_actividad.some(a => a.accion === 'Publicó un anuncio') && db.registro_actividad.some(a => a.accion === 'Quitó el anuncio'));
+
   // ===== Recordatorios con las reglas nuevas (10:00 en Paraguay) =====
   ponerHora('2026-11-16T13:00:00Z');
   await hasta(() => delCorreo('altillo3@example.com').length > 0, 8000);
