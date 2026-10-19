@@ -251,6 +251,15 @@ const REGLAS_SIEMPRE = {
   await esperar(300);
   anotar('...queda en el registro', db.registro_actividad.some(a => a.accion === 'Cambió los textos de la página' && /Título de la página/.test(a.detalle) && /anuncio: "El viernes 20/.test(a.detalle)));
 
+  // ===== Texto debajo de "Crear reserva" =====
+  r = await pedir('POST', '/api/superadmin/textos', { textos: { ayuda_reserva_frente: 'Cancelás gratis hasta {mes}.' } }, 'superadmin');
+  anotar('Texto de "Crear reserva" con un comodín que no corresponde: 400 y dice cuáles usar', r.status === 400 && /\{mes\}/.test(r.datos.error) && /\{plazo\}/.test(r.datos.error), `${r.status} ${r.datos.error}`);
+  r = await pedir('POST', '/api/superadmin/textos', { textos: { titulo_inicio: 'Reservas del CEQ', lista_espera: 'No queda lugar en el {espacio} para {mes}.', cancelar_ayuda: '', ayuda_reserva_frente: 'Cancelás gratis hasta {plazo}. Máximo {limite} por mes.', ayuda_reserva_altillo: 'En el Altillo no hay límite: {limite}.' } }, 'superadmin');
+  conf = await pedir('GET', '/api/configuracion');
+  p = await pedir('GET', '/api/superadmin/personalizacion', null, 'superadmin');
+  anotar('...uno por espacio, con {plazo} y {limite}, se guarda y la página lo recibe (el editor trae la ayuda del campo)', r.status === 200 &&
+    conf.datos.textos.ayuda_reserva_frente === 'Cancelás gratis hasta {plazo}. Máximo {limite} por mes.' && conf.datos.textos.ayuda_reserva_altillo === 'En el Altillo no hay límite: {limite}.' && /Vacío = se arma solo/.test(p.datos.textos.ayuda_reserva_frente.ayuda), `${r.status} ${r.datos.error || ''}`);
+
   // ===== Cinta de anuncios con su propia ruta =====
   r = await pedir('POST', '/api/superadmin/anuncio', { activo: true, texto: 'Hola', hasta: '2026-11-10' }, 'superadmin');
   anotar('Anuncio con "mostrar hasta" ya pasado: 400', r.status === 400 && /ya pasó/.test(r.datos.error), `${r.status} ${r.datos.error}`);
