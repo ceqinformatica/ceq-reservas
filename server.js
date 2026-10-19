@@ -479,6 +479,10 @@ function correoListaEspera(clave, valores) {
   return { asunto: completarComodines(p.asunto, valores), texto: completarComodines(p.texto, valores) };
 }
 
+// Términos y condiciones y Política de privacidad de siempre (ver "TÉRMINOS Y CONDICIONES Y
+// POLÍTICA DE PRIVACIDAD EDITABLES" más abajo)
+const LEGAL_POR_DEFECTO = require('./legal-por-defecto.json');
+
 // ========== CONFIGURACIÓN EDITABLE (admin supremo > Avanzado > Configuración) ==========
 // Turnos del Frente, límite por persona, contacto del Frente y correo de alertas. Antes estaban
 // fijos en el código. Estos son los valores por defecto (los de siempre): si en la tabla
@@ -517,6 +521,9 @@ const CONFIG_POR_DEFECTO = {
   textos_pagina: {},
   anuncio: { activo: false, texto: '', hasta: null, tipo: 'info' },
   plantillas_correo: {},
+  // Términos y Política de privacidad (admin supremo > Avanzado > Términos y privacidad)
+  legal_terminos: LEGAL_POR_DEFECTO.terminos,
+  legal_privacidad: LEGAL_POR_DEFECTO.privacidad,
   // Ventana de novedades que ve la gente al entrar (una vez por navegador y por versión). Se
   // escribe desde el admin supremo; este es el contenido inicial.
   ventana_novedades: {
@@ -536,7 +543,7 @@ const CONFIG_POR_DEFECTO = {
 };
 let config = { ...CONFIG_POR_DEFECTO };
 // Las que se guardan en la tabla como JSON (el resto, como texto simple)
-const CLAVES_CONFIG_JSON = ['turnos_frente', 'avisos_ocultos', 'ventana_novedades', 'motivos_frente', 'pausa_reservas', 'reglas_espacios', 'textos_pagina', 'anuncio', 'plantillas_correo'];
+const CLAVES_CONFIG_JSON = ['turnos_frente', 'avisos_ocultos', 'ventana_novedades', 'motivos_frente', 'pausa_reservas', 'reglas_espacios', 'textos_pagina', 'anuncio', 'plantillas_correo', 'legal_terminos', 'legal_privacidad'];
 const LIMITES_NOVEDADES = { titulo: 80, intro: 600, bloques: 6, bloqueTitulo: 60, bloqueTexto: 400, cierre: 600 };
 
 // Valida cada valor de configuración. Devuelve el valor normalizado o lanza un Error con un
@@ -621,6 +628,8 @@ const VALIDADORES_CONFIG = {
   textos_pagina: validarTextosPagina,
   anuncio: validarAnuncio,
   plantillas_correo: validarPlantillasCorreo,
+  legal_terminos: valor => validarDocumentoLegal(valor),
+  legal_privacidad: valor => validarDocumentoLegal(valor),
   avisos_ocultos(valor) {
     if (!Array.isArray(valor)) throw new Error('avisos_ocultos tiene que ser una lista');
     const ids = [...new Set(valor.map(Number))];
@@ -902,7 +911,9 @@ app.use(cors({
   exposedHeaders: ['Retry-After', 'RateLimit-Reset']
 }));
 
-// Limitar tamaño de payloads
+// Limitar tamaño de payloads. Los Términos y la Privacidad enteros (editor del admin supremo)
+// ocupan unos 15 KB y pueden crecer: esas rutas aceptan hasta 400 KB; todo lo demás, 10 KB.
+app.use('/api/superadmin/legal', express.json({ limit: '400kb' }));
 app.use(express.json({ limit: '10kb' }));
 app.use(cookieParser());
 
@@ -3767,6 +3778,8 @@ app.get('/api/superadmin/personalizacion', verifyAdminToken, verifySuperAdmin, (
     }])),
     anuncio: config.anuncio,
     anuncio_visible: !!anuncioVigente(),
+    // Qué reglas se actualizan solas en los Términos (porque el texto usa su comodín)
+    legal_comodines_usados: comodinesUsados(config.legal_terminos),
     plantillas: Object.fromEntries(Object.keys(PLANTILLAS_CORREO).map(k => [k, plantillaParaEditor(k)]))
   });
 });
@@ -3976,6 +3989,321 @@ app.post('/api/superadmin/plantillas/prueba', verifyAdminToken, verifySuperAdmin
     pruebasDeCorreoHoy.cantidad++;
     const enviado = await encolarCorreo({ to: config.email_alertas, subject: `[PRUEBA] ${correo.subject}`, html: correo.html, text: correo.text });
     res.json({ mensaje: enviado ? `Listo: te mandamos la prueba a ${config.email_alertas}` : 'No se pudo mandar la prueba ahora; quedó para reintentar' });
+  } catch (error) {
+    manejarError(res, error);
+  }
+});
+
+// ========== TÉRMINOS Y CONDICIONES Y POLÍTICA DE PRIVACIDAD EDITABLES ==========
+// Se editan desde el admin supremo (Avanzado > Términos y privacidad). Cada documento se guarda en
+// la tabla configuracion (claves legal_terminos y legal_privacidad); si no hay nada guardado, se
+// usa el texto de legal-por-defecto.json (el de siempre). Las páginas terminos.html y
+// privacidad.html lo piden a /api/legal/:doc y, si el servidor no responde, muestran el texto que
+// traen escrito (el de la última versión publicada en ellas).
+//
+// El texto se escribe en un formato simple, nunca en HTML (así no se puede romper la página ni meter
+// código): una línea en blanco separa párrafos; las líneas que empiezan con "- " forman una lista;
+// las que empiezan con "a) ", "b) "… forman una lista con letras; **así** va en negrita; y
+// [texto](destino) es un enlace, donde destino es una página (terminos.html, privacidad.html), una
+// dirección https://…, un correo (mailto:alguien@…) o un correo con mensaje armado (plantilla:clave).
+// Los {comodines} se completan con las reglas del sistema, así el texto no contradice lo que hace.
+const LEGAL_DOCS = { terminos: 'Términos y condiciones', privacidad: 'Política de privacidad' };
+const LEGAL_LIMITES = { intro: 4000, articulos: 40, titulo: 150, texto: 8000, plantillas: 20, asunto: 150, cuerpo: 2000, historial: 10, resumen: 300 };
+
+const NUMEROS_EN_LETRAS = ['cero', 'uno', 'dos', 'tres', 'cuatro', 'cinco', 'seis', 'siete', 'ocho', 'nueve', 'diez', 'once', 'doce',
+  'trece', 'catorce', 'quince', 'dieciséis', 'diecisiete', 'dieciocho', 'diecinueve', 'veinte', 'veintiuno', 'veintidós', 'veintitrés',
+  'veinticuatro', 'veinticinco', 'veintiséis', 'veintisiete', 'veintiocho', 'veintinueve', 'treinta'];
+// "dos (2) días", "una (1) hora" (femenino), "uno (1) día" -> "un (1) día"
+function cantidadLegal(n, singular, plural, femenino = false) {
+  let letras = NUMEROS_EN_LETRAS[n] || String(n);
+  if (n === 1) letras = femenino ? 'una' : 'un';
+  if (n === 21) letras = femenino ? 'veintiuna' : 'veintiún';
+  return `${letras} (${n}) ${n === 1 ? singular : plural}`;
+}
+const NOMBRES_DIAS_SEMANA = ['domingo', 'lunes', 'martes', 'miércoles', 'jueves', 'viernes', 'sábado'];
+// [1,2,3,4,5] -> "de lunes a viernes"; [1,3,5] -> "los lunes, miércoles y viernes"
+function diasEnTexto(dias) {
+  const orden = [1, 2, 3, 4, 5, 6, 0].filter(d => dias.includes(d));
+  if (orden.length === 7) return 'todos los días';
+  const posicion = d => [1, 2, 3, 4, 5, 6, 0].indexOf(d);
+  const seguidos = orden.every((d, i) => i === 0 || posicion(d) === posicion(orden[i - 1]) + 1);
+  if (seguidos && orden.length >= 3) return `de ${NOMBRES_DIAS_SEMANA[orden[0]]} a ${NOMBRES_DIAS_SEMANA[orden[orden.length - 1]]}`;
+  const plurales = orden.map(d => (d === 6 ? 'sábados' : d === 0 ? 'domingos' : NOMBRES_DIAS_SEMANA[d]));
+  return 'los ' + (plurales.length === 1 ? plurales[0] : `${plurales.slice(0, -1).join(', ')} y ${plurales[plurales.length - 1]}`);
+}
+
+// Comodines de los textos legales: su descripción para el editor y su valor con las reglas vigentes
+const COMODINES_LEGALES = {
+  dias_reserva: 'Días en que se reserva (Reglas). Ej.: "de lunes a viernes"',
+  horario_altillo: 'Horario y duración del Altillo (Configuración). Ej.: "entre las 07:00 y las 19:00 (…), con una duración mínima de una (1) hora y máxima de dos (2) horas por Reserva"',
+  plazo_cancelacion_frente: 'Hasta cuándo se cancela gratis el Frente (Reglas). Ej.: "hasta dos (2) días calendario antes de la fecha de la Reserva"',
+  plazo_cancelacion_altillo: 'Lo mismo para el Altillo. Ej.: "hasta el inicio de la Reserva"',
+  recordatorio: 'La frase del recordatorio (Reglas). Ej.: "Dos (2) días antes de la fecha, el Sistema enviará un recordatorio al correo registrado."',
+  max_acompanantes: 'Máximo de acompañantes en el Altillo. Ej.: "cuatro (4)"',
+  meses_conservacion: 'Plazo de conservación de los datos. Ej.: "seis (6) meses"'
+};
+function valoresComodinesLegales() {
+  const frente = reglaEspacio(3), altillo = reglaEspacio(1);
+  const hora = h => `${String(h).padStart(2, '0')}:00`;
+  const plazo = r => (r.plazo_cancelacion_dias > 0
+    ? `hasta ${cantidadLegal(r.plazo_cancelacion_dias, 'día calendario', 'días calendario')} antes de la fecha de la Reserva`
+    : 'hasta el inicio de la Reserva');
+  const recordatorioDe = r => `${cantidadLegal(r.recordatorio_dias, 'día', 'días')} antes de la fecha`;
+  let recordatorio;
+  if (frente.recordatorio && altillo.recordatorio && frente.recordatorio_dias === altillo.recordatorio_dias) {
+    const t = recordatorioDe(frente);
+    recordatorio = `${t[0].toUpperCase()}${t.slice(1)}, el Sistema enviará un recordatorio al correo registrado.`;
+  } else if (frente.recordatorio || altillo.recordatorio) {
+    const partes = [];
+    if (frente.recordatorio) partes.push(`en el Frente, ${recordatorioDe(frente)}`);
+    if (altillo.recordatorio) partes.push(`en el Altillo, ${recordatorioDe(altillo)}`);
+    recordatorio = `El Sistema enviará un recordatorio al correo registrado ${partes.join(', y ')}.`;
+  } else {
+    recordatorio = 'El Sistema no envía recordatorios: el Usuario es responsable de recordar su Reserva.';
+  }
+  const mismosDias = frente.dias.join() === altillo.dias.join();
+  const desde = config.altillo_hora_desde, hasta = config.altillo_hora_hasta;
+  return {
+    dias_reserva: mismosDias ? diasEnTexto(frente.dias) : `en el Frente, ${diasEnTexto(frente.dias)}, y en el Altillo, ${diasEnTexto(altillo.dias)}`,
+    horario_altillo: `entre las ${hora(desde)} y las ${hora(hasta)} (el primer bloque comienza a las ${hora(desde)} y el último, a las ${hora(hasta - 1)}), con una duración mínima de una (1) hora y máxima de ${cantidadLegal(config.altillo_max_horas, 'hora', 'horas', true)} por Reserva`,
+    plazo_cancelacion_frente: plazo(frente),
+    plazo_cancelacion_altillo: plazo(altillo),
+    recordatorio,
+    max_acompanantes: `${NUMEROS_EN_LETRAS[MAX_ACOMPANANTES] || MAX_ACOMPANANTES} (${MAX_ACOMPANANTES})`,
+    meses_conservacion: cantidadLegal(MESES_CONSERVACION, 'mes', 'meses')
+  };
+}
+
+// href para un enlace del texto, o null si el destino no está permitido
+function hrefLegal(destino, plantillas) {
+  if (/^plantilla:[a-z][a-z0-9_]*$/.test(destino)) {
+    const p = plantillas[destino.slice(10)];
+    return p ? `mailto:${p.para}?subject=${encodeURIComponent(p.asunto)}&body=${encodeURIComponent(p.cuerpo)}` : null;
+  }
+  if (/^(terminos|privacidad)\.html$/.test(destino)) return destino;
+  if (/^https:\/\/[^\s<>"']+$/.test(destino)) return destino;
+  if (/^mailto:[^\s<>"'?]+@[^\s<>"'?]+$/.test(destino)) return destino;
+  return null;
+}
+
+// Una línea (o párrafo) del formato simple -> HTML seguro. Los comodines se completan antes de
+// escapar; después se aplican las negritas y los enlaces sobre el texto ya escapado.
+function lineaLegalHtml(texto, valores, plantillas) {
+  let t = String(texto).replace(/\{([a-z_]+)\}/g, (todo, n) => (valores[n] !== undefined ? valores[n] : todo));
+  t = escapeHtml(t);
+  t = t.replace(/\*\*([^*]+?)\*\*/g, '<strong>$1</strong>');
+  t = t.replace(/\[([^\]]+?)\]\(([^)\s]+)\)/g, (todo, etiqueta, destino) => {
+    const href = hrefLegal(destino.replace(/&amp;/g, '&'), plantillas);
+    return href ? `<a href="${escapeHtml(href)}">${etiqueta}</a>` : etiqueta;
+  });
+  return t;
+}
+
+// Texto de un artículo (o la introducción) -> HTML: párrafos, listas con viñetas y listas con letras
+function textoLegalHtml(texto, valores, plantillas) {
+  const bloques = String(texto || '').replace(/\r\n/g, '\n').split(/\n\s*\n/).map(b => b.split('\n').map(l => l.trim()).filter(Boolean)).filter(b => b.length);
+  const salida = [];
+  for (const lineas of bloques) {
+    // Un bloque puede mezclar un texto y una lista seguida: se separa en tramos del mismo tipo
+    let tramo = null;
+    const cerrar = () => {
+      if (!tramo) return;
+      if (tramo.tipo === 'p') salida.push(`<p>${tramo.lineas.map(l => lineaLegalHtml(l, valores, plantillas)).join('<br>')}</p>`);
+      else salida.push(`<ul${tramo.tipo === 'letras' ? ' class="letras"' : ''}>\n${tramo.lineas.map(l => `  <li>${lineaLegalHtml(l, valores, plantillas)}</li>`).join('\n')}\n</ul>`);
+      tramo = null;
+    };
+    for (const linea of lineas) {
+      const tipo = /^- /.test(linea) ? 'lista' : (/^[a-z]\) /.test(linea) ? 'letras' : 'p');
+      const contenido = tipo === 'lista' ? linea.slice(2) : linea;
+      if (!tramo || tramo.tipo !== tipo) { cerrar(); tramo = { tipo, lineas: [] }; }
+      tramo.lineas.push(contenido);
+    }
+    cerrar();
+  }
+  return salida.join('\n');
+}
+
+const MESES_LARGOS = ['enero', 'febrero', 'marzo', 'abril', 'mayo', 'junio', 'julio', 'agosto', 'septiembre', 'octubre', 'noviembre', 'diciembre'];
+function fechaLegal(iso) {
+  const [a, m, d] = String(iso).split('-').map(Number);
+  return `${d} de ${MESES_LARGOS[m - 1]} de ${a}`;
+}
+
+// Un documento entero -> HTML (la línea de versión, la introducción y los artículos)
+function documentoLegalHtml(doc, valores = valoresComodinesLegales()) {
+  const plantillas = doc.plantillas || {};
+  const partes = [`<p class="fecha">Versión ${escapeHtml(doc.version)} · Vigente desde el ${fechaLegal(doc.vigente_desde)}</p>`];
+  if (doc.intro) partes.push(textoLegalHtml(doc.intro, valores, plantillas));
+  for (const a of doc.articulos) {
+    partes.push(`<h2>${lineaLegalHtml(a.titulo, valores, plantillas)}</h2>`);
+    partes.push(textoLegalHtml(a.texto, valores, plantillas));
+  }
+  return partes.join('\n');
+}
+
+// Revisa comodines y enlaces de un texto: lanza un Error con el lugar y el motivo
+function revisarTextoLegal(texto, plantillas, donde) {
+  const desconocidos = [...String(texto).matchAll(/\{([^{}\s]+)\}/g)].map(m => m[1]).filter(c => !COMODINES_LEGALES[c]);
+  if (desconocidos.length) throw new Error(`${donde}: no existe ${desconocidos.map(c => `{${c}}`).join(', ')}. Podés usar: ${Object.keys(COMODINES_LEGALES).map(c => `{${c}}`).join(', ')}`);
+  for (const m of String(texto).matchAll(/\[([^\]]+?)\]\(([^)\s]*)\)/g)) {
+    if (!hrefLegal(m[2], plantillas)) {
+      throw new Error(`${donde}: el enlace "[${m[1]}](${m[2]})" no es válido. Usá terminos.html, privacidad.html, https://…, mailto:correo@… o plantilla:clave (una de las de "Correos con mensaje armado")`);
+    }
+  }
+}
+
+// Valida y normaliza el contenido editable (introducción, artículos y plantillas de correo)
+function validarContenidoLegal(v) {
+  const L = LEGAL_LIMITES;
+  const texto = (t, max, nombre, unaLinea) => {
+    const s = String(t == null ? '' : t).replace(/\r\n/g, '\n');
+    const r = unaLinea ? s.replace(/\s+/g, ' ').trim() : s.replace(/[ \t]+\n/g, '\n').trim();
+    if (r.length > max) throw new Error(`${nombre}: hasta ${max} caracteres`);
+    return r;
+  };
+  const plantillasCrudas = v.plantillas && typeof v.plantillas === 'object' ? v.plantillas : {};
+  const claves = Object.keys(plantillasCrudas);
+  if (claves.length > L.plantillas) throw new Error(`Puede haber hasta ${L.plantillas} correos con mensaje armado`);
+  const plantillas = {};
+  for (const clave of claves) {
+    if (!/^[a-z][a-z0-9_]{0,29}$/.test(clave)) throw new Error(`El nombre "${clave}" de un correo con mensaje armado solo puede tener minúsculas, números y _`);
+    const p = plantillasCrudas[clave] || {};
+    const para = String(p.para || '').trim().toLowerCase();
+    if (!EMAIL_REGEX.test(para) || para.length > 100) throw new Error(`Correo con mensaje armado "${clave}": la dirección no es válida`);
+    plantillas[clave] = { para, asunto: texto(p.asunto, L.asunto, `Correo "${clave}" — el asunto`, true), cuerpo: texto(p.cuerpo, L.cuerpo, `Correo "${clave}" — el mensaje`, false) };
+    if (!plantillas[clave].asunto) throw new Error(`Correo con mensaje armado "${clave}": escribí el asunto`);
+  }
+  const intro = texto(v.intro, L.intro, 'La introducción', false);
+  revisarTextoLegal(intro, plantillas, 'La introducción');
+  const articulos = Array.isArray(v.articulos) ? v.articulos : [];
+  if (!articulos.length) throw new Error('Tiene que haber al menos un artículo');
+  if (articulos.length > L.articulos) throw new Error(`Puede haber hasta ${L.articulos} artículos`);
+  const limpios = articulos.map((a, i) => {
+    const titulo = texto(a && a.titulo, L.titulo, `El título del artículo ${i + 1}`, true);
+    const cuerpo = texto(a && a.texto, L.texto, `El texto de "${titulo || `artículo ${i + 1}`}"`, false);
+    if (titulo.length < 3) throw new Error(`El artículo ${i + 1} necesita un título`);
+    if (!cuerpo) throw new Error(`"${titulo}" está vacío`);
+    revisarTextoLegal(titulo, plantillas, `El título "${titulo}"`);
+    revisarTextoLegal(cuerpo, plantillas, `"${titulo}"`);
+    return { titulo, texto: cuerpo };
+  });
+  return { intro, articulos: limpios, plantillas };
+}
+
+function validarDocumentoLegal(valor) {
+  const v = valor || {};
+  if (!/^\d{1,3}\.\d{1,3}$/.test(String(v.version || ''))) throw new Error('Versión inválida');
+  if (!esFechaValida(v.vigente_desde)) throw new Error('Fecha de vigencia inválida');
+  const historial = (Array.isArray(v.historial) ? v.historial : []).slice(0, LEGAL_LIMITES.historial).map(h => ({
+    version: String(h.version || ''), vigente_desde: String(h.vigente_desde || ''), reemplazada_en: String(h.reemplazada_en || ''),
+    resumen: String(h.resumen || '').slice(0, LEGAL_LIMITES.resumen),
+    contenido: h.contenido && Array.isArray(h.contenido.articulos) ? h.contenido : null
+  }));
+  return { version: String(v.version), vigente_desde: v.vigente_desde, ...validarContenidoLegal(v), historial };
+}
+
+// Comodines que usa un documento (para saber qué reglas se actualizan solas en el texto)
+function comodinesUsados(doc) {
+  const todo = [doc.intro, ...doc.articulos.map(a => `${a.titulo}\n${a.texto}`)].join('\n');
+  return Object.keys(COMODINES_LEGALES).filter(c => todo.includes(`{${c}}`));
+}
+
+// Público: el documento vigente ya armado
+app.get('/api/legal/:doc', lecturaPublicaLimiter, (req, res) => {
+  const clave = req.params.doc;
+  if (!Object.prototype.hasOwnProperty.call(LEGAL_DOCS, clave)) return res.status(404).json({ error: 'Documento inexistente' });
+  const doc = config[`legal_${clave}`];
+  // Sin guardar en caché: una versión recién publicada se ve al instante (el texto es chico)
+  res.set('Cache-Control', 'no-cache');
+  res.json({ titulo: LEGAL_DOCS[clave], version: doc.version, vigente_desde: doc.vigente_desde, html: documentoLegalHtml(doc) });
+});
+
+// Admin supremo: los dos documentos para editar, los comodines con su valor de hoy y el historial
+app.get('/api/superadmin/legal', verifyAdminToken, verifySuperAdmin, (req, res) => {
+  const valores = valoresComodinesLegales();
+  res.json({
+    documentos: Object.fromEntries(Object.keys(LEGAL_DOCS).map(clave => {
+      const d = config[`legal_${clave}`];
+      return [clave, {
+        titulo: LEGAL_DOCS[clave], version: d.version, vigente_desde: d.vigente_desde, intro: d.intro, articulos: d.articulos, plantillas: d.plantillas,
+        comodines_usados: comodinesUsados(d),
+        historial: d.historial.map((h, i) => ({ indice: i, version: h.version, vigente_desde: h.vigente_desde, reemplazada_en: h.reemplazada_en, resumen: h.resumen, tiene_texto: !!h.contenido }))
+      }];
+    })),
+    comodines: Object.entries(COMODINES_LEGALES).map(([clave, descripcion]) => ({ clave, descripcion, valor: valores[clave] }))
+  });
+});
+
+// Vista previa con lo que está escrito en el editor (aunque no se haya guardado)
+app.post('/api/superadmin/legal/vista-previa', verifyAdminToken, verifySuperAdmin, verificarCSRF, (req, res) => {
+  const b = req.body || {};
+  const clave = String(b.doc || '');
+  if (!Object.prototype.hasOwnProperty.call(LEGAL_DOCS, clave)) return res.status(400).json({ error: 'Documento inexistente' });
+  try {
+    const contenido = validarContenidoLegal(b);
+    const actual = config[`legal_${clave}`];
+    res.set('Cache-Control', 'no-store');
+    res.json({ html: documentoLegalHtml({ version: actual.version, vigente_desde: actual.vigente_desde, ...contenido }) });
+  } catch (err) {
+    res.status(400).json({ error: err.message });
+  }
+});
+
+// Una versión anterior (para verla o descargarla)
+app.get('/api/superadmin/legal/:doc/historial/:i', verifyAdminToken, verifySuperAdmin, (req, res) => {
+  const clave = req.params.doc;
+  if (!Object.prototype.hasOwnProperty.call(LEGAL_DOCS, clave)) return res.status(404).json({ error: 'Documento inexistente' });
+  const h = config[`legal_${clave}`].historial[Number(req.params.i)];
+  if (!h || !h.contenido) return res.status(404).json({ error: 'Esa versión no tiene el texto guardado' });
+  res.json({ titulo: LEGAL_DOCS[clave], version: h.version, vigente_desde: h.vigente_desde, html: documentoLegalHtml({ version: h.version, vigente_desde: h.vigente_desde, ...h.contenido }) });
+});
+
+// Guardar. publicar: 'correccion' (misma versión y fecha: para errores de tipeo) o 'menor' / 'mayor'
+// (versión nueva: 1.3 -> 1.4 o 2.0, con su fecha de vigencia y un resumen de lo que cambió; la
+// versión anterior queda en el historial con su texto)
+app.post('/api/superadmin/legal/:doc', verifyAdminToken, verifySuperAdmin, verificarCSRF, async (req, res) => {
+  try {
+    const clave = req.params.doc;
+    if (!Object.prototype.hasOwnProperty.call(LEGAL_DOCS, clave)) return res.status(404).json({ error: 'Documento inexistente' });
+    const b = req.body || {};
+    const publicar = String(b.publicar || '');
+    if (!['correccion', 'menor', 'mayor'].includes(publicar)) return res.status(400).json({ error: 'Elegí cómo guardar: corrección o versión nueva' });
+    let contenido;
+    try {
+      contenido = validarContenidoLegal(b);
+    } catch (err) {
+      return res.status(400).json({ error: err.message });
+    }
+    const actual = config[`legal_${clave}`];
+    const sinCambios = JSON.stringify({ intro: actual.intro, articulos: actual.articulos, plantillas: actual.plantillas }) === JSON.stringify(contenido);
+    let nuevo;
+    if (publicar === 'correccion') {
+      if (sinCambios) return res.json({ mensaje: 'No había cambios' });
+      nuevo = { ...actual, ...contenido };
+    } else {
+      const resumen = String(b.resumen || '').replace(/\s+/g, ' ').trim();
+      if (resumen.length < 5 || resumen.length > LEGAL_LIMITES.resumen) return res.status(400).json({ error: `Escribí en pocas palabras qué cambió (entre 5 y ${LEGAL_LIMITES.resumen} caracteres): queda en el historial` });
+      const hoy = hoyEnAsuncion().toISOString().slice(0, 10);
+      const vigente = b.vigente_desde ? String(b.vigente_desde) : hoy;
+      if (!esFechaValida(vigente) || vigente < hoy) return res.status(400).json({ error: 'La fecha de vigencia tiene que ser hoy o un día que venga' });
+      const [mayor, menor] = actual.version.split('.').map(Number);
+      const version = publicar === 'mayor' ? `${mayor + 1}.0` : `${mayor}.${menor + 1}`;
+      nuevo = {
+        ...contenido, version, vigente_desde: vigente,
+        historial: [{ version: actual.version, vigente_desde: actual.vigente_desde, reemplazada_en: hoy, resumen,
+          contenido: { intro: actual.intro, articulos: actual.articulos, plantillas: actual.plantillas } }, ...actual.historial].slice(0, LEGAL_LIMITES.historial)
+      };
+    }
+    let validado;
+    try {
+      validado = validarDocumentoLegal(nuevo);
+    } catch (err) {
+      return res.status(400).json({ error: err.message });
+    }
+    await guardarFilasConfig([{ clave: `legal_${clave}`, valor: comoTexto(`legal_${clave}`, validado) }]);
+    registrarActividad(req.admin.rol, publicar === 'correccion' ? `Corrigió ${LEGAL_DOCS[clave]}` : `Publicó ${LEGAL_DOCS[clave]} v${validado.version}`,
+      publicar === 'correccion' ? `v${validado.version}` : `vigente desde el ${fechaDMY(validado.vigente_desde)} · ${validado.historial[0].resumen}`);
+    res.json({ mensaje: publicar === 'correccion' ? 'Corrección guardada' : `Publicada la versión ${validado.version}`, version: validado.version, vigente_desde: validado.vigente_desde });
   } catch (error) {
     manejarError(res, error);
   }

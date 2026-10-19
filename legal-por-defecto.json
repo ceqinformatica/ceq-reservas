@@ -1,0 +1,173 @@
+{
+  "terminos": {
+    "version": "1.3",
+    "vigente_desde": "2026-10-16",
+    "intro": "Los presentes Términos y Condiciones de Uso (en adelante, los «Términos») regulan el acceso y la utilización del sistema de reservas de espacios disponible en **reservas.ceq-una.com**, administrado por el **Centro de Estudiantes de Química de la Facultad de Ciencias Químicas de la Universidad Nacional de Asunción** (en adelante, el «CEQ»). Su lectura es necesaria antes de realizar cualquier reserva.",
+    "articulos": [
+      {
+        "titulo": "Artículo 1. Definiciones",
+        "texto": "A los efectos de estos Términos, se entiende por:\n\n- **Sistema:** el sitio web reservas.ceq-una.com, sus páginas, el servidor y la base de datos que lo componen, y los correos electrónicos que emite.\n- **Usuario:** toda persona que accede al Sistema o realiza, consulta o cancela una reserva.\n- **Espacios:** los lugares administrados por el CEQ que pueden reservarse a través del Sistema, en particular el «Frente» y el «Altillo».\n- **Reserva:** la asignación de un Espacio a un Usuario en una fecha y horario determinados, confirmada por el Sistema.\n- **Moderadores:** las personas designadas por el CEQ para administrar el Sistema.\n- **Comisión Directiva:** el órgano de conducción del CEQ."
+      },
+      {
+        "titulo": "Artículo 2. Aceptación",
+        "texto": "2.1. Al realizar una Reserva, anotarse en la lista de espera o enviar un reporte, el Usuario declara haber leído, comprendido y aceptado íntegramente estos Términos y la [Política de Privacidad](privacidad.html), que forma parte integrante de ellos.\n\n2.2. El Usuario que no esté de acuerdo con estos Términos deberá abstenerse de utilizar el Sistema."
+      },
+      {
+        "titulo": "Artículo 3. Naturaleza del servicio",
+        "texto": "3.1. El Sistema es un servicio gratuito que el CEQ pone a disposición de la comunidad de la Facultad de Ciencias Químicas para organizar el uso de sus Espacios. Su utilización no genera relación de consumo, contractual onerosa ni de ninguna otra índole entre el Usuario y el CEQ distinta de la aquí regulada.\n\n3.2. La Reserva otorga un permiso de uso personal, temporal, revocable y no transferible del Espacio, en la fecha y el horario confirmados, con sujeción a estos Términos y a las normas del CEQ y de la Facultad."
+      },
+      {
+        "titulo": "Artículo 4. Capacidad del Usuario",
+        "texto": "4.1. El Usuario declara ser mayor de edad. Las personas menores de dieciocho (18) años solo podrán utilizar el Sistema con la autorización de su padre, madre o tutor, quien será responsable del cumplimiento de estos Términos.\n\n4.2. Quien realiza una Reserva en nombre de una agrupación, comisión u otra organización declara contar con facultades para hacerlo y responde personalmente por el uso del Espacio."
+      },
+      {
+        "titulo": "Artículo 5. Espacios, horarios y límites",
+        "texto": "5.1. **Frente:** se reserva por turnos fijos. Los turnos vigentes son los que el Sistema muestra al momento de reservar.\n\n5.2. **Altillo:** cuando se encuentre habilitado, se reserva por bloques de una (1) hora, {horario_altillo}. En el día en curso, solo podrá reservarse un bloque que no haya finalizado.\n\n5.3. Las Reservas se realizan {dias_reserva}, únicamente en los meses que el CEQ habilite. El CEQ podrá anunciar en el Sistema la fecha y hora de apertura de cada mes.\n\n5.4. Cada Usuario podrá tener, como máximo, la cantidad de Reservas activas por mes y por Espacio que indique el Sistema. A tal efecto, se considerará como una misma persona a quien utilice el mismo correo electrónico o el mismo número de celular.\n\n5.5. Los horarios, turnos, límites y demás condiciones operativas podrán ser modificados por el CEQ. Las condiciones aplicables a cada Reserva son las vigentes al momento de su confirmación."
+      },
+      {
+        "titulo": "Artículo 6. Procedimiento de reserva",
+        "texto": "6.1. Para reservar, el Usuario deberá consignar su nombre y apellido, un número de celular y una dirección de correo electrónico propios, válidos y en uso, e indicar el motivo de la Reserva. En el Frente, el motivo se selecciona de la lista que ofrece el Sistema.\n\n6.2. En el Altillo, el Usuario podrá declarar hasta {max_acompanantes} acompañantes, con nombre y número de celular. Al hacerlo, declara contar con el consentimiento de cada acompañante para proporcionar sus datos, conforme a la Política de Privacidad.\n\n6.3. La Reserva se considera confirmada cuando el Sistema muestra en pantalla el aviso de reserva confirmada. El código de cancelación se envía al correo electrónico registrado; su falta de recepción por causas ajenas al CEQ no afecta la validez de la Reserva, y la cancelación puede gestionarse también por el canal de contacto del espacio.\n\n6.4. El Usuario es el único responsable de la exactitud de los datos que proporciona. El CEQ no está obligado a verificarlos, pero podrá cancelar las Reservas realizadas con datos falsos, incompletos o de terceros sin autorización."
+      },
+      {
+        "titulo": "Artículo 7. Cancelación por el Usuario",
+        "texto": "7.1. El Usuario podrá cancelar su Reserva mediante el código de cancelación o mediante el enlace personal incluido en los correos del Sistema.\n\n7.2. **Frente:** la cancelación a través del Sistema es posible {plazo_cancelacion_frente}. Vencido ese plazo, solo podrá gestionarse a través del canal de contacto del Frente que indican los correos del Sistema, y su aceptación quedará a criterio del CEQ.\n\n7.3. El Usuario se compromete a cancelar con la mayor anticipación posible toda Reserva que no vaya a utilizar. {recordatorio}\n\n7.4. El código de cancelación es personal y se almacena cifrado; el CEQ no puede recuperarlo. El Usuario es responsable de su custodia."
+      },
+      {
+        "titulo": "Artículo 8. Lista de espera",
+        "texto": "8.1. Cuando no queden lugares disponibles en un Espacio en el mes habilitado, el Usuario podrá registrar su nombre y su correo electrónico para recibir un aviso si se libera un lugar en ese mes.\n\n8.2. El aviso se envía una única vez, de forma simultánea, a todas las personas registradas para ese Espacio y ese mes. El lugar liberado corresponde a quien lo reserve primero. La inscripción en la lista de espera no otorga prioridad ni garantiza la obtención de una Reserva."
+      },
+      {
+        "titulo": "Artículo 9. Facultades del CEQ",
+        "texto": "El CEQ, por medio de la Comisión Directiva o de los Moderadores, podrá:\n\na) Reservar Espacios con prioridad para actividades institucionales del CEQ, sin sujeción a los límites del artículo 5.\nb) Bloquear días u horarios por razones institucionales, de mantenimiento, de seguridad o de fuerza mayor.\nc) Cancelar Reservas por causa justificada, entre otras: actividad institucional, uso distinto del declarado, datos falsos, incumplimiento de estos Términos o disposición de las autoridades de la Facultad. En tales casos, se notificará al Usuario por correo electrónico con indicación del motivo.\nd) Registrar si cada Reserva fue utilizada, con fines de organización.\ne) Restringir temporal o definitivamente el uso del Sistema a quien incumpla estos Términos, previa evaluación de la Comisión Directiva.\nf) Habilitar, suspender o deshabilitar Espacios o el Sistema en su totalidad."
+      },
+      {
+        "titulo": "Artículo 10. Obligaciones del Usuario en el uso de los Espacios",
+        "texto": "El Usuario se obliga a: (a) utilizar el Espacio únicamente para el motivo declarado; (b) respetar estrictamente el horario reservado; (c) cuidar las instalaciones, el mobiliario y el equipamiento; (d) dejar el Espacio limpio y en las mismas condiciones en que lo recibió; (e) cumplir las normas del CEQ, de la Facultad y de la Universidad; y (f) responder por los daños que él, sus acompañantes o invitados causen al Espacio o a sus bienes."
+      },
+      {
+        "titulo": "Artículo 11. Conductas prohibidas",
+        "texto": "Queda prohibido al Usuario:\n\na) Proporcionar datos falsos, inexactos o de terceros sin su autorización.\nb) Ceder, transferir, vender o comercializar Reservas, o reservar para terceros con el fin de eludir los límites del artículo 5.\nc) Utilizar programas, robots u otros medios automatizados para realizar Reservas o consultas, o realizar un número de solicitudes que afecte el funcionamiento del Sistema.\nd) Intentar acceder sin autorización al panel de administración, a la base de datos o a información de otros Usuarios, o vulnerar de cualquier forma la seguridad del Sistema.\ne) Incluir en el motivo, en los reportes o en cualquier otro campo contenido ofensivo, discriminatorio, ilícito o que contenga datos personales sensibles.\nf) Utilizar el Sistema para fines distintos de la reserva de Espacios.\n\nEl incumplimiento de este artículo faculta al CEQ a cancelar las Reservas involucradas y a adoptar las medidas previstas en el artículo 9, sin perjuicio de las acciones legales que correspondan."
+      },
+      {
+        "titulo": "Artículo 12. Disponibilidad y limitación de responsabilidad",
+        "texto": "12.1. El CEQ procurará que el Sistema funcione de manera continua y correcta, pero no garantiza su disponibilidad ininterrumpida ni la ausencia de errores. El Sistema puede verse afectado por mantenimiento, fallas técnicas, interrupciones de los proveedores de servicios o causas de fuerza mayor.\n\n12.2. En la máxima medida permitida por la ley, el CEQ no será responsable por: (a) la imposibilidad de realizar o cancelar una Reserva por fallas del Sistema, de la conexión del Usuario o de terceros; (b) la falta de recepción de correos electrónicos por causas ajenas al CEQ, incluidas las que dependan del proveedor de correo del Usuario o de su carpeta de correo no deseado; (c) la pérdida de oportunidades derivada de la asignación de lugares por orden de llegada; ni (d) los daños que deriven del uso indebido de los Espacios por parte de los Usuarios.\n\n12.3. Ante una discrepancia entre la información del Sistema y una decisión de la Comisión Directiva, prevalecerá la decisión de la Comisión Directiva. Ante errores técnicos evidentes (por ejemplo, dos Reservas para un mismo turno), el CEQ podrá corregirlos y lo comunicará a los Usuarios afectados.\n\n12.4. Los Usuarios pueden informar fallas mediante la opción «Reportar un problema» del Sistema."
+      },
+      {
+        "titulo": "Artículo 13. Propiedad intelectual",
+        "texto": "El nombre, el logotipo y los signos distintivos del CEQ, así como el diseño y los contenidos del Sistema, pertenecen al CEQ o a sus respectivos titulares. No se otorga al Usuario ninguna licencia sobre ellos más allá del uso del Sistema conforme a estos Términos."
+      },
+      {
+        "titulo": "Artículo 14. Comunicaciones",
+        "texto": "El Usuario acepta que las comunicaciones relativas a sus Reservas (confirmaciones, recordatorios, cancelaciones y avisos) se realicen por correo electrónico a la dirección que haya registrado, y que estas se consideren válidamente efectuadas desde su envío."
+      },
+      {
+        "titulo": "Artículo 15. Modificaciones",
+        "texto": "El CEQ podrá modificar estos Términos en cualquier momento. La versión vigente se publicará en esta página, con indicación de su número de versión y fecha de vigencia. Las modificaciones no afectarán las Reservas ya confirmadas, salvo que sean necesarias por razones de seguridad o por disposición de autoridad competente. El uso del Sistema con posterioridad a la publicación implica la aceptación de la nueva versión."
+      },
+      {
+        "titulo": "Artículo 16. Divisibilidad",
+        "texto": "Si alguna disposición de estos Términos fuera declarada inválida o inaplicable, dicha circunstancia no afectará la validez de las restantes, que conservarán plena vigencia."
+      },
+      {
+        "titulo": "Artículo 17. Ley aplicable y jurisdicción",
+        "texto": "Estos Términos se rigen por las leyes de la República del Paraguay. Las partes procurarán resolver de buena fe cualquier controversia, en primer lugar, mediante comunicación con el CEQ y, de ser necesario, ante la Comisión Directiva. De no lograrse una solución, serán competentes los juzgados y tribunales de la República del Paraguay."
+      },
+      {
+        "titulo": "Artículo 18. Contacto",
+        "texto": "Para consultas, reclamos o notificaciones relativas a estos Términos: [reservas@ceq-una.com](plantilla:consulta). Centro de Estudiantes de Química, Facultad de Ciencias Químicas, Universidad Nacional de Asunción, Campus Universitario, San Lorenzo, Paraguay."
+      }
+    ],
+    "plantillas": {
+      "consulta": {
+        "para": "reservas@ceq-una.com",
+        "asunto": "Consulta sobre los Términos y Condiciones - Reservas CEQ",
+        "cuerpo": "Hola,\n\nQuiero hacer una consulta / reclamo sobre las reservas.\n\nNombre y apellido:\nCorreo o celular que usé en la reserva:\nNúmero de reserva (si lo tengo):\n\nMi consulta o reclamo:\n\n\nGracias."
+      }
+    },
+    "historial": []
+  },
+  "privacidad": {
+    "version": "1.2",
+    "vigente_desde": "2026-10-16",
+    "intro": "La presente Política de Privacidad (en adelante, la «Política») informa de qué manera el **Centro de Estudiantes de Química de la Facultad de Ciencias Químicas de la Universidad Nacional de Asunción** (en adelante, el «CEQ») recolecta, utiliza, almacena, comunica y protege los datos personales de las personas que utilizan el sistema de reservas disponible en **reservas.ceq-una.com** (en adelante, el «Sistema»), así como los derechos que les asisten. Los términos con mayúscula inicial tienen el significado que les asignan los [Términos y Condiciones](terminos.html).",
+    "articulos": [
+      {
+        "titulo": "Artículo 1. Marco normativo",
+        "texto": "El tratamiento de datos personales se realiza conforme a la Constitución Nacional, en particular sus artículos 33 (derecho a la intimidad) y 135 (habeas data); a la Ley N° 1682/2001 «Que reglamenta la información de carácter privado» y sus modificaciones; y a la Ley N° 7593/2025 «De Protección de Datos Personales», a cuyos principios el CEQ se adecua desde la vigencia de esta Política, así como a las demás normas aplicables y a las que las modifiquen o reglamenten."
+      },
+      {
+        "titulo": "Artículo 2. Responsable del tratamiento",
+        "texto": "El responsable del tratamiento es el Centro de Estudiantes de Química, con domicilio en la Facultad de Ciencias Químicas, Universidad Nacional de Asunción, Campus Universitario, San Lorenzo, Paraguay. El tratamiento es gestionado por su Secretaría de Informática. Canal de contacto para cualquier asunto relativo a datos personales: [reservas@ceq-una.com](plantilla:consulta)."
+      },
+      {
+        "titulo": "Artículo 3. Datos personales que se tratan",
+        "texto": "a) **Datos de la Reserva:** nombre y apellido, número de celular, correo electrónico, motivo, Espacio, fecha y horario.\nb) **Datos de acompañantes** (solo Altillo): nombre y número de celular de hasta cuatro (4) personas.\nc) **Datos de gestión:** fecha y hora de creación de la Reserva; en su caso, fecha, autor y motivo de la cancelación; registro de asistencia; código de cancelación, que se almacena exclusivamente de forma cifrada e irreversible.\nd) **Lista de espera:** nombre, correo electrónico, Espacio y mes.\ne) **Reportes de problemas:** el texto que el Usuario redacte y, de manera opcional, la página y el navegador desde los que se envía.\nf) **Datos técnicos:** dirección IP y fecha y hora de los accesos, que se tratan de forma automática para la seguridad del Sistema y la prevención de abusos.\n\nEl CEQ **no solicita datos sensibles** (por ejemplo, relativos a la salud, la religión, la ideología o la orientación sexual). El Usuario debe abstenerse de incluirlos en el motivo, en los reportes o en cualquier otro campo de texto libre."
+      },
+      {
+        "titulo": "Artículo 4. Finalidades",
+        "texto": "Los datos se tratan exclusivamente para las siguientes finalidades:\n\na) Gestionar las Reservas, la lista de espera y el uso ordenado de los Espacios.\nb) Verificar el cumplimiento de los límites de Reservas por persona.\nc) Enviar comunicaciones vinculadas con el servicio: confirmación, código y enlace de cancelación, recordatorio, avisos de la lista de espera y notificaciones de cancelación.\nd) Contactar al Usuario ante cambios o incidencias relativas a su Reserva.\ne) Elaborar estadísticas internas de uso de los Espacios, de manera agregada.\nf) Proteger la seguridad del Sistema, prevenir usos abusivos y atender los reportes de problemas.\n\nLos datos **no se utilizan con fines publicitarios ni comerciales, no se venden ni se ceden a terceros**, y no se someten a decisiones automatizadas que produzcan efectos jurídicos sobre el Usuario, con excepción de la aplicación automática de las reglas de reserva descritas en los Términos."
+      },
+      {
+        "titulo": "Artículo 5. Bases de legitimación",
+        "texto": "El tratamiento se basa en: (a) el **consentimiento** libre, previo, expreso e informado del Usuario, que se otorga al realizar una Reserva, anotarse en la lista de espera o enviar un reporte, previa puesta a disposición de esta Política; (b) la necesidad de **prestar el servicio solicitado** por el Usuario; y (c) el **interés legítimo** del CEQ en la seguridad del Sistema y en la organización de sus Espacios."
+      },
+      {
+        "titulo": "Artículo 6. Datos de terceros",
+        "texto": "Cuando el Usuario proporciona datos de acompañantes u otras personas, declara bajo su responsabilidad que cuenta con su consentimiento para hacerlo y que les ha informado del contenido de esta Política. El CEQ suprimirá dichos datos a solicitud de su titular."
+      },
+      {
+        "titulo": "Artículo 7. Publicidad del calendario",
+        "texto": "7.1. El calendario público del Sistema muestra el **nombre** de quien reservó y el **motivo** de cada Reserva activa, con dos finalidades: (a) que cada Usuario pueda **corroborar por sí mismo que su Reserva quedó registrada** correctamente, y (b) garantizar la **transparencia** en la asignación de los Espacios. La publicación de estos dos datos es una condición necesaria del servicio: el Usuario es informado de ello antes de reservar y lo acepta expresamente al confirmar la Reserva.\n\n7.2. El número de celular, el correo electrónico, los datos de los acompañantes y el código de cancelación **nunca** se publican."
+      },
+      {
+        "titulo": "Artículo 8. Destinatarios y acceso",
+        "texto": "8.1. Acceden a los datos completos únicamente los Moderadores y la Secretaría de Informática del CEQ, mediante un panel protegido por contraseña, y en la medida necesaria para sus funciones. Quienes acceden están obligados a guardar confidencialidad.\n\n8.2. El CEQ mantiene una planilla interna de gestión que no contiene números de celular ni correos electrónicos.\n\n8.3. Los datos podrán ser comunicados a autoridades competentes cuando exista una obligación legal o una orden judicial."
+      },
+      {
+        "titulo": "Artículo 9. Proveedores de servicios y transferencias internacionales",
+        "texto": "9.1. Para el funcionamiento del Sistema, el CEQ utiliza proveedores que tratan los datos por su cuenta y siguiendo sus instrucciones, exclusivamente para prestar el servicio: Supabase (base de datos), Render (servidor), Vercel (alojamiento de las páginas), Brevo (envío de correos electrónicos), Cloudflare (dominio y red), Google (planilla interna, copias de seguridad y tipografías del sitio) y UptimeRobot (monitoreo de disponibilidad).\n\n9.2. Algunos de estos proveedores almacenan o procesan los datos fuera del Paraguay, principalmente en los Estados Unidos de América. El CEQ selecciona proveedores que aplican medidas de seguridad reconocidas internacionalmente, como el cifrado de las comunicaciones. Al aceptar esta Política, el Usuario consiente expresamente dichas transferencias internacionales."
+      },
+      {
+        "titulo": "Artículo 10. Plazos de conservación",
+        "texto": "a) **Datos de las Reservas y de los acompañantes:** durante el tiempo necesario para la gestión de la Reserva y, posteriormente, como registro del uso de los Espacios, por un plazo máximo de {meses_conservacion} —un semestre— contados desde la fecha de la Reserva. Vencido ese plazo, el nombre, los datos de contacto, los datos de los acompañantes y los textos libres se suprimen de forma automática, y solo se conserva información estadística que no permite identificar a las personas.\nb) **Copias de seguridad:** se generan mensualmente, se almacenan en un espacio privado del CEQ y se conservan por el mismo plazo máximo de {meses_conservacion}.\nc) **Lista de espera:** la inscripción se elimina automáticamente a los siete (7) días de enviado el aviso o a los sesenta (60) días de su registro si no se envió ningún aviso.\nd) **Reportes de problemas:** hasta su resolución y, como máximo, durante {meses_conservacion}.\ne) **Datos técnicos:** durante el plazo breve que establecen los registros de los proveedores, solo con fines de seguridad.\n\nLo anterior se aplica sin perjuicio de la conservación que resulte necesaria para atender obligaciones legales o el ejercicio o la defensa de derechos."
+      },
+      {
+        "titulo": "Artículo 11. Derechos del titular",
+        "texto": "11.1. El titular de los datos puede ejercer, en forma gratuita, los derechos de **acceso**, **rectificación**, **actualización**, **supresión** y **oposición** al tratamiento, así como revocar su consentimiento y ejercer los demás derechos que le reconozca la legislación vigente, incluida la garantía constitucional de habeas data.\n\n11.2. **Procedimiento:** la solicitud se dirige por correo electrónico a [reservas@ceq-una.com](plantilla:derechos), preferentemente desde la dirección registrada en la Reserva, indicando el derecho que se ejerce y los datos a los que se refiere. El CEQ podrá solicitar información adicional razonable para verificar la identidad del solicitante. El CEQ responderá en un plazo máximo de quince (15) días hábiles desde la recepción de la solicitud.\n\n11.3. La supresión de los datos de una Reserva activa, así como la oposición a la publicación del nombre y del motivo prevista en el artículo 7, implican la cancelación de dicha Reserva. La revocación del consentimiento no afecta la licitud del tratamiento realizado con anterioridad.\n\n11.4. Si el titular considera que su solicitud no fue debidamente atendida, podrá recurrir ante la autoridad de control competente o ante los órganos jurisdiccionales de la República del Paraguay."
+      },
+      {
+        "titulo": "Artículo 12. Medidas de seguridad",
+        "texto": "12.1. El CEQ aplica medidas técnicas y organizativas razonables para proteger los datos contra su pérdida, alteración, acceso no autorizado o divulgación, entre ellas: cifrado de todas las comunicaciones (HTTPS); almacenamiento cifrado e irreversible de los códigos de cancelación; acceso al panel restringido mediante contraseñas cifradas, sesiones con vencimiento y protección contra solicitudes falsificadas; restricción del acceso a la base de datos exclusivamente al servidor del Sistema; límites de solicitudes para prevenir abusos; y copias de seguridad periódicas.\n\n12.2. Ningún sistema es completamente invulnerable. En caso de un incidente de seguridad que afecte datos personales, el CEQ adoptará sin demora las medidas necesarias para mitigarlo, lo comunicará a los titulares afectados y, cuando corresponda, a la autoridad competente."
+      },
+      {
+        "titulo": "Artículo 13. Cookies y almacenamiento local",
+        "texto": "13.1. Las páginas públicas del Sistema **no utilizan cookies** de seguimiento, de análisis ni de publicidad. Únicamente guardan en el navegador del Usuario, durante la sesión, la indicación de que ya fue mostrado un aviso, para no repetirlo.\n\n13.2. El panel de administración utiliza cookies técnicas, estrictamente necesarias, para mantener la sesión de los Moderadores.\n\n13.3. Las tipografías del sitio se cargan desde los servidores de Google, que recibe la dirección IP del visitante para entregarlas."
+      },
+      {
+        "titulo": "Artículo 14. Menores de edad",
+        "texto": "El Sistema está dirigido a la comunidad universitaria. Los datos de personas menores de dieciocho (18) años solo podrán proporcionarse con la autorización de su padre, madre o tutor."
+      },
+      {
+        "titulo": "Artículo 15. Modificaciones",
+        "texto": "El CEQ podrá modificar esta Política para adecuarla a cambios normativos o del Sistema. La versión vigente se publicará en esta página, con indicación de su número de versión y fecha de vigencia. Cuando los cambios sean sustanciales, se informarán de manera visible en el Sistema."
+      },
+      {
+        "titulo": "Artículo 16. Contacto",
+        "texto": "Para cualquier consulta sobre esta Política o sobre el tratamiento de sus datos: [reservas@ceq-una.com](plantilla:consulta). Centro de Estudiantes de Química, Facultad de Ciencias Químicas, Universidad Nacional de Asunción, Campus Universitario, San Lorenzo, Paraguay."
+      }
+    ],
+    "plantillas": {
+      "consulta": {
+        "para": "reservas@ceq-una.com",
+        "asunto": "Consulta sobre la Política de Privacidad - Reservas CEQ",
+        "cuerpo": "Hola,\n\nTengo una consulta sobre el tratamiento de mis datos personales en el sistema de reservas.\n\nNombre y apellido:\nCorreo o celular que usé en la reserva:\nNúmero de reserva (si lo tengo):\n\nMi consulta:\n\n\nGracias."
+      },
+      "derechos": {
+        "para": "reservas@ceq-una.com",
+        "asunto": "Solicitud sobre mis datos personales - Reservas CEQ",
+        "cuerpo": "Hola,\n\nQuiero ejercer el siguiente derecho sobre mis datos personales (marcar con una X):\n[ ] Acceso (saber qué datos míos tienen)\n[ ] Rectificación (corregir un dato)\n[ ] Supresión (borrar mis datos)\n[ ] Oposición o revocación del consentimiento\n\nNombre y apellido:\nCorreo o celular que usé en la reserva:\nNúmero de reserva (si lo tengo):\n\nDetalle de lo que pido:\n\n\nGracias."
+      }
+    },
+    "historial": []
+  }
+}
