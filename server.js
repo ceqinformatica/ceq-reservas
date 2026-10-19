@@ -209,12 +209,13 @@ const TEXTOS_PAGINA = {
   lista_espera: { nombre: 'Texto del cuadro de la lista de espera', max: 400, defecto: 'Todos los lugares del {espacio} de ese mes están ocupados. Anotate y, si alguien cancela una reserva de ese mes, te avisamos por correo para que puedas reservar. El lugar es de quien reserve primero.', comodines: ['espacio', 'mes'] },
   cancelar_ayuda: { nombre: 'Ayuda de la página "Cancelar"', max: 300, defecto: 'Ingresá el código de cancelación que te llegó en el email de confirmación. Antes de cancelar te mostramos la reserva para que la revises.' },
   // Texto debajo de "Crear reserva", uno por espacio. Vacío: la página lo arma sola con las Reglas
+  // "{ninguno}" (la casilla "No mostrar ningún texto" del panel): queda solo "Al reservar aceptás…"
   ayuda_reserva_frente: {
-    nombre: 'Texto debajo del botón "Crear reserva" en el Frente (opcional)', max: 400, defecto: '', comodines: ['plazo', 'limite'],
+    nombre: 'Texto debajo del botón "Crear reserva" en el Frente (opcional)', max: 400, defecto: '', comodines: ['plazo', 'limite', 'ninguno'],
     ayuda: 'Vacío = se arma solo con las Reglas (recomendado). Si lo escribís, usá {plazo} y {limite} en vez de escribir los números: se completan con las Reglas del Frente (por ejemplo "2 días antes" y "2 reservas"), así siguen siendo correctos si las cambiás. Los enlaces a los Términos y a la Política de privacidad se agregan siempre al final.'
   },
   ayuda_reserva_altillo: {
-    nombre: 'Texto debajo del botón "Crear reserva" en el Altillo (opcional)', max: 400, defecto: '', comodines: ['plazo', 'limite'],
+    nombre: 'Texto debajo del botón "Crear reserva" en el Altillo (opcional)', max: 400, defecto: '', comodines: ['plazo', 'limite', 'ninguno'],
     ayuda: 'Igual que el del Frente, con las Reglas del Altillo. Sin plazo, {plazo} dice "el inicio de la reserva"; sin límite, {limite} dice "sin límite".'
   }
 };
