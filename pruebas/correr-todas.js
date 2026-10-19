@@ -31,6 +31,7 @@ const PRUEBAS = [
   ['Admin supremo: horario del Altillo, motivos, novedades, lista de espera y datos de una persona', 'probar_supremo.js', [raiz, aqui]],
   ['Herramientas del admin supremo: editar, reenviar, historial, pausa, contraseña, estado y copia', 'probar_herramientas.js', [raiz, aqui]],
   ['Personalización del admin supremo: reglas de los espacios, textos de la página y correos', 'probar_personalizacion.js', [raiz, aqui]],
+  ['Editor de los Términos y la Política de privacidad: comodines, seguridad, versiones e historial', 'probar_legal.js', [raiz, aqui]],
   ['Plazos de conservación de la Política de Privacidad', 'probar_retencion.js', [raiz, aqui]],
   ['Estructura y reglas de la base de datos', 'probar_esquema.js', [raiz, path.join(raiz, 'esquema-base-de-datos.sql')], '@electric-sql/pglite']
 ];
