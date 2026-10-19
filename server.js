@@ -3904,57 +3904,75 @@ function reservaDeEjemplo(espacioId) {
 let pruebasDeCorreoHoy = { dia: '', cantidad: 0 };
 const MAX_PRUEBAS_DE_CORREO_POR_DIA = 30;
 
+// Un correo con datos de ejemplo, armado exactamente igual que los de verdad (correoDeReserva /
+// correoListaEspera), con lo escrito en el editor aunque no se haya guardado. Lo usan la vista
+// previa del panel y "Enviarme una prueba". Devuelve { error } o { subject, html | text }.
+function correoDeEjemplo(b) {
+  const clave = String(b.clave || '');
+  if (!Object.prototype.hasOwnProperty.call(PLANTILLAS_CORREO, clave)) return { error: 'Correo desconocido' };
+  const def = PLANTILLAS_CORREO[clave];
+  const espacioId = Number(b.espacio_id) === 1 ? 1 : 3;
+  // Sin asunto en el pedido: la plantilla guardada
+  let borrador = null;
+  if (b.asunto !== undefined) {
+    try {
+      borrador = validarPlantillasCorreo({ [clave]: { asunto: b.asunto, titulo: b.titulo, mensaje: b.mensaje, texto: b.texto } })[clave] || {};
+    } catch (err) {
+      return { error: err.message };
+    }
+  }
+  // Se arma con el borrador en lugar de la plantilla guardada (todo sincrónico: no se cruza con
+  // ningún otro correo) y se vuelve a dejar como estaba
+  const r = reservaDeEjemplo(espacioId);
+  const guardadas = config.plantillas_correo;
+  try {
+    // borrador {} = lo escrito es igual al original; null = la guardada
+    config.plantillas_correo = { ...guardadas, [clave]: borrador || guardadas[clave] || {} };
+    if (def.tipo === 'html') {
+      const c = correoDeReserva(clave, r, {
+        codigo: ['confirmacion', 'reenvio'].includes(clave) ? 'A1B2C3D4E5F60789' : null,
+        motivo: 'Mantenimiento del espacio', cambios: 'día u horario', valores: { numero: '1234' }
+      });
+      // La reserva de ejemplo es la #0 (su enlace para cancelar no sirve para ninguna real); el
+      // asunto se muestra con un número como los de verdad
+      return { subject: `${c.asunto} - CEQ #1234`, html: c.html };
+    }
+    const mes = r.fecha.slice(0, 7);
+    const diaLargo = fechaLarga(r.fecha);
+    const turno = espacioId === 3 ? nombreTurnoFrente(r.hora_inicio, r.hora_fin) : `${r.hora_inicio} a ${r.hora_fin}`;
+    const c = correoListaEspera(clave, {
+      saludo: saludoCorreo(r.nombre_solicitante), espacio: getEspacioNombre(espacioId), mes: nombreDelMes(mes),
+      dia: diaLargo, dia_corto: diaLargo.replace(/\/\d{4}$/, ''), horario: descripcionHorario(espacioId, r.hora_inicio, r.hora_fin), turno,
+      enlace_quitar: 'https://reservas.ceq-una.com/lista-espera.html?… (enlace de ejemplo)',
+      enlace_reservar: `https://reservas.ceq-una.com/?fecha=${r.fecha}&espacio=${espacioId}`
+    });
+    return { subject: c.asunto, text: c.texto };
+  } finally {
+    config.plantillas_correo = guardadas;
+  }
+}
+
+// Vista previa del panel: el correo tal cual sale (no manda nada)
+app.post('/api/superadmin/plantillas/vista-previa', verifyAdminToken, verifySuperAdmin, verificarCSRF, (req, res) => {
+  try {
+    const correo = correoDeEjemplo(req.body || {});
+    if (correo.error) return res.status(400).json({ error: correo.error });
+    res.set('Cache-Control', 'no-store');
+    res.json({ asunto: correo.subject, html: correo.html || null, texto: correo.text || null });
+  } catch (error) {
+    manejarError(res, error);
+  }
+});
+
 // "Enviarme una prueba": manda el correo (con lo que está escrito en el editor, aunque no se haya
 // guardado) al correo de las alertas, con datos de ejemplo
 app.post('/api/superadmin/plantillas/prueba', verifyAdminToken, verifySuperAdmin, verificarCSRF, async (req, res) => {
   try {
-    const b = req.body || {};
-    const clave = String(b.clave || '');
-    const def = PLANTILLAS_CORREO[clave];
-    if (!def || !Object.prototype.hasOwnProperty.call(PLANTILLAS_CORREO, clave)) return res.status(400).json({ error: 'Correo desconocido' });
-    const espacioId = Number(b.espacio_id) === 1 ? 1 : 3;
-    // Sin asunto en el pedido: se prueba la plantilla guardada
-    let borrador = null;
-    if (b.asunto !== undefined) {
-      try {
-        borrador = validarPlantillasCorreo({ [clave]: { asunto: b.asunto, titulo: b.titulo, mensaje: b.mensaje, texto: b.texto } })[clave] || {};
-      } catch (err) {
-        return res.status(400).json({ error: err.message });
-      }
-    }
+    const correo = correoDeEjemplo(req.body || {});
+    if (correo.error) return res.status(400).json({ error: correo.error });
     const dia = hoyEnAsuncion().toISOString().slice(0, 10);
     if (pruebasDeCorreoHoy.dia !== dia) pruebasDeCorreoHoy = { dia, cantidad: 0 };
     if (pruebasDeCorreoHoy.cantidad >= MAX_PRUEBAS_DE_CORREO_POR_DIA) return res.status(429).json({ error: `Hoy ya se mandaron ${MAX_PRUEBAS_DE_CORREO_POR_DIA} pruebas. Probá mañana.` });
-
-    // Se arma con el borrador en lugar de la plantilla guardada (todo sincrónico: no se cruza con
-    // ningún otro correo) y se vuelve a dejar como estaba
-    const r = reservaDeEjemplo(espacioId);
-    const guardadas = config.plantillas_correo;
-    let correo;
-    try {
-      // borrador {} = lo escrito es igual al original; null = la guardada
-      config.plantillas_correo = { ...guardadas, [clave]: borrador || guardadas[clave] || {} };
-      if (def.tipo === 'html') {
-        const c = correoDeReserva(clave, r, {
-          codigo: ['confirmacion', 'reenvio'].includes(clave) ? 'A1B2C3D4E5F60789' : null,
-          motivo: 'Mantenimiento del espacio', cambios: 'día u horario', valores: { numero: '1234' }
-        });
-        correo = { subject: c.asunto, html: c.html };
-      } else {
-        const mes = r.fecha.slice(0, 7);
-        const diaLargo = fechaLarga(r.fecha);
-        const turno = espacioId === 3 ? nombreTurnoFrente(r.hora_inicio, r.hora_fin) : `${r.hora_inicio} a ${r.hora_fin}`;
-        const c = correoListaEspera(clave, {
-          saludo: saludoCorreo(r.nombre_solicitante), espacio: getEspacioNombre(espacioId), mes: nombreDelMes(mes),
-          dia: diaLargo, dia_corto: diaLargo.replace(/\/\d{4}$/, ''), horario: descripcionHorario(espacioId, r.hora_inicio, r.hora_fin), turno,
-          enlace_quitar: 'https://reservas.ceq-una.com/lista-espera.html (enlace de ejemplo)',
-          enlace_reservar: `https://reservas.ceq-una.com/?fecha=${r.fecha}&espacio=${espacioId}`
-        });
-        correo = { subject: c.asunto, text: c.texto };
-      }
-    } finally {
-      config.plantillas_correo = guardadas;
-    }
     pruebasDeCorreoHoy.cantidad++;
     const enviado = await encolarCorreo({ to: config.email_alertas, subject: `[PRUEBA] ${correo.subject}`, html: correo.html, text: correo.text });
     res.json({ mensaje: enviado ? `Listo: te mandamos la prueba a ${config.email_alertas}` : 'No se pudo mandar la prueba ahora; quedó para reintentar' });
