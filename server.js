@@ -141,6 +141,334 @@ function getEmailModerador(espacio_id) {
   return [EMAIL_MODERADOR];
 }
 
+// ========== PERSONALIZACIÓN (admin supremo) ==========
+// Reglas de cada espacio, textos de la página, cinta de anuncios y plantillas de los correos.
+// Todo se guarda en la tabla configuracion; si no hay nada guardado, se usan estos valores, que
+// son los de siempre.
+
+// Reglas de cada espacio. dias: días de la semana en que se puede reservar (0 domingo … 6 sábado).
+// plazo_cancelacion_dias: hasta cuántos días antes se cancela desde la página (0 = hasta que
+// empiece). anticipacion: cuántos días antes como mínimo y como máximo se puede reservar (máximo
+// 0 = sin límite; igual manda qué meses están habilitados). limite_por_persona_mes: solo el
+// Altillo (el del Frente es max_reservas_por_persona_mes, 0 = sin límite). normas: se muestran al
+// reservar (hay que tildar que se leyeron) y van en la confirmación.
+const REGLAS_POR_DEFECTO = {
+  3: { dias: [1, 2, 3, 4, 5], plazo_cancelacion_dias: 2, recordatorio: true, recordatorio_dias: 2, anticipacion_min_dias: 0, anticipacion_max_dias: 0, limite_por_persona_mes: 0, normas: '' },
+  1: { dias: [1, 2, 3, 4, 5], plazo_cancelacion_dias: 0, recordatorio: true, recordatorio_dias: 2, anticipacion_min_dias: 0, anticipacion_max_dias: 0, limite_por_persona_mes: 0, normas: '' }
+};
+
+function validarReglasEspacios(valor) {
+  const v = valor || {};
+  const entero = (x, min, max, nombre) => {
+    const n = Number(x);
+    if (!Number.isInteger(n) || n < min || n > max) throw new Error(`${nombre} tiene que ser un número entre ${min} y ${max}`);
+    return n;
+  };
+  const resultado = {};
+  for (const id of [3, 1]) {
+    const r = { ...REGLAS_POR_DEFECTO[id], ...(v[id] || v[String(id)] || {}) };
+    const espacio = id === 3 ? 'Frente' : 'Altillo';
+    const dias = [...new Set((Array.isArray(r.dias) ? r.dias : []).map(Number))].filter(d => Number.isInteger(d) && d >= 0 && d <= 6).sort();
+    if (!dias.length) throw new Error(`${espacio}: elegí al menos un día de la semana`);
+    const normas = String(r.normas == null ? '' : r.normas).replace(/\r\n/g, '\n').trim();
+    if (normas.length > 1500) throw new Error(`${espacio}: las normas pueden tener hasta 1500 caracteres`);
+    const min = entero(r.anticipacion_min_dias, 0, 30, `${espacio}: la anticipación mínima`);
+    const max = entero(r.anticipacion_max_dias, 0, 365, `${espacio}: la anticipación máxima`);
+    if (max > 0 && max < min) throw new Error(`${espacio}: la anticipación máxima no puede ser menor que la mínima`);
+    resultado[id] = {
+      dias,
+      plazo_cancelacion_dias: entero(r.plazo_cancelacion_dias, 0, 14, `${espacio}: el plazo para cancelar`),
+      recordatorio: r.recordatorio !== false,
+      recordatorio_dias: entero(r.recordatorio_dias, 1, 7, `${espacio}: los días del recordatorio`),
+      anticipacion_min_dias: min,
+      anticipacion_max_dias: max,
+      limite_por_persona_mes: id === 3 ? 0 : entero(r.limite_por_persona_mes, 0, 20, `${espacio}: el límite por persona`),
+      normas
+    };
+  }
+  return resultado;
+}
+
+function reglaEspacio(espacioId) {
+  return config.reglas_espacios[Number(espacioId)] || REGLAS_POR_DEFECTO[Number(espacioId)] || REGLAS_POR_DEFECTO[1];
+}
+
+// Máximo de reservas por persona por mes en el espacio (null = sin límite)
+function limitePorPersona(espacioId) {
+  if (Number(espacioId) === 3) return config.max_reservas_por_persona_mes;
+  const n = reglaEspacio(espacioId).limite_por_persona_mes;
+  return n > 0 ? n : null;
+}
+
+// Textos de la página que se pueden cambiar. Vacío o ausente = el texto de siempre.
+const TEXTOS_PAGINA = {
+  titulo_inicio: { nombre: 'Título de la página', max: 60, defecto: 'Reserva de espacios' },
+  intro_inicio: { nombre: 'Texto debajo del título (opcional)', max: 400, defecto: '' },
+  mes_no_habilitado: { nombre: 'Aviso de "mes no habilitado"', max: 300, defecto: 'Este mes todavía no está habilitado para reservas. Probá con "Hoy" o consultá con un moderador.' },
+  confirmacion_extra: { nombre: 'Texto extra en la ventana de "reserva confirmada" (opcional)', max: 400, defecto: '' },
+  lista_espera: { nombre: 'Texto del cuadro de la lista de espera', max: 400, defecto: 'Todos los lugares del {espacio} de ese mes están ocupados. Anotate y, si alguien cancela una reserva de ese mes, te avisamos por correo para que puedas reservar. El lugar es de quien reserve primero.', comodines: ['espacio', 'mes'] },
+  cancelar_ayuda: { nombre: 'Ayuda de la página "Cancelar"', max: 300, defecto: 'Ingresá el código de cancelación que te llegó en el email de confirmación. Antes de cancelar te mostramos la reserva para que la revises.' }
+};
+
+// Comodines {así} que se permiten en un texto: si aparece uno desconocido, es un error de tipeo
+function revisarComodines(texto, permitidos, nombre) {
+  const usados = [...String(texto).matchAll(/\{([^{}\s]+)\}/g)].map(m => m[1]);
+  const malos = usados.filter(u => !permitidos.includes(u));
+  if (malos.length) {
+    throw new Error(`${nombre}: no existe ${malos.map(m => `{${m}}`).join(', ')}. ${permitidos.length ? `Podés usar: ${permitidos.map(p => `{${p}}`).join(', ')}` : 'Este texto no lleva comodines.'}`);
+  }
+}
+
+function validarTextosPagina(valor) {
+  const v = valor || {};
+  const resultado = {};
+  for (const [clave, def] of Object.entries(TEXTOS_PAGINA)) {
+    if (v[clave] == null) continue;
+    const texto = String(v[clave]).replace(/\r\n/g, '\n').trim();
+    if (texto.length > def.max) throw new Error(`${def.nombre}: hasta ${def.max} caracteres`);
+    if (clave === 'titulo_inicio' && !texto) continue; // vacío = el de siempre
+    revisarComodines(texto, def.comodines || [], def.nombre);
+    if (texto !== def.defecto) resultado[clave] = texto;
+  }
+  return resultado;
+}
+
+function validarAnuncio(valor) {
+  const v = valor || {};
+  const texto = String(v.texto == null ? '' : v.texto).replace(/\s+/g, ' ').trim();
+  if (texto.length > 200) throw new Error('El anuncio puede tener hasta 200 caracteres');
+  const activo = v.activo === true;
+  if (activo && texto.length < 3) throw new Error('Escribí el texto del anuncio');
+  const hasta = v.hasta == null || v.hasta === '' ? null : v.hasta;
+  if (hasta !== null && !esFechaValida(hasta)) throw new Error('La fecha "mostrar hasta" del anuncio no es válida');
+  const tipo = v.tipo === 'importante' ? 'importante' : 'info';
+  return { activo, texto, hasta, tipo };
+}
+
+function anuncioVigente() {
+  const a = config.anuncio;
+  if (!a || !a.activo || !a.texto) return null;
+  if (a.hasta && a.hasta < hoyEnAsuncion().toISOString().slice(0, 10)) return null;
+  return { texto: a.texto, tipo: a.tipo };
+}
+
+// Plantillas de los correos que le llegan a la gente. En los correos con formato se editan el
+// asunto, el título y el mensaje; los detalles de la reserva, el código, los enlaces para
+// cancelar, la regla de cancelación y el contacto los agrega el sistema siempre, para que no se
+// puedan borrar sin querer. Al asunto de los correos de una reserva se le agrega siempre
+// " - CEQ #número" (Gmail no los agrupa y el sistema los reconoce). Los de la lista de espera van
+// solo con texto (así no caen en Promociones) y se edita el texto entero; el enlace es obligatorio.
+const COMODINES_RESERVA = ['nombre', 'espacio', 'fecha', 'horario', 'numero'];
+const PLANTILLAS_CORREO = {
+  confirmacion: {
+    nombre: 'Confirmación de reserva', tipo: 'html', comodines: COMODINES_RESERVA,
+    asunto: '✓ Confirmación de Reserva', titulo: '¡Reserva Confirmada!',
+    mensaje: 'Hola {nombre},\n\nTu reserva ha sido confirmada exitosamente.'
+  },
+  recordatorio: {
+    nombre: 'Recordatorio (días antes)', tipo: 'html', comodines: COMODINES_RESERVA,
+    asunto: '⏰ Recordatorio: {espacio}, {fecha}', titulo: 'Te recordamos tu reserva',
+    mensaje: 'Hola {nombre},\n\nTenés reservado el {espacio} el {fecha}, {horario}.\n\nSi la vas a usar, no tenés que hacer nada. ¡Te esperamos!\n\n¿Ya no la vas a usar? Cancelala, así otra persona puede aprovechar el lugar:'
+  },
+  cancelacion: {
+    nombre: 'Cancelación hecha por la persona', tipo: 'html', comodines: COMODINES_RESERVA,
+    asunto: 'Cancelación Confirmada', titulo: '¡Has cancelado correctamente tu reserva!', mensaje: ''
+  },
+  cancelacion_moderador: {
+    nombre: 'Cancelación hecha por un moderador', tipo: 'html', comodines: [...COMODINES_RESERVA, 'motivo'],
+    asunto: 'Tu Reserva Fue Cancelada por el Moderador', titulo: 'Tu reserva fue cancelada por el moderador',
+    mensaje: 'Motivo: {motivo}'
+  },
+  plazo_vencido: {
+    nombre: 'Quiso cancelar fuera de plazo', tipo: 'html', comodines: COMODINES_RESERVA,
+    asunto: 'Período de Cancelación Gratuita Finalizado', titulo: 'El período de cancelación gratuita ha finalizado',
+    mensaje: 'Intentaste cancelar tu reserva del {espacio}, pero el período de cancelación gratuita ya venció.'
+  },
+  reenvio: {
+    nombre: 'Confirmación reenviada', tipo: 'html', comodines: COMODINES_RESERVA,
+    asunto: '✓ Confirmación de Reserva (reenvío)', titulo: 'Tu reserva sigue confirmada',
+    mensaje: 'Hola {nombre},\n\nTe reenviamos la confirmación de tu reserva, con un código de cancelación nuevo (el anterior ya no sirve).'
+  },
+  modificada: {
+    nombre: 'Reserva modificada', tipo: 'html', comodines: [...COMODINES_RESERVA, 'cambios'],
+    asunto: 'Tu reserva fue modificada', titulo: 'Tu reserva fue modificada',
+    mensaje: 'Hola {nombre},\n\nActualizamos tu reserva ({cambios}). Estos son los datos vigentes:'
+  },
+  lista_espera_inscripcion: {
+    nombre: 'Lista de espera: inscripción', tipo: 'texto', comodines: ['saludo', 'espacio', 'mes', 'enlace_quitar'], obligatorios: ['enlace_quitar'],
+    asunto: 'Tu inscripción en la lista de espera del {espacio} ({mes})',
+    texto: '{saludo}\n\nTe confirmamos que quedaste anotado/a en la lista de espera del {espacio} para {mes}.\n\nSi alguien cancela una reserva de ese mes, te escribimos a este correo con el día y el turno que quedó libre.\n\nSi te anotaste por error o ya conseguiste otro lugar, podés quitar tu inscripción desde este enlace:\n{enlace_quitar}\n\nSaludos,\nCentro de Estudiantes de Química'
+  },
+  lista_espera_aviso: {
+    nombre: 'Lista de espera: se liberó un lugar', tipo: 'texto', comodines: ['saludo', 'espacio', 'mes', 'dia', 'dia_corto', 'horario', 'turno', 'enlace_reservar'], obligatorios: ['enlace_reservar'],
+    asunto: 'Se liberó un lugar en el {espacio}: {dia_corto}, {turno}',
+    texto: '{saludo}\n\n¡Buenas noticias! Alguien canceló su reserva y se liberó un lugar en el {espacio}:\n\nDía: {dia}\nHorario: {horario}\n\nPara reservarlo, entrá acá:\n{enlace_reservar}\n\nEl lugar es de quien reserve primero, así que conviene hacerlo cuanto antes.\n\nTe escribimos porque te anotaste en la lista de espera del {espacio} para {mes}. Este es el único aviso: si después querés otro, volvé a anotarte en la página.\n\nSaludos,\nCentro de Estudiantes de Química'
+  }
+};
+
+function validarPlantillasCorreo(valor) {
+  const v = valor || {};
+  const resultado = {};
+  for (const [clave, def] of Object.entries(PLANTILLAS_CORREO)) {
+    const p = v[clave];
+    if (!p) continue;
+    const limpiar = (t, max, nombre, unaLinea) => {
+      const s = String(t == null ? '' : t).replace(/\r\n/g, '\n');
+      const r = unaLinea ? s.replace(/\s+/g, ' ').trim() : s.trim();
+      if (r.length > max) throw new Error(`${def.nombre} — ${nombre}: hasta ${max} caracteres`);
+      if (/[<>]/.test(r)) throw new Error(`${def.nombre} — ${nombre}: no puede tener los signos < ni >`);
+      revisarComodines(r, def.comodines, `${def.nombre} — ${nombre}`);
+      return r;
+    };
+    const asunto = limpiar(p.asunto, 120, 'el asunto', true);
+    if (asunto.length < 3) throw new Error(`${def.nombre}: el asunto no puede quedar vacío`);
+    if (def.tipo === 'html') {
+      const titulo = limpiar(p.titulo, 120, 'el título', true);
+      if (!titulo) throw new Error(`${def.nombre}: el título no puede quedar vacío`);
+      const mensaje = limpiar(p.mensaje, 2000, 'el mensaje', false);
+      if (asunto !== def.asunto || titulo !== def.titulo || mensaje !== def.mensaje) resultado[clave] = { asunto, titulo, mensaje };
+    } else {
+      const texto = limpiar(p.texto, 3000, 'el texto', false);
+      const faltan = (def.obligatorios || []).filter(o => !texto.includes(`{${o}}`));
+      if (faltan.length) throw new Error(`${def.nombre}: el texto tiene que incluir ${faltan.map(f => `{${f}}`).join(', ')} (es el enlace que necesita la persona)`);
+      if (asunto !== def.asunto || texto !== def.texto) resultado[clave] = { asunto, texto };
+    }
+  }
+  return resultado;
+}
+
+// La plantilla vigente (la guardada o la de siempre)
+function plantillaCorreo(clave) {
+  return { ...PLANTILLAS_CORREO[clave], ...(config.plantillas_correo[clave] || {}) };
+}
+
+// Reemplaza los {comodines} por sus valores (los desconocidos quedan como estaban)
+function completarComodines(texto, valores) {
+  return String(texto || '').replace(/\{([^{}\s]+)\}/g, (todo, nombre) => (valores[nombre] !== undefined && valores[nombre] !== null ? String(valores[nombre]) : todo));
+}
+
+// Texto simple -> párrafos HTML (los valores ya se escaparon antes de reemplazarlos)
+function parrafosHtml(texto) {
+  return String(texto || '').split(/\n\s*\n/).map(p => p.trim()).filter(Boolean)
+    .map(p => `<p>${p.split('\n').join('<br>')}</p>`).join('\n');
+}
+
+// Asunto, título y mensaje de un correo con formato, ya completados. `valores` sin escapar.
+function partesCorreo(clave, valores, numeroReserva) {
+  const p = plantillaCorreo(clave);
+  const escapados = Object.fromEntries(Object.entries(valores).map(([k, val]) => [k, escapeHtml(String(val == null ? '' : val))]));
+  const asunto = completarComodines(p.asunto, valores) + (numeroReserva ? ` - CEQ #${numeroReserva}` : '');
+  return {
+    asunto,
+    titulo: `<h2>${completarComodines(escapeHtml(p.titulo), escapados)}</h2>`,
+    mensaje: parrafosHtml(completarComodines(escapeHtml(p.mensaje), escapados))
+  };
+}
+
+// Valores comunes de una reserva para las plantillas
+function valoresReserva(r, extra = {}) {
+  const inicio = String(r.hora_inicio).substring(0, 5);
+  const fin = String(r.hora_fin).substring(0, 5);
+  return {
+    nombre: r.nombre_solicitante, espacio: getEspacioNombre(r.espacio_id), fecha: fechaLarga(r.fecha),
+    horario: descripcionHorario(r.espacio_id, inicio, fin), numero: r.id, ...extra
+  };
+}
+
+// Normas del espacio para los correos (si hay)
+function normasHtml(espacioId) {
+  const normas = reglaEspacio(espacioId).normas;
+  return normas ? `<p><strong>Normas de uso del ${getEspacioNombre(espacioId)}:</strong></p>${parrafosHtml(escapeHtml(normas))}` : '';
+}
+
+// ========== CORREOS A PARTIR DE LAS PLANTILLAS ==========
+// Cada correo que le llega a la gente se arma acá: el asunto, el título y el mensaje salen de la
+// plantilla (admin supremo > Avanzado > Correos); el resto (detalles, código, enlaces, regla de
+// cancelación, normas y contacto) lo agrega siempre el sistema. Lo usan los envíos reales y el
+// botón "Enviarme una prueba", así la prueba es exactamente igual al correo de verdad.
+
+// "por WhatsApp" (Frente) o "a correo@..." (Altillo): por dónde pedir una cancelación fuera de plazo
+function contactoFueraDePlazoHtml(espacioId) {
+  return Number(espacioId) === 3 ? `por <a href="${enlaceWhatsappFrente()}">WhatsApp</a>` : `a ${escapeHtml(correoRespuesta(espacioId))}`;
+}
+
+// Línea de los detalles de la reserva (con o sin negrita en la etiqueta, como estaba cada correo)
+function detallesReservaHtml(r, { conMotivo = false, codigo = null, etiquetasEnNegrita = true, titulo = 'Detalles:' } = {}) {
+  const inicio = String(r.hora_inicio).substring(0, 5);
+  const fin = String(r.hora_fin).substring(0, 5);
+  const etiqueta = t => (etiquetasEnNegrita ? `<strong>${t}:</strong>` : `${t}:`);
+  const acompanantes = Array.isArray(r.acompanantes) ? r.acompanantes : [];
+  const filas = [
+    `<li>${etiqueta('Espacio')} ${getEspacioNombre(r.espacio_id)}</li>`,
+    `<li>${etiqueta('Fecha')} ${r.fecha}</li>`,
+    `<li>${etiqueta('Horario')} ${descripcionHorario(r.espacio_id, inicio, fin)}</li>`
+  ];
+  if (conMotivo) filas.push(`<li>${etiqueta('Motivo')} ${escapeHtml(r.motivo) || 'Sin especificar'}</li>`);
+  if (conMotivo && acompanantes.length) filas.push(`<li>${etiqueta('Acompañantes')} ${escapeHtml(acompanantesTexto(acompanantes))}</li>`);
+  if (codigo) filas.push(`<li>${etiqueta('Código de cancelación')} ${codigo}</li>`);
+  return `<p><strong>${titulo}</strong></p>\n<ul>\n  ${filas.join('\n  ')}\n</ul>`;
+}
+
+// Recordatorio: hasta cuándo se cancela gratis (o "hoy es el último día")
+function plazoRecordatorioHtml(r) {
+  const plazo = reglaEspacio(r.espacio_id).plazo_cancelacion_dias;
+  if (!plazo) return '';
+  const faltan = diferenciaEnDiasCalendario(r.fecha);
+  if (faltan === plazo) {
+    return `<p><strong>Hoy es el último día para cancelar gratis.</strong> Desde mañana, la cancelación solo se gestiona ${contactoFueraDePlazoHtml(r.espacio_id)}.</p>`;
+  }
+  return reglaCancelacionHtml(r.espacio_id, r.fecha);
+}
+
+// Arma un correo de una reserva. extra: { codigo, motivo, cambios, valores }. Devuelve { asunto, html }.
+// `valores` reemplaza comodines (lo usa la prueba con datos de ejemplo).
+function correoDeReserva(clave, r, extra = {}) {
+  const inicio = String(r.hora_inicio).substring(0, 5);
+  const fin = String(r.hora_fin).substring(0, 5);
+  const p = partesCorreo(clave, valoresReserva(r, { motivo: extra.motivo || 'No especificado', cambios: extra.cambios || '', ...(extra.valores || {}) }), r.id);
+  const calendario = `<p><a href="${escapeHtml(enlaceGoogleCalendar(r.espacio_id, r.fecha, inicio, fin))}">📅 Agregar a Google Calendar</a></p>`;
+  const contacto = `<p>Ante cualquier consulta, contactate con: ${getContactoLineaHtml(r.espacio_id)}</p>`;
+  const firma = '<p>Centro de Estudiantes de Química</p>';
+  const cancelar = extra.codigo
+    ? `<p>Si necesitas cancelar, usa tu código en: <a href="https://reservas.ceq-una.com/cancelar.html">Cancelar Reserva</a>, o directamente este enlace: <a href="${enlaceCancelacion(r.id)}">Cancelar mi reserva</a></p>`
+    : `<p>Si necesitás cancelar, usá directamente este enlace: <a href="${enlaceCancelacion(r.id)}">Cancelar mi reserva</a></p>`;
+  let cuerpo;
+  switch (clave) {
+    case 'confirmacion':
+    case 'reenvio':
+    case 'modificada':
+      cuerpo = [p.titulo, p.mensaje, '<hr>', detallesReservaHtml(r, { conMotivo: true, codigo: extra.codigo }), cancelar,
+        reglaCancelacionHtml(r.espacio_id, r.fecha), calendario, normasHtml(r.espacio_id), contacto, firma];
+      break;
+    case 'recordatorio':
+      cuerpo = [p.titulo, p.mensaje,
+        `<p><a href="${enlaceCancelacion(r.id)}" style="display:inline-block;background:#1F3A68;color:#ffffff;padding:10px 18px;border-radius:6px;text-decoration:none;font-weight:bold">Cancelar mi reserva</a></p>`,
+        plazoRecordatorioHtml(r), calendario, normasHtml(r.espacio_id), contacto, firma];
+      break;
+    case 'cancelacion':
+      cuerpo = [p.titulo, p.mensaje, detallesReservaHtml(r, { etiquetasEnNegrita: false }),
+        `<p>Si tienes dudas, contacta con: ${getContactoLineaHtml(r.espacio_id)}</p>`];
+      break;
+    case 'cancelacion_moderador':
+      cuerpo = [p.titulo, p.mensaje, detallesReservaHtml(r, { etiquetasEnNegrita: false, titulo: 'Detalles de la Reserva:' }),
+        `<p>Si tienes preguntas, contacta con: ${getContactoLineaHtml(r.espacio_id)}</p>`];
+      break;
+    case 'plazo_vencido':
+      cuerpo = [p.titulo, p.mensaje, detallesReservaHtml(r, { etiquetasEnNegrita: false, titulo: 'Detalles de la Reserva:' }),
+        `<p>Si de todas formas deseás realizar la cancelación, escribí a ${escapeHtml(correoRespuesta(r.espacio_id))}${Number(r.espacio_id) === 3 ? ` o contactate por WhatsApp: <a href="${enlaceWhatsappFrente()}">Contactar por WhatsApp</a>` : ''}</p>`];
+      break;
+    default:
+      throw new Error(`Plantilla de correo desconocida: ${clave}`);
+  }
+  return { asunto: p.asunto, html: cuerpo.filter(Boolean).join('\n') };
+}
+
+// Correos de la lista de espera (solo texto). Devuelve { asunto, texto }.
+function correoListaEspera(clave, valores) {
+  const p = plantillaCorreo(clave);
+  return { asunto: completarComodines(p.asunto, valores), texto: completarComodines(p.texto, valores) };
+}
+
 // ========== CONFIGURACIÓN EDITABLE (admin supremo > Avanzado > Configuración) ==========
 // Turnos del Frente, límite por persona, contacto del Frente y correo de alertas. Antes estaban
 // fijos en el código. Estos son los valores por defecto (los de siempre): si en la tabla
@@ -174,6 +502,11 @@ const CONFIG_POR_DEFECTO = {
   // Pausa general (admin supremo > Avanzado > Herramientas): no se puede reservar ni anotarse en la
   // lista de espera, y la página muestra el mensaje
   pausa_reservas: { activa: false, mensaje: '' },
+  // Personalización (admin supremo > Avanzado > Reglas, Textos de la página y Correos)
+  reglas_espacios: REGLAS_POR_DEFECTO,
+  textos_pagina: {},
+  anuncio: { activo: false, texto: '', hasta: null, tipo: 'info' },
+  plantillas_correo: {},
   // Ventana de novedades que ve la gente al entrar (una vez por navegador y por versión). Se
   // escribe desde el admin supremo; este es el contenido inicial.
   ventana_novedades: {
@@ -193,7 +526,7 @@ const CONFIG_POR_DEFECTO = {
 };
 let config = { ...CONFIG_POR_DEFECTO };
 // Las que se guardan en la tabla como JSON (el resto, como texto simple)
-const CLAVES_CONFIG_JSON = ['turnos_frente', 'avisos_ocultos', 'ventana_novedades', 'motivos_frente', 'pausa_reservas'];
+const CLAVES_CONFIG_JSON = ['turnos_frente', 'avisos_ocultos', 'ventana_novedades', 'motivos_frente', 'pausa_reservas', 'reglas_espacios', 'textos_pagina', 'anuncio', 'plantillas_correo'];
 const LIMITES_NOVEDADES = { titulo: 80, intro: 600, bloques: 6, bloqueTitulo: 60, bloqueTexto: 400, cierre: 600 };
 
 // Valida cada valor de configuración. Devuelve el valor normalizado o lanza un Error con un
@@ -274,6 +607,10 @@ const VALIDADORES_CONFIG = {
     if (activa && mensaje.length < 5) throw new Error('Escribí el mensaje que va a ver la gente (por ejemplo: "Volvemos el lunes")');
     return { activa, mensaje };
   },
+  reglas_espacios: validarReglasEspacios,
+  textos_pagina: validarTextosPagina,
+  anuncio: validarAnuncio,
+  plantillas_correo: validarPlantillasCorreo,
   avisos_ocultos(valor) {
     if (!Array.isArray(valor)) throw new Error('avisos_ocultos tiene que ser una lista');
     const ids = [...new Set(valor.map(Number))];
@@ -813,19 +1150,22 @@ function descripcionHorario(espacioId, horaInicioHHMM, horaFinHHMM) {
   return rango;
 }
 
-// Regla de cancelación del Frente para los correos de confirmación (la misma que aplica
-// /api/cancelar-por-codigo): gratis con el código hasta 2 días antes; después, por WhatsApp.
+// Regla de cancelación para los correos (la misma que aplica /api/cancelar-por-codigo): gratis
+// con el código hasta N días antes (admin supremo > Reglas; Frente: 2); después, por WhatsApp en
+// el Frente o por correo en el Altillo. Sin plazo (0) no se agrega nada.
 // Antes la gente se enteraba recién cuando intentaba cancelar y el sistema no la dejaba.
 function reglaCancelacionHtml(espacioId, fecha) {
-  if (Number(espacioId) !== 3) return '';
-  const whatsapp = `<a href="${enlaceWhatsappFrente()}">WhatsApp</a>`;
-  if (diferenciaEnDiasCalendario(fecha) < 2) {
-    return `<p>Como faltan menos de 2 días, esta reserva ya no se puede cancelar con el código. Si necesitás cancelarla, escribinos por ${whatsapp}.</p>`;
+  const plazo = reglaEspacio(espacioId).plazo_cancelacion_dias;
+  if (!plazo) return '';
+  const contacto = contactoFueraDePlazoHtml(espacioId);
+  const dias = plazo === 1 ? '1 día' : `${plazo} días`;
+  if (diferenciaEnDiasCalendario(fecha) < plazo) {
+    return `<p>${plazo === 1 ? 'Como la reserva es hoy' : `Como faltan menos de ${dias}`}, esta reserva ya no se puede cancelar con el código. Si necesitás cancelarla, escribinos ${contacto}.</p>`;
   }
   const limite = new Date(fecha + 'T00:00:00Z');
-  limite.setUTCDate(limite.getUTCDate() - 2);
+  limite.setUTCDate(limite.getUTCDate() - plazo);
   const fechaLimite = `${String(limite.getUTCDate()).padStart(2, '0')}/${String(limite.getUTCMonth() + 1).padStart(2, '0')}/${limite.getUTCFullYear()}`;
-  return `<p>Podés cancelarla gratis con tu código hasta el <strong>${fechaLimite}</strong> (2 días antes). Después de esa fecha, la cancelación solo se gestiona por ${whatsapp}.</p>`;
+  return `<p>Podés cancelarla gratis con tu código hasta el <strong>${fechaLimite}</strong> (${dias} antes). Después de esa fecha, la cancelación solo se gestiona ${contacto}.</p>`;
 }
 
 // Enlace que abre Google Calendar con el evento de la reserva ya cargado (en hora de Paraguay).
@@ -1269,7 +1609,19 @@ app.get('/api/configuracion', lecturaPublicaLimiter, (req, res) => {
     altillo: { hora_desde: config.altillo_hora_desde, hora_hasta: config.altillo_hora_hasta, max_horas: config.altillo_max_horas },
     max_acompanantes: MAX_ACOMPANANTES,
     ventana_novedades: ventanaNovedadesVigente(),
-    pausa_reservas: config.pausa_reservas.activa ? config.pausa_reservas : null
+    pausa_reservas: config.pausa_reservas.activa ? config.pausa_reservas : null,
+    // Personalización: reglas de cada espacio, textos de la página (con los de siempre si no se
+    // cambiaron) y la cinta de anuncios si está vigente
+    reglas: Object.fromEntries([3, 1].map(id => {
+      const r = reglaEspacio(id);
+      return [id, {
+        dias: r.dias, plazo_cancelacion_dias: r.plazo_cancelacion_dias, recordatorio: r.recordatorio, recordatorio_dias: r.recordatorio_dias,
+        anticipacion_min_dias: r.anticipacion_min_dias, anticipacion_max_dias: r.anticipacion_max_dias,
+        limite_por_persona_mes: limitePorPersona(id), normas: r.normas
+      }];
+    })),
+    textos: Object.fromEntries(Object.entries(TEXTOS_PAGINA).map(([k, d]) => [k, config.textos_pagina[k] != null ? config.textos_pagina[k] : d.defecto])),
+    anuncio: anuncioVigente()
   });
 });
 
@@ -1362,15 +1714,27 @@ app.post('/api/reservas', crearReservaLimiter, async (req, res) => {
       return res.status(400).json({ error: 'Los acompañantes se anotan solo en las reservas del Altillo' });
     }
 
-    // La fecha no puede ser pasada ni caer en fin de semana. El límite superior ya
-    // no es una ventana fija de 31 días: ahora depende de qué meses haya habilitado
-    // manualmente un moderador (ver tabla meses_habilitados y endpoints /api/meses-habilitados).
+    // La fecha no puede ser pasada ni caer en un día de la semana que el espacio no usa (admin
+    // supremo > Reglas; por defecto, de lunes a viernes). El límite superior ya no es una ventana
+    // fija de 31 días: depende de qué meses haya habilitado un moderador (tabla meses_habilitados)
+    // y, si se configuró, de la anticipación máxima.
     const hoy = hoyEnAsuncion();
     const fechaReserva = new Date(fecha + 'T00:00:00Z');
-    const esFinDeSemana = fechaReserva.getUTCDay() === 0 || fechaReserva.getUTCDay() === 6;
+    const regla = reglaEspacio(espacioIdNum);
 
-    if (isNaN(fechaReserva.getTime()) || fechaReserva < hoy || esFinDeSemana) {
+    if (isNaN(fechaReserva.getTime()) || fechaReserva < hoy || !regla.dias.includes(fechaReserva.getUTCDay())) {
       return res.status(400).json({ error: 'Fecha fuera del rango permitido para reservar' });
+    }
+    const diasDeAnticipacion = diferenciaEnDiasCalendario(fecha);
+    if (diasDeAnticipacion < regla.anticipacion_min_dias) {
+      return res.status(400).json({ error: `El ${getEspacioNombre(espacioIdNum)} se reserva con al menos ${regla.anticipacion_min_dias === 1 ? '1 día' : `${regla.anticipacion_min_dias} días`} de anticipación` });
+    }
+    if (regla.anticipacion_max_dias > 0 && diasDeAnticipacion > regla.anticipacion_max_dias) {
+      return res.status(400).json({ error: `El ${getEspacioNombre(espacioIdNum)} se puede reservar con hasta ${regla.anticipacion_max_dias === 1 ? '1 día' : `${regla.anticipacion_max_dias} días`} de anticipación` });
+    }
+    // Normas de uso: si el espacio tiene, la página pide tildar que se leyeron
+    if (regla.normas && req.body.acepta_normas !== true) {
+      return res.status(400).json({ error: `Para reservar, leé y aceptá las normas de uso del ${getEspacioNombre(espacioIdNum)}` });
     }
 
     // El mes de la fecha pedida tiene que estar explícitamente habilitado. Reemplaza
@@ -1391,12 +1755,13 @@ app.post('/api/reservas', crearReservaLimiter, async (req, res) => {
       return res.status(400).json({ error: 'Ese mes todavía no está habilitado para reservas' });
     }
 
-    // Límite de reservas activas por persona por mes: solo en el Frente (el Altillo no tiene
-    // límite). Cuenta el mes de la FECHA reservada; se reconoce a la persona por correo O por
-    // celular, y no cuentan las canceladas ni las de prioridad del panel. El conteo y el guardado
-    // los hace la base en un solo paso (función crear_reserva_con_cupo, CEQ-02): antes se contaba
-    // acá y se guardaba aparte, y varios pedidos simultáneos podían pasar todos el límite.
-    const limiteCupo = espacioIdNum === 3 ? config.max_reservas_por_persona_mes : null;
+    // Límite de reservas activas por persona por mes en ese espacio: el Frente siempre tiene
+    // (max_reservas_por_persona_mes); el Altillo solo si se configuró en Reglas. Cuenta el mes de
+    // la FECHA reservada; se reconoce a la persona por correo O por celular, y no cuentan las
+    // canceladas ni las de prioridad del panel. El conteo y el guardado los hace la base en un
+    // solo paso (función crear_reserva_con_cupo, CEQ-02): antes se contaba acá y se guardaba
+    // aparte, y varios pedidos simultáneos podían pasar todos el límite.
+    const limiteCupo = limitePorPersona(espacioIdNum);
 
     // VAL-001: si la reserva es para hoy, el horario no puede haber pasado. En el Frente, el
     // turno no puede haber empezado; en el Altillo, el primer bloque de 1 hora no puede haber
@@ -1461,9 +1826,9 @@ app.post('/api/reservas', crearReservaLimiter, async (req, res) => {
       }
       // CEQ03: la base contó que la persona ya llegó al límite del mes
       if (error.code === 'CEQ03') {
-        const cantidad = Number(error.message) || config.max_reservas_por_persona_mes;
+        const cantidad = Number(error.message) || limiteCupo;
         return res.status(400).json({
-          error: `Ya tenés ${cantidad} reservas activas en ${getEspacioNombre(espacioIdNum)} para ese mes. El máximo es ${config.max_reservas_por_persona_mes} por persona. Si necesitás otro turno, cancelá una de tus reservas anteriores.`
+          error: `Ya tenés ${cantidad} ${cantidad === 1 ? 'reserva activa' : 'reservas activas'} en ${getEspacioNombre(espacioIdNum)} para ese mes. El máximo es ${limiteCupo} por persona. Si necesitás otro turno, cancelá una de tus reservas anteriores.`
         });
       }
       // CONC-001: el trigger de la base detectó, de forma atómica, que el horario
@@ -1484,9 +1849,6 @@ app.post('/api/reservas', crearReservaLimiter, async (req, res) => {
     // mismo asunto genérico (ej. dos "Nueva Reserva (Altillo) - CEQ" de personas distintas).
     const reservaId = nuevaReserva[0].id;
 
-    // Línea de contacto según el espacio reservado
-    const contactoLinea = `<p>Ante cualquier consulta, contactate con: ${getContactoLineaHtml(espacioIdNum)}</p>`;
-
     // Valores escapados para uso en HTML de emails (SEC-006): nombre/motivo/contacto son
     // ingresados libremente por cualquier visitante y no deben interpretarse como HTML.
     const nombreSeguro = escapeHtml(nombre_solicitante);
@@ -1496,30 +1858,14 @@ app.post('/api/reservas', crearReservaLimiter, async (req, res) => {
     // Enviar email al usuario (si existe email)
     const correos = [];
     if (email) {
+      // Asunto, título y mensaje: plantilla "Confirmación de reserva" (admin supremo > Correos)
+      const confirmacion = correoDeReserva('confirmacion',
+        { id: reservaId, espacio_id: espacioIdNum, nombre_solicitante, fecha, hora_inicio, hora_fin, motivo, acompanantes }, { codigo });
       correos.push(encolarCorreo({
         to: email,
-        subject: `✓ Confirmación de Reserva - CEQ #${reservaId}`,
+        subject: confirmacion.asunto,
         responderA: correoRespuesta(espacioIdNum),
-        html: `
-          <h2>¡Reserva Confirmada!</h2>
-          <p>Hola ${nombreSeguro},</p>
-          <p>Tu reserva ha sido confirmada exitosamente.</p>
-          <hr>
-          <p><strong>Detalles:</strong></p>
-          <ul>
-            <li><strong>Espacio:</strong> ${nombreEspacio}</li>
-            <li><strong>Fecha:</strong> ${fecha}</li>
-            <li><strong>Horario:</strong> ${descripcionHorario(espacioIdNum, hora_inicio, hora_fin)}</li>
-            <li><strong>Motivo:</strong> ${motivoSeguro || 'Sin especificar'}</li>${acompanantes.length ? `
-            <li><strong>Acompañantes:</strong> ${escapeHtml(acompanantesTexto(acompanantes))}</li>` : ''}
-            <li><strong>Código de cancelación:</strong> ${codigo}</li>
-          </ul>
-          <p>Si necesitas cancelar, usa tu código en: <a href="https://reservas.ceq-una.com/cancelar.html">Cancelar Reserva</a>, o directamente este enlace: <a href="${enlaceCancelacion(reservaId)}">Cancelar mi reserva</a></p>
-          ${reglaCancelacionHtml(espacioIdNum, fecha)}
-          <p><a href="${escapeHtml(enlaceGoogleCalendar(espacioIdNum, fecha, hora_inicio, hora_fin))}">📅 Agregar a Google Calendar</a></p>
-          ${contactoLinea}
-          <p>Centro de Estudiantes de Química</p>
-        `
+        html: confirmacion.html
       }));
     }
 
@@ -1606,24 +1952,18 @@ async function cancelarComoUsuario(reserva, res) {
     return res.status(400).json({ error: 'Esa reserva ya pasó: no se puede cancelar' });
   }
 
-  // Validar período de cancelación para Frente (2 días)
-  if (Number(reserva.espacio_id) === 3 && diferenciaDias < 2) {
+  // Plazo para cancelar gratis (admin supremo > Reglas; por defecto, Frente hasta 2 días antes
+  // y Altillo hasta que empiece)
+  const plazoCancelacion = reglaEspacio(reserva.espacio_id).plazo_cancelacion_dias;
+  if (plazoCancelacion > 0 && diferenciaDias < plazoCancelacion) {
     const emailUsuario = reserva.contacto.split('|')[1]?.trim();
     if (emailUsuario) {
+      const correo = correoDeReserva('plazo_vencido', reserva);
       encolarCorreo({
         to: emailUsuario,
-        subject: `Período de Cancelación Gratuita Finalizado - CEQ #${reserva.id}`,
+        subject: correo.asunto,
         responderA: correoRespuesta(reserva.espacio_id),
-        html: `
-          <h2>El período de cancelación gratuita ha finalizado</h2>
-          <p>Intentaste cancelar tu reserva de <strong>${getEspacioNombre(reserva.espacio_id)}</strong>, pero el período de cancelación gratuita ya venció.</p>
-          <p><strong>Detalles de la Reserva:</strong></p>
-          <ul>
-            <li>Fecha: ${reserva.fecha}</li>
-            <li>Horario: ${descripcionHorario(reserva.espacio_id, reserva.hora_inicio.substring(0,5), reserva.hora_fin.substring(0,5))}</li>
-          </ul>
-          <p>Si de todas formas deseás realizar la cancelación, escribí a ${escapeHtml(config.contacto_email_frente)} o contactate por WhatsApp: <a href="${enlaceWhatsappFrente()}">Contactar por WhatsApp</a></p>
-        `
+        html: correo.html
       });
     }
 
@@ -1644,9 +1984,9 @@ async function cancelarComoUsuario(reserva, res) {
     });
 
     return res.status(403).json({
-      // Solo pasa en el Frente: el contacto es el del Frente (Configuración). La página busca
+      // El contacto es el del espacio (Frente: el de Configuración). La página busca
       // "PERIODO DE CANCELACION" en este texto, no cambiar ese comienzo.
-      error: `EL PERIODO DE CANCELACION GRATUITA HA FINALIZADO. SI DESEA REALIZAR LA CANCELACION CONTACTESE CON ${config.contacto_email_frente}`
+      error: `EL PERIODO DE CANCELACION GRATUITA HA FINALIZADO. SI DESEA REALIZAR LA CANCELACION CONTACTESE CON ${correoRespuesta(reserva.espacio_id)}`
     });
   }
 
@@ -1670,20 +2010,12 @@ async function cancelarComoUsuario(reserva, res) {
   // el email del propio usuario; solo se le muestra como texto de contacto)
   const email = reserva.contacto.split('|')[1]?.trim();
   if (email) {
+    const correo = correoDeReserva('cancelacion', reserva);
     encolarCorreo({
       to: email,
-      subject: `Cancelación Confirmada - CEQ Reservas #${reserva.id}`,
+      subject: correo.asunto,
       responderA: correoRespuesta(reserva.espacio_id),
-      html: `
-        <h2>¡Has cancelado correctamente tu reserva!</h2>
-        <p><strong>Detalles:</strong></p>
-        <ul>
-          <li>Fecha: ${reserva.fecha}</li>
-          <li>Espacio: ${getEspacioNombre(reserva.espacio_id)}</li>
-          <li>Horario: ${descripcionHorario(reserva.espacio_id, reserva.hora_inicio.substring(0,5), reserva.hora_fin.substring(0,5))}</li>
-        </ul>
-        <p>Si tienes dudas, contacta con: ${getContactoLineaHtml(reserva.espacio_id)}</p>
-      `
+      html: correo.html
     });
   }
 
@@ -1750,7 +2082,8 @@ app.get('/api/cancelar-por-enlace', cancelarLimiter, async (req, res) => {
 // Lo que ve la persona antes de confirmar la cancelación (con el enlace o con el código)
 function datosParaCancelar(reserva) {
   const dias = diferenciaEnDiasCalendario(reserva.fecha);
-  const plazoVencido = Number(reserva.espacio_id) === 3 && dias < 2;
+  const plazo = reglaEspacio(reserva.espacio_id).plazo_cancelacion_dias;
+  const plazoVencido = plazo > 0 && dias < plazo;
   const yaPaso = reservaYaTermino(reserva);
   // Para saludar a la persona ("Hola, Ana"): solo el primer nombre, y nada si ya se anonimizó.
   // El enlace y el código son personales (le llegan a su propio correo), así que no exponen
@@ -1766,9 +2099,11 @@ function datosParaCancelar(reserva) {
     ya_paso: yaPaso,
     se_puede_cancelar: reserva.estado === 'activa' && !yaPaso && !plazoVencido,
     plazo_vencido: reserva.estado === 'activa' && !yaPaso && plazoVencido,
+    plazo_dias: plazo,
     whatsapp: Number(reserva.espacio_id) === 3 ? config.contacto_whatsapp_frente : null,
-    // A quién escribir si venció el plazo para cancelar (solo Frente: el contacto del Frente)
-    correo_contacto: Number(reserva.espacio_id) === 3 ? config.contacto_email_frente : null
+    // A quién escribir si venció el plazo para cancelar (Frente: el contacto del Frente). Solo en
+    // ese caso: si no, no hace falta mandar ningún correo
+    correo_contacto: plazoVencido ? correoRespuesta(reserva.espacio_id) : null
   };
 }
 
@@ -1909,11 +2244,15 @@ app.post('/api/lista-espera', listaEsperaLimiter, async (req, res) => {
     // esas frases son típicas de los correos masivos y Gmail los manda a Promociones.
     const espacio = getEspacioNombre(espacioIdNum);
     const elMes = nombreDelMes(mesTexto);
+    // Texto: plantilla "Lista de espera: inscripción" (admin supremo > Correos)
+    const inscripcion = correoListaEspera('lista_espera_inscripcion', {
+      saludo: saludoCorreo(nombreLimpio), espacio, mes: elMes, enlace_quitar: enlaceBajaListaEspera(espacioIdNum, correo)
+    });
     encolarCorreo({
       to: correo,
-      subject: `Tu inscripción en la lista de espera del ${espacio} (${elMes})`,
+      subject: inscripcion.asunto,
       responderA: correoRespuesta(espacioIdNum),
-      text: `${saludoCorreo(nombreLimpio)}\n\nTe confirmamos que quedaste anotado/a en la lista de espera del ${espacio} para ${elMes}.\n\nSi alguien cancela una reserva de ese mes, te escribimos a este correo con el día y el turno que quedó libre.\n\nSi te anotaste por error o ya conseguiste otro lugar, podés quitar tu inscripción desde este enlace:\n${enlaceBajaListaEspera(espacioIdNum, correo)}\n\nSaludos,\nCentro de Estudiantes de Química`
+      text: inscripcion.texto
     });
 
     res.status(201).json({ mensaje: `Listo: si se libera un lugar en ${elMes}, te avisamos por correo.` });
@@ -2010,20 +2349,18 @@ async function avisarListaEspera(reserva) {
       // en la cola, sale igual solo con texto. Si ni siquiera se pudo guardar, vuelve a pendiente.
       const dia = fechaLarga(reserva.fecha); // "lunes 02/11/2026"
       const diaCorto = dia.replace(/\/\d{4}$/, ''); // "lunes 02/11"
-      const turno = Number(reserva.espacio_id) === 3 ? nombreTurnoFrente(inicio, fin) : '';
+      // {turno}: el nombre del turno en el Frente, "09:00 a 11:00" en el Altillo
+      const turno = (Number(reserva.espacio_id) === 3 && nombreTurnoFrente(inicio, fin)) || `${inicio} a ${fin}`;
+      // Texto: plantilla "Lista de espera: se liberó un lugar" (admin supremo > Correos)
+      const aviso = correoListaEspera('lista_espera_aviso', {
+        saludo: saludoCorreo(tomadas[i].nombre), espacio, mes: nombreDelMes(mesLiberado),
+        dia, dia_corto: diaCorto, horario, turno, enlace_reservar: enlace
+      });
       const enviado = await encolarCorreo({
         to: correo,
-        subject: `Se liberó un lugar en el ${espacio}: ${diaCorto}${turno ? ', ' + turno : `, ${inicio} a ${fin}`}`,
+        subject: aviso.asunto,
         responderA: correoRespuesta(reserva.espacio_id),
-        text: `${saludoCorreo(tomadas[i].nombre)}\n\n` +
-          `¡Buenas noticias! Alguien canceló su reserva y se liberó un lugar en el ${espacio}:\n\n` +
-          `Día: ${dia}\n` +
-          `Horario: ${horario}\n\n` +
-          `Para reservarlo, entrá acá:\n${enlace}\n\n` +
-          `El lugar es de quien reserve primero, así que conviene hacerlo cuanto antes.\n\n` +
-          `Te escribimos porque te anotaste en la lista de espera del ${espacio} para ${nombreDelMes(mesLiberado)}. ` +
-          `Este es el único aviso: si después querés otro, volvé a anotarte en la página.\n\n` +
-          `Saludos,\nCentro de Estudiantes de Química`
+        text: aviso.texto
       });
       if (!enviado) {
         avisosListaEsperaHoy.cantidad = Math.max(avisosListaEsperaHoy.cantidad - 1, 0);
@@ -2629,12 +2966,12 @@ app.post('/api/admin/reservas', verifyAdminToken, verificarCSRF, async (req, res
 
     // A diferencia del endpoint público, acá NO se chequea meses_habilitados — es
     // justamente el punto de este endpoint. Sí se sigue exigiendo que la fecha no
-    // sea pasada ni caiga en fin de semana, y el chequeo de horario ya pasado si es hoy.
+    // sea pasada ni caiga en un día que el Frente no usa (Reglas), y el chequeo de horario ya
+    // pasado si es hoy. La anticipación y las normas no se aplican: lo decide la Comisión.
     const hoy = hoyEnAsuncion();
     const fechaReserva = new Date(fecha + 'T00:00:00Z');
-    const esFinDeSemana = fechaReserva.getUTCDay() === 0 || fechaReserva.getUTCDay() === 6;
 
-    if (isNaN(fechaReserva.getTime()) || fechaReserva < hoy || esFinDeSemana) {
+    if (isNaN(fechaReserva.getTime()) || fechaReserva < hoy || !reglaEspacio(3).dias.includes(fechaReserva.getUTCDay())) {
       return res.status(400).json({ error: 'Fecha fuera del rango permitido para reservar' });
     }
 
@@ -2700,29 +3037,13 @@ app.post('/api/admin/reservas', verifyAdminToken, verificarCSRF, async (req, res
     // formulario público, al email que se haya cargado en el contacto de la reserva
     // de prioridad — para que la Comisión Directiva también tenga registro/código.
     const email = contacto.split('|')[1].trim();
+    const confirmacion = correoDeReserva('confirmacion',
+      { id: nuevaReserva[0].id, espacio_id: espacioIdNum, nombre_solicitante, fecha, hora_inicio, hora_fin, motivo, acompanantes: [] }, { codigo });
     encolarCorreo({
       to: email,
-      subject: `✓ Confirmación de Reserva - CEQ #${nuevaReserva[0].id}`,
+      subject: confirmacion.asunto,
       responderA: correoRespuesta(espacioIdNum),
-      html: `
-        <h2>¡Reserva Confirmada!</h2>
-        <p>Hola ${escapeHtml(nombre_solicitante)},</p>
-        <p>Tu reserva ha sido confirmada exitosamente.</p>
-        <hr>
-        <p><strong>Detalles:</strong></p>
-        <ul>
-          <li><strong>Espacio:</strong> Frente</li>
-          <li><strong>Fecha:</strong> ${fecha}</li>
-          <li><strong>Horario:</strong> ${descripcionHorario(espacioIdNum, hora_inicio, hora_fin)}</li>
-          <li><strong>Motivo:</strong> ${escapeHtml(motivo) || 'Sin especificar'}</li>
-          <li><strong>Código de cancelación:</strong> ${codigo}</li>
-        </ul>
-        <p>Si necesitas cancelar, usa tu código en: <a href="https://reservas.ceq-una.com/cancelar.html">Cancelar Reserva</a>, o directamente este enlace: <a href="${enlaceCancelacion(nuevaReserva[0].id)}">Cancelar mi reserva</a></p>
-        ${reglaCancelacionHtml(espacioIdNum, fecha)}
-        <p><a href="${escapeHtml(enlaceGoogleCalendar(espacioIdNum, fecha, hora_inicio, hora_fin))}">📅 Agregar a Google Calendar</a></p>
-        <p>Ante cualquier consulta, contactate con: ${getContactoLineaHtml(espacioIdNum)}</p>
-        <p>Centro de Estudiantes de Química</p>
-      `
+      html: confirmacion.html
     });
 
     // A propósito no se manda aviso al moderador acá (a diferencia del formulario
@@ -2786,21 +3107,12 @@ app.post('/api/admin/cancelar/:reserva_id', verifyAdminToken, verificarCSRF, asy
     // al contacto de Frente en el email del propio usuario)
     const email = reserva.contacto.split('|')[1]?.trim();
     if (email) {
+      const correo = correoDeReserva('cancelacion_moderador', reserva, { motivo: motivo ? String(motivo).slice(0, 300) : '' });
       encolarCorreo({
         to: email,
-        subject: `Tu Reserva Fue Cancelada por el Moderador - CEQ #${reserva.id}`,
+        subject: correo.asunto,
         responderA: correoRespuesta(reserva.espacio_id),
-        html: `
-          <h2>Tu reserva fue cancelada por el moderador</h2>
-          <p><strong>Motivo:</strong> ${escapeHtml(motivo) || 'No especificado'}</p>
-          <p><strong>Detalles de la Reserva:</strong></p>
-          <ul>
-            <li>Fecha: ${reserva.fecha}</li>
-            <li>Espacio: ${getEspacioNombre(reserva.espacio_id)}</li>
-            <li>Horario: ${descripcionHorario(reserva.espacio_id, reserva.hora_inicio.substring(0,5), reserva.hora_fin.substring(0,5))}</li>
-          </ul>
-          <p>Si tienes preguntas, contacta con: ${getContactoLineaHtml(reserva.espacio_id)}</p>
-        `
+        html: correo.html
       });
     }
 
@@ -3412,37 +3724,213 @@ app.post('/api/superadmin/persona/borrar', verifyAdminToken, verifySuperAdmin, v
   }
 });
 
+// ===== PERSONALIZACIÓN (admin supremo > Avanzado > Reglas, Textos de la página y Correos) =====
+// Lo que antes había que pedir que se cambie en el código. Cada guardado queda en el registro de
+// actividad y se aplica al instante (la página lo lee de /api/configuracion).
+
+async function guardarFilasConfig(filas) {
+  const { error } = await supabase.from('configuracion').upsert(filas, { onConflict: 'clave' });
+  if (error) throw error;
+  await cargarConfiguracion();
+}
+
+// La plantilla de un correo como la necesita el editor (la de siempre y la vigente)
+function plantillaParaEditor(clave) {
+  const def = PLANTILLAS_CORREO[clave];
+  const actual = plantillaCorreo(clave);
+  const campos = def.tipo === 'html' ? ['asunto', 'titulo', 'mensaje'] : ['asunto', 'texto'];
+  const tomar = p => Object.fromEntries(campos.map(c => [c, p[c]]));
+  return {
+    nombre: def.nombre, tipo: def.tipo, comodines: def.comodines, obligatorios: def.obligatorios || [],
+    defecto: tomar(def), actual: tomar(actual), modificada: !!config.plantillas_correo[clave]
+  };
+}
+
+app.get('/api/superadmin/personalizacion', verifyAdminToken, verifySuperAdmin, (req, res) => {
+  res.json({
+    reglas: config.reglas_espacios,
+    reglas_defecto: REGLAS_POR_DEFECTO,
+    max_reservas_por_persona_mes: config.max_reservas_por_persona_mes,
+    textos: Object.fromEntries(Object.entries(TEXTOS_PAGINA).map(([k, d]) => [k, {
+      nombre: d.nombre, max: d.max, defecto: d.defecto, comodines: d.comodines || [],
+      valor: config.textos_pagina[k] != null ? config.textos_pagina[k] : d.defecto
+    }])),
+    anuncio: config.anuncio,
+    plantillas: Object.fromEntries(Object.keys(PLANTILLAS_CORREO).map(k => [k, plantillaParaEditor(k)]))
+  });
+});
+
+const NOMBRES_REGLAS = {
+  dias: 'días', plazo_cancelacion_dias: 'plazo para cancelar', recordatorio: 'recordatorio', recordatorio_dias: 'días del recordatorio',
+  anticipacion_min_dias: 'anticipación mínima', anticipacion_max_dias: 'anticipación máxima', limite_por_persona_mes: 'límite por persona', normas: 'normas'
+};
+
+app.post('/api/superadmin/reglas', verifyAdminToken, verifySuperAdmin, verificarCSRF, async (req, res) => {
+  try {
+    const b = req.body || {};
+    let reglas, maximo;
+    try {
+      reglas = validarReglasEspacios(b.reglas);
+      maximo = VALIDADORES_CONFIG.max_reservas_por_persona_mes(b.max_reservas_por_persona_mes == null ? config.max_reservas_por_persona_mes : b.max_reservas_por_persona_mes);
+    } catch (err) {
+      return res.status(400).json({ error: err.message });
+    }
+    const cambios = [];
+    for (const id of [3, 1]) {
+      const antes = reglaEspacio(id);
+      const campos = Object.keys(NOMBRES_REGLAS).filter(k => JSON.stringify(antes[k]) !== JSON.stringify(reglas[id][k])).map(k => NOMBRES_REGLAS[k]);
+      if (id === 3 && maximo !== config.max_reservas_por_persona_mes) campos.push(`límite por persona (${maximo})`);
+      if (campos.length) cambios.push(`${getEspacioNombre(id)}: ${campos.join(', ')}`);
+    }
+    if (!cambios.length) return res.json({ mensaje: 'No había cambios' });
+    await guardarFilasConfig([
+      { clave: 'reglas_espacios', valor: comoTexto('reglas_espacios', reglas) },
+      { clave: 'max_reservas_por_persona_mes', valor: comoTexto('max_reservas_por_persona_mes', maximo) }
+    ]);
+    registrarActividad(req.admin.rol, 'Cambió las reglas de los espacios', cambios.join(' · '));
+    res.json({ mensaje: 'Reglas guardadas', reglas: config.reglas_espacios, max_reservas_por_persona_mes: config.max_reservas_por_persona_mes });
+  } catch (error) {
+    manejarError(res, error);
+  }
+});
+
+app.post('/api/superadmin/textos', verifyAdminToken, verifySuperAdmin, verificarCSRF, async (req, res) => {
+  try {
+    const b = req.body || {};
+    let textos, anuncio;
+    try {
+      textos = validarTextosPagina(b.textos);
+      anuncio = validarAnuncio(b.anuncio === undefined ? config.anuncio : b.anuncio);
+    } catch (err) {
+      return res.status(400).json({ error: err.message });
+    }
+    const cambios = [];
+    Object.keys(TEXTOS_PAGINA).forEach(k => {
+      if ((textos[k] || null) !== (config.textos_pagina[k] || null)) cambios.push(TEXTOS_PAGINA[k].nombre.replace(/ \(opcional\)$/, ''));
+    });
+    if (JSON.stringify(anuncio) !== JSON.stringify(config.anuncio)) {
+      cambios.push(anuncio.activo ? `anuncio: "${anuncio.texto}"${anuncio.hasta ? ` (hasta el ${fechaDMY(anuncio.hasta)})` : ''}` : 'quitó el anuncio');
+    }
+    if (!cambios.length) return res.json({ mensaje: 'No había cambios' });
+    await guardarFilasConfig([
+      { clave: 'textos_pagina', valor: comoTexto('textos_pagina', textos) },
+      { clave: 'anuncio', valor: comoTexto('anuncio', anuncio) }
+    ]);
+    registrarActividad(req.admin.rol, 'Cambió los textos de la página', cambios.join(' · '));
+    res.json({ mensaje: 'Textos guardados', textos_pagina: config.textos_pagina, anuncio: config.anuncio });
+  } catch (error) {
+    manejarError(res, error);
+  }
+});
+
+// Guardar una plantilla ({ clave, asunto, titulo, mensaje } o { clave, asunto, texto }) o volver a
+// la de siempre ({ clave, restaurar: true })
+app.post('/api/superadmin/plantillas', verifyAdminToken, verifySuperAdmin, verificarCSRF, async (req, res) => {
+  try {
+    const b = req.body || {};
+    const clave = String(b.clave || '');
+    if (!Object.prototype.hasOwnProperty.call(PLANTILLAS_CORREO, clave)) return res.status(400).json({ error: 'Correo desconocido' });
+    const todas = { ...config.plantillas_correo };
+    if (b.restaurar === true) delete todas[clave];
+    else todas[clave] = { asunto: b.asunto, titulo: b.titulo, mensaje: b.mensaje, texto: b.texto };
+    let plantillas;
+    try {
+      plantillas = validarPlantillasCorreo(todas);
+    } catch (err) {
+      return res.status(400).json({ error: err.message });
+    }
+    await guardarFilasConfig([{ clave: 'plantillas_correo', valor: comoTexto('plantillas_correo', plantillas) }]);
+    registrarActividad(req.admin.rol, b.restaurar === true ? 'Volvió al correo original' : 'Cambió un correo', PLANTILLAS_CORREO[clave].nombre);
+    res.json({ mensaje: b.restaurar === true ? 'Listo: el correo volvió al texto original' : 'Correo guardado', plantilla: plantillaParaEditor(clave) });
+  } catch (error) {
+    manejarError(res, error);
+  }
+});
+
+// Datos de ejemplo para las pruebas: número de reserva 0 (el enlace para cancelar no sirve para
+// ninguna reserva de verdad) y un día de dentro de unas semanas en que se pueda reservar.
+function reservaDeEjemplo(espacioId) {
+  const fecha = hoyEnAsuncion();
+  fecha.setUTCDate(fecha.getUTCDate() + 10);
+  const dias = reglaEspacio(espacioId).dias;
+  for (let i = 0; i < 7 && !dias.includes(fecha.getUTCDay()); i++) fecha.setUTCDate(fecha.getUTCDate() + 1);
+  const turno = config.turnos_frente[0];
+  const esFrente = Number(espacioId) === 3;
+  return {
+    id: 0, espacio_id: Number(espacioId), nombre_solicitante: 'Ana Pérez', fecha: fecha.toISOString().slice(0, 10),
+    hora_inicio: esFrente ? turno.inicio : '09:00', hora_fin: esFrente ? turno.fin : '11:00',
+    motivo: esFrente ? config.motivos_frente[0] : 'Estudio para el parcial', acompanantes: []
+  };
+}
+
+let pruebasDeCorreoHoy = { dia: '', cantidad: 0 };
+const MAX_PRUEBAS_DE_CORREO_POR_DIA = 30;
+
+// "Enviarme una prueba": manda el correo (con lo que está escrito en el editor, aunque no se haya
+// guardado) al correo de las alertas, con datos de ejemplo
+app.post('/api/superadmin/plantillas/prueba', verifyAdminToken, verifySuperAdmin, verificarCSRF, async (req, res) => {
+  try {
+    const b = req.body || {};
+    const clave = String(b.clave || '');
+    const def = PLANTILLAS_CORREO[clave];
+    if (!def || !Object.prototype.hasOwnProperty.call(PLANTILLAS_CORREO, clave)) return res.status(400).json({ error: 'Correo desconocido' });
+    const espacioId = Number(b.espacio_id) === 1 ? 1 : 3;
+    // Sin asunto en el pedido: se prueba la plantilla guardada
+    let borrador = null;
+    if (b.asunto !== undefined) {
+      try {
+        borrador = validarPlantillasCorreo({ [clave]: { asunto: b.asunto, titulo: b.titulo, mensaje: b.mensaje, texto: b.texto } })[clave] || {};
+      } catch (err) {
+        return res.status(400).json({ error: err.message });
+      }
+    }
+    const dia = hoyEnAsuncion().toISOString().slice(0, 10);
+    if (pruebasDeCorreoHoy.dia !== dia) pruebasDeCorreoHoy = { dia, cantidad: 0 };
+    if (pruebasDeCorreoHoy.cantidad >= MAX_PRUEBAS_DE_CORREO_POR_DIA) return res.status(429).json({ error: `Hoy ya se mandaron ${MAX_PRUEBAS_DE_CORREO_POR_DIA} pruebas. Probá mañana.` });
+
+    // Se arma con el borrador en lugar de la plantilla guardada (todo sincrónico: no se cruza con
+    // ningún otro correo) y se vuelve a dejar como estaba
+    const r = reservaDeEjemplo(espacioId);
+    const guardadas = config.plantillas_correo;
+    let correo;
+    try {
+      // borrador {} = lo escrito es igual al original; null = la guardada
+      config.plantillas_correo = { ...guardadas, [clave]: borrador || guardadas[clave] || {} };
+      if (def.tipo === 'html') {
+        const c = correoDeReserva(clave, r, {
+          codigo: ['confirmacion', 'reenvio'].includes(clave) ? 'A1B2C3D4E5F60789' : null,
+          motivo: 'Mantenimiento del espacio', cambios: 'día u horario', valores: { numero: '1234' }
+        });
+        correo = { subject: c.asunto, html: c.html };
+      } else {
+        const mes = r.fecha.slice(0, 7);
+        const diaLargo = fechaLarga(r.fecha);
+        const turno = espacioId === 3 ? nombreTurnoFrente(r.hora_inicio, r.hora_fin) : `${r.hora_inicio} a ${r.hora_fin}`;
+        const c = correoListaEspera(clave, {
+          saludo: saludoCorreo(r.nombre_solicitante), espacio: getEspacioNombre(espacioId), mes: nombreDelMes(mes),
+          dia: diaLargo, dia_corto: diaLargo.replace(/\/\d{4}$/, ''), horario: descripcionHorario(espacioId, r.hora_inicio, r.hora_fin), turno,
+          enlace_quitar: 'https://reservas.ceq-una.com/lista-espera.html (enlace de ejemplo)',
+          enlace_reservar: `https://reservas.ceq-una.com/?fecha=${r.fecha}&espacio=${espacioId}`
+        });
+        correo = { subject: c.asunto, text: c.texto };
+      }
+    } finally {
+      config.plantillas_correo = guardadas;
+    }
+    pruebasDeCorreoHoy.cantidad++;
+    const enviado = await encolarCorreo({ to: config.email_alertas, subject: `[PRUEBA] ${correo.subject}`, html: correo.html, text: correo.text });
+    res.json({ mensaje: enviado ? `Listo: te mandamos la prueba a ${config.email_alertas}` : 'No se pudo mandar la prueba ahora; quedó para reintentar' });
+  } catch (error) {
+    manejarError(res, error);
+  }
+});
+
 // ===== HERRAMIENTAS DEL ADMIN SUPREMO (octubre 2026) =====
 // Editar una reserva, reenviar su confirmación, ver su historial, pausar las reservas, cambiar
 // la contraseña del panel de los admins, ver el estado del sistema y bajar una copia en el momento.
 
-// Correo a la persona sobre su reserva (confirmación reenviada o reserva modificada). Mismo
-// formato que la confirmación original. `codigo`: si se generó uno nuevo, va en el correo.
-function correoReservaHtml({ titulo, intro, reserva, codigo }) {
-  const inicio = String(reserva.hora_inicio).substring(0, 5);
-  const fin = String(reserva.hora_fin).substring(0, 5);
-  const acompanantes = Array.isArray(reserva.acompanantes) ? reserva.acompanantes : [];
-  return `
-    <h2>${escapeHtml(titulo)}</h2>
-    <p>Hola ${escapeHtml(reserva.nombre_solicitante)},</p>
-    <p>${escapeHtml(intro)}</p>
-    <hr>
-    <p><strong>Detalles:</strong></p>
-    <ul>
-      <li><strong>Espacio:</strong> ${getEspacioNombre(reserva.espacio_id)}</li>
-      <li><strong>Fecha:</strong> ${reserva.fecha}</li>
-      <li><strong>Horario:</strong> ${descripcionHorario(reserva.espacio_id, inicio, fin)}</li>
-      <li><strong>Motivo:</strong> ${escapeHtml(reserva.motivo) || 'Sin especificar'}</li>${acompanantes.length ? `
-      <li><strong>Acompañantes:</strong> ${escapeHtml(acompanantesTexto(acompanantes))}</li>` : ''}${codigo ? `
-      <li><strong>Código de cancelación:</strong> ${codigo}</li>` : ''}
-    </ul>
-    <p>Si necesitás cancelar, ${codigo ? 'usá tu código en <a href="https://reservas.ceq-una.com/cancelar.html">Cancelar Reserva</a>, o ' : ''}usá directamente este enlace: <a href="${enlaceCancelacion(reserva.id)}">Cancelar mi reserva</a></p>
-    ${reglaCancelacionHtml(reserva.espacio_id, reserva.fecha)}
-    <p><a href="${escapeHtml(enlaceGoogleCalendar(reserva.espacio_id, reserva.fecha, inicio, fin))}">📅 Agregar a Google Calendar</a></p>
-    <p>Ante cualquier consulta, contactate con: ${getContactoLineaHtml(reserva.espacio_id)}</p>
-    <p>Centro de Estudiantes de Química</p>
-  `;
-}
+// Los correos de "confirmación reenviada" y "reserva modificada" salen de sus plantillas
+// (correoDeReserva), con el mismo formato que la confirmación original.
 
 async function reservaPorId(id) {
   const { data, error } = await supabase.from('reservas').select('*').eq('id', Number(id)).maybeSingle();
@@ -3465,11 +3953,12 @@ app.post('/api/superadmin/reservas/:id/reenviar', verifyAdminToken, verifySuperA
     const codigo = crypto.randomBytes(8).toString('hex').toUpperCase();
     const { error } = await supabase.from('reservas').update({ codigo_cancelacion_hash: hashCodigo(codigo) }).eq('id', reserva.id).eq('estado', 'activa');
     if (error) throw error;
+    const correo = correoDeReserva('reenvio', reserva, { codigo });
     const enviado = await encolarCorreo({
       to: email,
-      subject: `✓ Confirmación de Reserva (reenvío) - CEQ #${reserva.id}`,
+      subject: correo.asunto,
       responderA: correoRespuesta(reserva.espacio_id),
-      html: correoReservaHtml({ titulo: 'Tu reserva sigue confirmada', intro: 'Te reenviamos la confirmación de tu reserva, con un código de cancelación nuevo (el anterior ya no sirve).', reserva, codigo })
+      html: correo.html
     });
     registrarActividad(req.admin.rol, 'Reenvió la confirmación de una reserva', `#${reserva.id}`);
     res.json({ mensaje: enviado ? `Listo: se reenvió la confirmación a ${email}` : 'No se pudo enviar el correo ahora; quedó para reintentar' });
@@ -3559,11 +4048,12 @@ app.put('/api/superadmin/reservas/:id', verifyAdminToken, verifySuperAdmin, veri
     let avisado = false;
     const email = correoDeContacto(datos.contacto);
     if (b.avisar !== false && email) {
+      const correo = correoDeReserva('modificada', actualizada[0], { cambios: cambios.join(', ') });
       avisado = await encolarCorreo({
         to: email,
-        subject: `Tu reserva fue modificada - CEQ #${reserva.id}`,
+        subject: correo.asunto,
         responderA: correoRespuesta(espacioId),
-        html: correoReservaHtml({ titulo: 'Tu reserva fue modificada', intro: `Actualizamos tu reserva (${cambios.join(', ')}). Estos son los datos vigentes:`, reserva: actualizada[0] })
+        html: correo.html
       });
     }
     // Sin datos personales en el registro: qué se cambió y nada más
@@ -3892,47 +4382,38 @@ async function abrirMesesProgramados() {
   (data || []).forEach(m => registrarActividad('sistema', 'Se abrió un mes programado', `${String(m.mes).padStart(2, '0')}/${m.anio}`));
 }
 
-// Recordatorio 2 días antes de la reserva, entre las 08:00 y las 21:00 de ese día. Para el
-// Frente es el último día en que se puede cancelar gratis, así que el correo trae el botón
-// para cancelar. No se manda a las reservas de prioridad ni a las hechas en las últimas
-// 12 horas (esas personas acaban de recibir la confirmación).
+// Recordatorio N días antes de la reserva (admin supremo > Reglas; por defecto 2, se puede
+// apagar por espacio), entre las 08:00 y las 21:00 de ese día. En el Frente, con los valores de
+// siempre, es el último día en que se puede cancelar gratis, así que el correo trae el botón para
+// cancelar. No se manda a las reservas de prioridad ni a las hechas en las últimas 12 horas
+// (esas personas acaban de recibir la confirmación).
+// Asunto, título y mensaje: plantilla "Recordatorio" (admin supremo > Correos).
 const MAX_RECORDATORIOS_POR_TANDA = 40;
-
-function htmlRecordatorio(r) {
-  const inicio = r.hora_inicio.substring(0, 5);
-  const fin = r.hora_fin.substring(0, 5);
-  const esFrente = Number(r.espacio_id) === 3;
-  return `
-    <h2>Te recordamos tu reserva</h2>
-    <p>Hola ${escapeHtml(r.nombre_solicitante)},</p>
-    <p>Tenés reservado el <strong>${getEspacioNombre(r.espacio_id)}</strong> el <strong>${fechaLarga(r.fecha)}</strong>, <strong>${descripcionHorario(r.espacio_id, inicio, fin)}</strong>.</p>
-    <p>Si la vas a usar, no tenés que hacer nada. ¡Te esperamos!</p>
-    <p>¿Ya no la vas a usar? Cancelala, así otra persona puede aprovechar el lugar:</p>
-    <p><a href="${enlaceCancelacion(r.id)}" style="display:inline-block;background:#1F3A68;color:#ffffff;padding:10px 18px;border-radius:6px;text-decoration:none;font-weight:bold">Cancelar mi reserva</a></p>
-    ${esFrente ? `<p><strong>Hoy es el último día para cancelar gratis.</strong> Desde mañana, la cancelación solo se gestiona por <a href="${enlaceWhatsappFrente()}">WhatsApp</a>.</p>` : ''}
-    <p><a href="${escapeHtml(enlaceGoogleCalendar(r.espacio_id, r.fecha, inicio, fin))}">📅 Agregar a Google Calendar</a></p>
-    <p>Ante cualquier consulta, contactate con: ${getContactoLineaHtml(r.espacio_id)}</p>
-    <p>Centro de Estudiantes de Química</p>
-  `;
-}
 
 async function enviarRecordatorios() {
   const minutos = horaActualEnAsuncionEnMinutos();
   if (minutos < 8 * 60 || minutos >= 21 * 60) return;
-  const objetivo = hoyEnAsuncion();
-  objetivo.setUTCDate(objetivo.getUTCDate() + 2);
   const hace12Horas = new Date(Date.now() - 12 * 60 * 60 * 1000).toISOString();
-
-  const { data, error } = await supabase
-    .from('reservas')
-    .select('id, espacio_id, fecha, hora_inicio, hora_fin, nombre_solicitante, contacto')
-    .eq('estado', 'activa')
-    .eq('fecha', objetivo.toISOString().slice(0, 10))
-    .eq('reservado_por_admin', false)
-    .is('recordatorio_enviado_en', null)
-    .lt('created_at', hace12Horas)
-    .limit(MAX_RECORDATORIOS_POR_TANDA);
-  if (error) throw error;
+  // Cada espacio con su propio día (si tiene el recordatorio prendido)
+  const data = [];
+  for (const id of [3, 1]) {
+    const regla = reglaEspacio(id);
+    if (!regla.recordatorio) continue;
+    const objetivo = hoyEnAsuncion();
+    objetivo.setUTCDate(objetivo.getUTCDate() + regla.recordatorio_dias);
+    const { data: filas, error } = await supabase
+      .from('reservas')
+      .select('id, espacio_id, fecha, hora_inicio, hora_fin, nombre_solicitante, contacto')
+      .eq('estado', 'activa')
+      .eq('espacio_id', id)
+      .eq('fecha', objetivo.toISOString().slice(0, 10))
+      .eq('reservado_por_admin', false)
+      .is('recordatorio_enviado_en', null)
+      .lt('created_at', hace12Horas)
+      .limit(MAX_RECORDATORIOS_POR_TANDA);
+    if (error) throw error;
+    data.push(...(filas || []));
+  }
 
   // Primero se guarda el correo en la cola y DESPUÉS se marca la reserva (CEQ-06). Antes era al
   // revés: si el servidor se reiniciaba entre los dos pasos, la reserva quedaba marcada y el
@@ -3949,7 +4430,8 @@ async function enviarRecordatorios() {
       if (errorMarcar) throw errorMarcar;
       continue;
     }
-    const asunto = `⏰ Recordatorio: ${getEspacioNombre(r.espacio_id)}, ${fechaLarga(r.fecha)} - CEQ #${r.id}`;
+    const correo = correoDeReserva('recordatorio', r);
+    const asunto = correo.asunto;
     const { data: yaEnCola, error: errorCola } = await supabase.from('correos_pendientes')
       .select('id').eq('asunto', asunto).limit(1);
     const encolado = !errorCola && yaEnCola && yaEnCola.length > 0;
@@ -3958,7 +4440,7 @@ async function enviarRecordatorios() {
       to: email,
       subject: asunto,
       responderA: correoRespuesta(r.espacio_id),
-      html: htmlRecordatorio(r)
+      html: correo.html
     });
     // Si no se pudo guardar en la cola ni mandar directo, queda sin marcar para la próxima vuelta
     if (!enviado) continue;
