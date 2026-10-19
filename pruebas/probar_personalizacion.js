@@ -213,7 +213,7 @@ const REGLAS_SIEMPRE = {
   await hasta(() => delCorreo('ceq.informatica@gmail.com').some(c => c.subject.startsWith('[PRUEBA]')));
   const prueba = delCorreo('ceq.informatica@gmail.com').find(c => c.subject.startsWith('[PRUEBA]'));
   anotar('La prueba llega al correo de alertas, con lo escrito (sin guardar) y datos de ejemplo',
-    r.status === 200 && prueba && prueba.subject === '[PRUEBA] Ojo Ana Pérez: mañana tenés el Altillo' && prueba.htmlContent.includes('<p>Hola Ana Pérez.</p>') && prueba.htmlContent.includes('Normas de uso del Altillo'),
+    r.status === 200 && prueba && prueba.subject === '[PRUEBA] Ojo Ana Pérez: mañana tenés el Altillo - CEQ #1234' && prueba.htmlContent.includes('<p>Hola Ana Pérez.</p>') && prueba.htmlContent.includes('Normas de uso del Altillo'),
     `${r.status} ${r.datos.error || ''} ${prueba && prueba.subject}`);
   p = await pedir('GET', '/api/superadmin/personalizacion', null, 'superadmin');
   anotar('...y la plantilla guardada no cambió', p.datos.plantillas.recordatorio.modificada === false && p.datos.plantillas.recordatorio.actual.asunto === '⏰ Recordatorio: {espacio}, {fecha}');
@@ -223,7 +223,20 @@ const REGLAS_SIEMPRE = {
   anotar('Prueba del aviso de la lista de espera: solo texto, con el saludo y el enlace', r.status === 200 && pruebaTexto && !pruebaTexto.htmlContent &&
     pruebaTexto.textContent.startsWith('Hola, Ana:') && pruebaTexto.textContent.includes('https://reservas.ceq-una.com/?fecha=') && /^\[PRUEBA\] Se liberó un lugar en el Frente: \S+ \d\d\/\d\d, Desayuno$/.test(pruebaTexto.subject),
     pruebaTexto && `${pruebaTexto.subject} | ${pruebaTexto.textContent && pruebaTexto.textContent.slice(0, 80)}`);
-  r = await pedir('POST', '/api/superadmin/plantillas/prueba', { clave: 'confirmacion', asunto: 'x {malo}', titulo: 'x', mensaje: 'x' }, 'superadmin');
+  // ===== Vista previa: el correo tal cual sale, sin mandar nada =====
+  const antesVista = correos().length;
+  r = await pedir('POST', '/api/superadmin/plantillas/vista-previa', { clave: 'confirmacion', espacio_id: 1, asunto: 'Listo {nombre}', titulo: 'Hola {nombre}', mensaje: 'Te esperamos.' }, 'superadmin');
+  anotar('Vista previa: devuelve el HTML real (título, detalles, código, enlaces, normas y contacto) con el asunto como los de verdad',
+    r.status === 200 && r.datos.asunto === 'Listo Ana Pérez - CEQ #1234' && r.datos.html.includes('<h2>Hola Ana Pérez</h2>') && r.datos.html.includes('Código de cancelación:</strong> A1B2C3D4E5F60789') &&
+    r.datos.html.includes('cancelar.html?r=0&t=') && r.datos.html.includes('Normas de uso del Altillo') && r.datos.html.includes('reservas@ceq-una.com') && r.datos.texto === null,
+    `${r.status} ${r.datos.error || r.datos.asunto}`);
+  r = await pedir('POST', '/api/superadmin/plantillas/vista-previa', { clave: 'lista_espera_aviso', espacio_id: 3 }, 'superadmin');
+  const malaVista = await pedir('POST', '/api/superadmin/plantillas/vista-previa', { clave: 'confirmacion', asunto: 'x {malo}', titulo: 'x', mensaje: 'x' }, 'superadmin');
+  const comunVista = await pedir('POST', '/api/superadmin/plantillas/vista-previa', { clave: 'confirmacion' }, 'admin');
+  await esperar(400);
+  anotar('...la de la lista de espera es solo texto; con un error da 400; el admin común no puede (403); y no se manda ningún correo',
+    r.status === 200 && r.datos.html === null && r.datos.texto.startsWith('Hola, Ana:') && malaVista.status === 400 && comunVista.status === 403 && correos().length === antesVista,
+    `${r.status} ${malaVista.status} ${comunVista.status} ${correos().length - antesVista}`);  r = await pedir('POST', '/api/superadmin/plantillas/prueba', { clave: 'confirmacion', asunto: 'x {malo}', titulo: 'x', mensaje: 'x' }, 'superadmin');
   anotar('Prueba con un error: 400 y no se manda', r.status === 400, `${r.status}`);
 
   // ===== Lista de espera con la plantilla cambiada =====
