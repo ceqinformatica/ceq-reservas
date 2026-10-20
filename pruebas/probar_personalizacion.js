@@ -107,8 +107,8 @@ const REGLAS_SIEMPRE = {
     conf.datos.reglas['1'].plazo_cancelacion_dias === 0 && conf.datos.reglas['1'].limite_por_persona_mes === null && conf.datos.textos.titulo_inicio === 'Reserva de espacios' &&
     conf.datos.anuncio === null, JSON.stringify(conf.datos.reglas));
   let p = await pedir('GET', '/api/superadmin/personalizacion', null, 'superadmin');
-  anotar('El editor recibe las reglas, los textos y las 9 plantillas con su texto original',
-    p.status === 200 && Object.keys(p.datos.plantillas).length === 9 && p.datos.plantillas.confirmacion.defecto.titulo === '¡Reserva Confirmada!' &&
+  anotar('El editor recibe las reglas, los textos y las 13 plantillas (9 a la gente y 4 avisos internos) con su texto original',
+    p.status === 200 && Object.keys(p.datos.plantillas).length === 13 && p.datos.plantillas.confirmacion.defecto.titulo === '¡Reserva Confirmada!' &&
     p.datos.plantillas.lista_espera_aviso.obligatorios.join() === 'enlace_reservar' && p.datos.textos.lista_espera.comodines.join() === 'espacio,mes', `${p.status}`);
 
   // ===== Reglas inválidas =====

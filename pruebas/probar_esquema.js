@@ -78,12 +78,15 @@ const anotar = (nombre, ok, detalle = '') => resultados.push({ nombre, ok, detal
   const idFrente = await ultima();
   anotar('Asistencia: acepta "vino" y rechaza otros valores (23514)', await ok(`update reservas set asistencia = 'vino' where id = ${idFrente}`) === 'ok'
     && await ok(`update reservas set asistencia = 'tal vez' where id = ${idFrente}`) === '23514');
-  anotar('Frente con acompañantes: rechazado (23514)', await ok(`update reservas set acompanantes = '[{"nombre":"Ana","celular":"0981"}]' where id = ${idFrente}`) === '23514');
+  // Desde el 19/10/2026 cuántos acompañantes y en qué espacio lo deciden las Reglas (servidor); la
+  // base solo pone el tope de 10 y que sea una lista
+  anotar('Frente con acompañantes: la base lo permite (lo decide la regla del espacio)', await ok(`update reservas set acompanantes = '[{"nombre":"Ana","celular":"0981"}]' where id = ${idFrente}`) === 'ok');
+  anotar('Acompañantes que no son una lista: rechazado (23514)', await ok(`update reservas set acompanantes = '{"nombre":"Ana"}' where id = ${idFrente}`) === '23514');
   await db.query(reserva(1, '2026-11-24', '08:00', '10:00'));
   const idAltillo = await ultima();
   const lista = n => JSON.stringify(Array.from({ length: n }, (_, i) => ({ nombre: 'A' + i, celular: '098100000' + i })));
-  anotar('Altillo con 4 acompañantes: permitido', await ok(`update reservas set acompanantes = '${lista(4)}' where id = ${idAltillo}`) === 'ok');
-  anotar('Altillo con 5 acompañantes: rechazado (23514)', await ok(`update reservas set acompanantes = '${lista(5)}' where id = ${idAltillo}`) === '23514');
+  anotar('Altillo con 10 acompañantes: permitido', await ok(`update reservas set acompanantes = '${lista(10)}' where id = ${idAltillo}`) === 'ok');
+  anotar('Altillo con 11 acompañantes: rechazado (23514)', await ok(`update reservas set acompanantes = '${lista(11)}' where id = ${idAltillo}`) === '23514');
   anotar('Lista de espera: una inscripción por correo, espacio y mes (23505 si se repite)', await ok(`insert into lista_espera (espacio_id, email, nombre, mes) values (3, 'a@b.com', 'Ana', '2026-11')`) === 'ok'
     && await ok(`insert into lista_espera (espacio_id, email, mes) values (3, 'a@b.com', '2026-11')`) === '23505'
     && await ok(`insert into lista_espera (espacio_id, email, mes) values (3, 'a@b.com', '2026-12')`) === 'ok'
