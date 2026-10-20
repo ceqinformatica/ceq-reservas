@@ -47,7 +47,7 @@ create table public.espacios (
 --   'admin supremo') y por qué se canceló. Vacías en las canceladas antes del 11/10/2026.
 -- recordatorio_enviado_en: cuándo se mandó el recordatorio de 2 días antes (una sola vez).
 -- asistencia: 'vino' o 'no_vino', lo marca un moderador en el panel (vacía = sin marcar).
--- acompanantes: hasta 4, solo en el Altillo, [{"nombre","celular"}]; no se muestran en el calendario público.
+-- acompanantes: [{"nombre","celular"}], hasta 10; cuántos y en qué espacio lo deciden las Reglas (servidor, desde el 19/10/2026); no se muestran en el calendario público.
 -- ---------------------------------------------------------------------
 create table public.reservas (
   id                      bigint generated always as identity primary key,
@@ -73,8 +73,7 @@ create table public.reservas (
   acompanantes            jsonb not null default '[]'::jsonb,
 
   constraint reservas_asistencia_valida check (asistencia is null or asistencia in ('vino', 'no_vino')),
-  constraint reservas_acompanantes_validos check (jsonb_typeof(acompanantes) = 'array' and jsonb_array_length(acompanantes) <= 4
-                                                   and (espacio_id = 1 or jsonb_array_length(acompanantes) = 0)),
+  constraint reservas_acompanantes_validos check (jsonb_typeof(acompanantes) = 'array' and jsonb_array_length(acompanantes) <= 10),
 
   -- Garantía principal del sistema: dos reservas ACTIVAS del mismo espacio no pueden
   -- superponerse en el tiempo. La base lo rechaza aunque lleguen al mismo instante
