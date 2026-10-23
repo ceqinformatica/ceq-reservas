@@ -267,6 +267,15 @@ const quitar = (tabla, filas) => { const fuera = new Set(filas); db[tabla] = db[
   r = await pedir('POST', '/api/superadmin/legal/vista-previa', { doc: 'privacidad', intro: 'Acompañantes: {acompanantes_por_espacio}.', articulos: priv.articulos, plantillas: priv.plantillas }, 'superadmin');
   anotar('...y se puede usar en el texto (la vista previa lo completa)', r.status === 200 && JSON.stringify(r.datos).includes('solo en el Altillo, hasta cuatro (4) por Reserva'), `${r.status} ${r.datos.error || ''}`);
 
+  // ===== AUD-16: partes públicas que sobraban =====
+  r = await pedir('POST', '/api/logout');
+  const conCsrf = await pedir('POST', '/api/logout', null, 'admin');
+  anotar('AUD-16: cerrar sesión sin el CSRF no hace nada (403); con el CSRF, sí', r.status === 403 && conCsrf.status === 200, `${r.status} ${conCsrf.status}`);
+  r = await pedir('GET', '/api/estadisticas');
+  anotar('.../api/estadisticas ya no existe (404)', r.status === 404, String(r.status));
+  const espacios = await fetch(API + '/api/espacios');
+  anotar('.../api/espacios tiene límite de pedidos (lleva las cabeceras RateLimit)', espacios.status === 200 && !!espacios.headers.get('ratelimit-remaining'), [...espacios.headers.keys()].join(','));
+
   // ===== AUD-02: tope total de intentos fallidos =====
   // 9 fallidos de hace un rato: el 10.º (desde otra IP) dispara la alerta
   const viejos = Array.from({ length: 30 }, (_, i) => ({ id: 9900 + i, rol: '-', accion: 'Intento de inicio de sesión fallido', detalle: '', creado_en: new Date(ahoraFalso() - 2 * 3600000).toISOString() }));

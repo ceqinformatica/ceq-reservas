@@ -222,7 +222,8 @@ const reservasDe = email => db.reservas.filter(r => String(r.contacto).toLowerCa
   anotar('Login: la cookie del token NO lleva Domain (solo api.ceq-una.com)', r.status === 200 && nueva && !/Domain=/i.test(nueva) && /HttpOnly/i.test(nueva) && /Secure/i.test(nueva), nueva);
   anotar('...borra la cookie vieja de .ceq-una.com', !!borraVieja, setCookie.join(' || '));
   anotar('...y la del CSRF sigue en .ceq-una.com para que el panel la lea', csrf && /Domain=\.?ceq-una\.com/i.test(csrf) && !/HttpOnly/i.test(csrf), csrf);
-  r = await pedir('POST', '/api/logout');
+  // Con el CSRF, como lo manda el panel (AUD-16)
+  r = await pedir('POST', '/api/logout', null, { admin: true });
   const borra = r.headers.getSetCookie();
   anotar('Cerrar sesión borra las dos versiones del token y el CSRF', borra.filter(c => c.startsWith('admin_token=;')).length === 2 && borra.some(c => c.startsWith('csrf_token=;')), borra.join(' || '));
 

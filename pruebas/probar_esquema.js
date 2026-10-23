@@ -33,14 +33,21 @@ const anotar = (nombre, ok, detalle = '') => resultados.push({ nombre, ok, detal
 
   // Estructura
   const tablas = (await db.query(`select string_agg(tablename, ', ' order by tablename) t from pg_tables where schemaname = 'public'`)).rows[0].t;
-  anotar('Están las 10 tablas', tablas === 'bloqueos, cancelaciones, configuracion, correos_pendientes, espacios, lista_espera, meses_habilitados, registro_actividad, reportes_errores, reservas', tablas);
+  anotar('Están las 9 tablas (sin cancelaciones, que se borró en AUD-14)', tablas === 'bloqueos, configuracion, correos_pendientes, espacios, lista_espera, meses_habilitados, registro_actividad, reportes_errores, reservas', tablas);
   const esp = (await db.query('select id, nombre from espacios order by id')).rows.map(r => `${r.id}=${r.nombre}`).join(', ');
   anotar('Los 3 espacios con sus números (1 Altillo, 2 Sala, 3 Frente)', esp === '1=Altillo, 2=Sala de Reuniones, 3=Frente', esp);
   const rls = (await db.query(`select count(*)::int n from pg_class c join pg_namespace n on n.oid = c.relnamespace where n.nspname = 'public' and c.relkind = 'r' and c.relrowsecurity`)).rows[0].n;
-  anotar('RLS activado en las 10 tablas (solo el servidor puede leer y escribir)', rls === 10, String(rls));
+  anotar('RLS activado en las 9 tablas (solo el servidor puede leer y escribir)', rls === 9, String(rls));
+  const columnaVieja = (await db.query(`select count(*)::int n from information_schema.columns where table_name = 'reservas' and column_name = 'codigo_cancelacion'`)).rows[0].n;
+  anotar('Sin la columna vieja codigo_cancelacion (los códigos van solo cifrados)', columnaVieja === 0, String(columnaVieja));
+  // migracion-permisos.sql ya está incluida: aplicarla sobre el esquema no tiene que dar error
+  let errorMigracion = '';
+  try { await db.exec(fs.readFileSync(path.join(path.dirname(archivoSql), 'migracion-permisos.sql'), 'utf8')); } catch (e) { errorMigracion = e.message; }
+  anotar('migracion-permisos.sql se puede aplicar sobre el esquema (no cambia nada)', !errorMigracion, errorMigracion);
 
   // Regla anti-superposición
   anotar('Reserva Frente 07:00-10:00', await ok(reserva(3, '2026-11-10', '07:00', '10:00')) === 'ok');
+  anotar('El estado de una reserva solo puede ser activa o cancelada (23514)', await ok(reserva(3, '2026-11-11', '07:00', '10:00', 'pendiente')) === '23514');
   const horario = (await db.query(`select horario::text h from reservas order by id desc limit 1`)).rows[0].h;
   anotar('La columna horario se calcula sola', horario === '["2026-11-10 07:00:00","2026-11-10 10:00:00")', horario);
   anotar('Mismo turno otra vez: rechazada (23P01)', await ok(reserva(3, '2026-11-10', '07:00', '10:00')) === '23P01');
