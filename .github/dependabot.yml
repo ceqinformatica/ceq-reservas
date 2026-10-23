@@ -1,0 +1,20 @@
+# Dependabot (AUD-18): una vez por mes revisa si hay versiones nuevas de las librerías del servidor
+# (package.json / package-lock.json) y de las acciones de GitHub que usan las pruebas, y abre una
+# propuesta de cambio (pull request) con cada una. Las pruebas automáticas corren solas sobre la
+# propuesta: si dan ✅, se puede aceptar con "Merge pull request"; si dan ❌, no aceptarla.
+# Nada se cambia solo: hasta que alguien acepta la propuesta, el servidor sigue igual.
+version: 2
+updates:
+  - package-ecosystem: npm
+    directory: /
+    schedule:
+      interval: monthly
+    open-pull-requests-limit: 2
+    groups:
+      librerias:
+        patterns: ["*"]
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: monthly
+    open-pull-requests-limit: 1
