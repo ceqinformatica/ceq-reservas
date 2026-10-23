@@ -1,12 +1,12 @@
 // Restaurar la base desde una copia completa (AUD-06).
 //
-// Convierte la copia completa que manda el sistema (el adjunto "...-completa.json.gz" de la copia
-// mensual, o el "...-completa.json" que se baja del panel) en un archivo SQL para cargar en una
-// base NUEVA de Supabase. Conserva los números de reserva, así los códigos y los enlaces para
+// Convierte la copia completa que manda el sistema (el adjunto "...-completa.zip" de la copia
+// mensual, o el "...-completa.json" que se baja del panel; también lee los .json.gz viejos) en un
+// archivo SQL para cargar en una base NUEVA de Supabase. Conserva los números de reserva, así los códigos y los enlaces para
 // cancelar siguen sirviendo, y el historial no se mezcla.
 //
 // Uso (no hace falta instalar nada, solo Node):
-//   node restaurar.js reservas-ceq-2026-11-completa.json.gz > restaurar.sql
+//   node restaurar.js reservas-ceq-2026-11-completa.zip > restaurar.sql
 //
 // Después, en el proyecto NUEVO de Supabase (SQL Editor):
 //   1. Ejecutar esquema-base-de-datos.sql (crea las tablas vacías).
@@ -35,9 +35,27 @@ const CALCULADAS = { reservas: ['horario', 'codigo_cancelacion'] };
 // datos de la copia ya eran válidos, y el orden de carga no tiene que importar
 const TRIGGERS = [['reservas', 'trg_verificar_bloqueo_reserva'], ['bloqueos', 'trg_verificar_reserva_bloqueo']];
 
+// El primer archivo de un .zip (la copia mensual va así: Brevo no acepta adjuntos .gz ni .json)
+function primerArchivoDelZip(datos) {
+  // Se busca el directorio central (al final), que tiene los tamaños aunque el encabezado local no
+  const fin = datos.lastIndexOf(Buffer.from([0x50, 0x4b, 0x05, 0x06]));
+  if (fin < 0) throw new Error('El .zip está incompleto');
+  const central = datos.readUInt32LE(fin + 16);
+  if (datos.readUInt32LE(central) !== 0x02014b50) throw new Error('El .zip está dañado');
+  const metodo = datos.readUInt16LE(central + 10);
+  const tamano = datos.readUInt32LE(central + 20);
+  const local = datos.readUInt32LE(central + 42);
+  const inicio = local + 30 + datos.readUInt16LE(local + 26) + datos.readUInt16LE(local + 28);
+  const contenido = datos.subarray(inicio, inicio + tamano);
+  if (metodo === 0) return contenido;
+  if (metodo === 8) return zlib.inflateRawSync(contenido);
+  throw new Error(`El .zip usa una compresión que no se conoce (${metodo})`);
+}
+
 function leerCopia(archivo) {
   let datos = fs.readFileSync(archivo);
-  if (datos[0] === 0x1f && datos[1] === 0x8b) datos = zlib.gunzipSync(datos);
+  if (datos[0] === 0x50 && datos[1] === 0x4b && datos[2] === 0x03 && datos[3] === 0x04) datos = primerArchivoDelZip(datos);
+  else if (datos[0] === 0x1f && datos[1] === 0x8b) datos = zlib.gunzipSync(datos);
   const copia = JSON.parse(datos.toString('utf8'));
   if (!copia || copia.formato !== 'copia-ceq-reservas' || !copia.tablas) {
     throw new Error('El archivo no es una copia completa del sistema de reservas (falta "formato": "copia-ceq-reservas")');
@@ -89,7 +107,7 @@ function armarSql(copia) {
 if (require.main === module) {
   const archivo = process.argv[2];
   if (!archivo) {
-    console.error('Uso: node restaurar.js <copia-completa.json.gz o .json> > restaurar.sql');
+    console.error('Uso: node restaurar.js <copia-completa.zip, .json o .json.gz> > restaurar.sql');
     process.exit(1);
   }
   try {

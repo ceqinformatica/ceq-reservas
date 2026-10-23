@@ -623,7 +623,9 @@ const CONFIG_POR_DEFECTO = {
     { nombre: 'Merienda', inicio: '14:00', fin: '18:00' }
   ],
   max_reservas_por_persona_mes: 2,
-  contacto_email_frente: 'Monsegonza511@gmail.com',
+  // El de verdad está guardado en la base (Avanzado → Turnos, horarios y contacto); este solo se usa
+  // en una base nueva. Antes era el Gmail personal de quien moderaba el Frente (AUD-16).
+  contacto_email_frente: CORREO_CONTACTO,
   contacto_whatsapp_frente: '595972753471', // formato wa.me: código de país + número, sin +, espacios ni guiones
   email_alertas: EMAIL_MODERADOR,
   // Motivos del Frente (la persona elige uno de la lista; en el Altillo el motivo es libre)
@@ -1018,6 +1020,8 @@ async function limpiarColaCorreos() {
 // la cola, así siempre queda lugar para las reservas. Todo se cuenta en la base y no en memoria:
 // antes los topes volvían a cero con cada reinicio o deploy del servidor.
 const LIMITE_CORREOS_OPCIONALES = 250;
+// Reservas por día de una misma persona (por correo o celular), contando las canceladas (N4)
+const MAX_RESERVAS_POR_PERSONA_DIA = 5;
 
 // Instante (ISO, en UTC) en que empezó el día de hoy en Paraguay
 function inicioDelDiaEnAsuncion() {
@@ -1102,9 +1106,29 @@ app.use(cookieParser());
 function obtenerIpCliente(req) {
   const cf = req.headers['cf-connecting-ip'];
   if (typeof cf === 'string' && net.isIP(cf.trim())) {
-    return cf.trim();
+    return claveDeRed(cf.trim());
   }
-  return req.ip;
+  return claveDeRed(String(req.ip || ''));
+}
+
+// N2 (verificación del 23/10/2026): una conexión con IPv6 (de casa o del celular) recibe una red
+// entera /64, con millones de direcciones, y puede usar una distinta en cada pedido. Si se contara
+// por dirección, cada pedido empezaría un contador nuevo y los límites no servirían. Por eso las
+// IPv6 se cuentan por su red /64 (los primeros 4 bloques); las IPv4 quedan como están.
+function claveDeRed(ip) {
+  const mapeada = ip.match(/^::ffff:(\d+\.\d+\.\d+\.\d+)$/i); // IPv4 escrita como IPv6
+  if (mapeada) return mapeada[1];
+  if (net.isIPv6(ip)) {
+    const [izquierda, derecha = ''] = ip.split('%')[0].split('::');
+    const bloques = izquierda ? izquierda.split(':') : [];
+    if (ip.includes('::')) {
+      const despues = derecha ? derecha.split(':') : [];
+      while (bloques.length + despues.length < 8) bloques.push('0');
+      bloques.push(...despues);
+    }
+    return bloques.slice(0, 4).map(b => (parseInt(b, 16) || 0).toString(16)).join(':') + '::/64';
+  }
+  return ip;
 }
 
 // Cuando un limiter rechaza un pedido (429), lo deja registrado en los logs de Render
@@ -1573,11 +1597,53 @@ const MAX_LOGIN_FALLIDOS_POR_HORA = 30;
 const AVISO_LOGIN_FALLIDOS_POR_HORA = 10;
 const ACCION_LOGIN_FALLIDO = 'Intento de inicio de sesión fallido';
 
-async function loginFallidosUltimaHora() {
+// N3: con el tope, cualquiera podía dejar a todos sin panel. Ahora, mientras está cerrado, igual
+// pueden entrar las redes desde las que alguien ya entró bien en los últimos 30 días (se guardan
+// cifradas, no la dirección), y el admin supremo puede reabrirlo desde "Estado del sistema".
+const CLAVE_LOGIN_REABIERTO = 'login_reabierto_en';
+const CLAVE_REDES_CONOCIDAS = 'login_redes_conocidas';
+const DIAS_RED_CONOCIDA = 30;
+const MAX_REDES_CONOCIDAS = 100;
+const CLAVE_HMAC_REDES = crypto.createHmac('sha256', JWT_SECRET).update('redes-conocidas-v1').digest();
+const huellaDeRed = req => crypto.createHmac('sha256', CLAVE_HMAC_REDES).update(obtenerIpCliente(req)).digest('base64url').slice(0, 32);
+
+async function leerConfiguracionLogin() {
+  const { data, error } = await supabase.from('configuracion').select('clave, valor').in('clave', [CLAVE_LOGIN_REABIERTO, CLAVE_REDES_CONOCIDAS]);
+  if (error) throw error;
+  const valor = c => ((data || []).find(f => f.clave === c) || {}).valor || '';
+  let redes = {};
+  try { redes = JSON.parse(valor(CLAVE_REDES_CONOCIDAS) || '{}') || {}; } catch (e) { /* vacío */ }
+  return { reabiertoEn: valor(CLAVE_LOGIN_REABIERTO), redes };
+}
+
+// Intentos fallidos de la última hora (o desde que se reabrió el inicio de sesión, si fue después)
+async function loginFallidosUltimaHora(reabiertoEn) {
+  if (reabiertoEn === undefined) reabiertoEn = (await leerConfiguracionLogin()).reabiertoEn;
+  const haceUnaHora = new Date(Date.now() - 60 * 60 * 1000).toISOString();
+  const desde = reabiertoEn && reabiertoEn > haceUnaHora ? reabiertoEn : haceUnaHora;
   const { data, error } = await supabase.from('registro_actividad').select('id').eq('accion', ACCION_LOGIN_FALLIDO)
-    .gte('creado_en', new Date(Date.now() - 60 * 60 * 1000).toISOString()).limit(MAX_LOGIN_FALLIDOS_POR_HORA);
+    .gte('creado_en', desde).limit(MAX_LOGIN_FALLIDOS_POR_HORA);
   if (error) throw error;
   return (data || []).length;
+}
+
+function esRedConocida(req, redes) {
+  const vista = redes[huellaDeRed(req)];
+  return !!vista && Date.now() - Date.parse(vista) < DIAS_RED_CONOCIDA * 86400000;
+}
+
+// Se llama después de un inicio de sesión correcto. Nunca lanza error.
+async function recordarRedConocida(req, redes) {
+  try {
+    const limite = Date.now() - DIAS_RED_CONOCIDA * 86400000;
+    const vigentes = Object.entries({ ...redes, [huellaDeRed(req)]: new Date().toISOString() })
+      .filter(([, cuando]) => Date.parse(cuando) >= limite)
+      .sort((a, b) => b[1].localeCompare(a[1])).slice(0, MAX_REDES_CONOCIDAS);
+    const { error } = await supabase.from('configuracion').upsert({ clave: CLAVE_REDES_CONOCIDAS, valor: JSON.stringify(Object.fromEntries(vigentes)) }, { onConflict: 'clave' });
+    if (error) throw error;
+  } catch (err) {
+    console.error('⚠️ No se pudo recordar la red del inicio de sesión:', err && (err.message || err.code));
+  }
 }
 
 // LOGIN - Endpoint seguro
@@ -1595,12 +1661,15 @@ app.post('/api/login', loginLimiter, async (req, res) => {
 
     // Si no se pueden contar los intentos (la base no responde), se sigue con el límite por IP
     let fallidos = 0;
+    let datosLogin = { reabiertoEn: '', redes: {} };
     try {
-      fallidos = await loginFallidosUltimaHora();
+      datosLogin = await leerConfiguracionLogin();
+      fallidos = await loginFallidosUltimaHora(datosLogin.reabiertoEn);
     } catch (err) {
       console.error('⚠️ No se pudieron contar los intentos de inicio de sesión:', err && (err.message || err.code));
     }
-    if (fallidos >= MAX_LOGIN_FALLIDOS_POR_HORA) {
+    // Cerrado, salvo para las redes desde las que ya se entró bien (N3)
+    if (fallidos >= MAX_LOGIN_FALLIDOS_POR_HORA && !esRedConocida(req, datosLogin.redes)) {
       console.warn(`⚠️ Inicio de sesión cerrado: ${fallidos} intentos fallidos en la última hora`);
       return res.status(429).json({ error: 'Por seguridad, el inicio de sesión está cerrado por un rato: hubo muchos intentos con una contraseña equivocada. Probá de nuevo en una hora.' });
     }
@@ -1623,6 +1692,8 @@ app.post('/api/login', loginLimiter, async (req, res) => {
     }
 
     const rol = esSuperadmin ? 'superadmin' : 'admin';
+    // Desde esta red se entró bien: si el inicio de sesión se cierra por intentos fallidos, puede seguir entrando
+    await recordarRedConocida(req, datosLogin.redes);
 
     // Generar JWT (válido por 8 horas). Lleva el rol y la versión de sesiones vigente.
     const token = jwt.sign(
@@ -2062,7 +2133,19 @@ app.post('/api/reservas', crearReservaLimiter, async (req, res) => {
     if (hayBloqueo) {
       return res.status(409).json({ error: textoPagina('error_bloqueado') });
     }
-    
+
+    // N4: tope de reservas por persona por día (contando las ya canceladas), por correo o por
+    // celular. Cada reserva manda correos, y reservar y cancelar una y otra vez gastaba el cupo
+    // diario de Brevo y llenaba la casilla de la persona. El cupo mensual no lo frenaba, porque
+    // las canceladas no cuentan.
+    const personaHoy = identidadContacto(contacto);
+    const deHoy = await leerTodasLasFilas(() => supabase.from('reservas').select('contacto')
+      .gte('created_at', inicioDelDiaEnAsuncion()).eq('reservado_por_admin', false).order('id', { ascending: true }), 20000);
+    const mias = deHoy.filter(f => { const o = identidadContacto(f.contacto); return (personaHoy.email && o.email === personaHoy.email) || (personaHoy.celular && o.celular === personaHoy.celular); }).length;
+    if (mias >= MAX_RESERVAS_POR_PERSONA_DIA) {
+      return res.status(429).json({ error: `Por hoy ya hiciste ${mias} reservas (contando las canceladas). Mañana vas a poder reservar de nuevo; si necesitás algo urgente, escribí a ${correoRespuesta(espacioIdNum)}.` });
+    }
+
     // Generar código de cancelación seguro (16 caracteres). Solo se guarda su hash
     // en la base (SEC-005); el código en claro se le muestra al usuario una única
     // vez acá y por email, y nunca se vuelve a poder recuperar desde la base.
@@ -4906,9 +4989,14 @@ app.get('/api/superadmin/estado', verifyAdminToken, verifySuperAdmin, async (req
       };
     } catch (err) { /* sin cola: se informa null */ }
     const { data: claves, error } = await supabase.from('configuracion').select('clave, valor')
-      .in('clave', ['copia_mensual_enviada', 'ultima_sincronizacion']);
+      .in('clave', ['copia_mensual_enviada', 'ultima_sincronizacion', CLAVE_ERROR_COPIA]);
     if (error) throw error;
     const valor = c => ((claves || []).find(x => x.clave === c) || {}).valor || null;
+    let errorCopia = null;
+    try { errorCopia = valor(CLAVE_ERROR_COPIA) ? JSON.parse(valor(CLAVE_ERROR_COPIA)) : null; } catch (e) { /* sin anotación */ }
+    // Intentos fallidos de inicio de sesión de la última hora (N3): si llegan al tope, se puede reabrir
+    let loginFallidos = null;
+    try { loginFallidos = await loginFallidosUltimaHora(); } catch (e) { /* sin dato */ }
     const [enEspera, reportesNuevos] = await Promise.all([
       leerTodasLasFilas(() => supabase.from('lista_espera').select('id').is('avisado_en', null).order('id', { ascending: true }), 20000),
       leerTodasLasFilas(() => supabase.from('reportes_errores').select('id').eq('estado', 'nuevo').order('id', { ascending: true }), 20000)
@@ -4921,6 +5009,8 @@ app.get('/api/superadmin/estado', verifyAdminToken, verifySuperAdmin, async (req
       version: String(process.env.RENDER_GIT_COMMIT || '').slice(0, 7) || null,
       correos, limite_correos_dia: 300,
       copia_mensual: valor('copia_mensual_enviada'),
+      copia_mensual_error: errorCopia,
+      login_fallidos_hora: loginFallidos, login_fallidos_tope: MAX_LOGIN_FALLIDOS_POR_HORA,
       ultima_sincronizacion: valor('ultima_sincronizacion'),
       ultima_revision_plazos: ultimaRevisionConservacion || null,
       lista_espera_pendientes: enEspera,
@@ -4950,6 +5040,41 @@ app.get('/api/superadmin/copia', verifyAdminToken, verifySuperAdmin, async (req,
     res.set('Content-Type', 'text/csv; charset=utf-8');
     res.set('Content-Disposition', `attachment; filename="reservas-ceq-${hoyEnAsuncion().toISOString().slice(0, 10)}.csv"`);
     res.send(csv);
+  } catch (error) {
+    manejarError(res, error);
+  }
+});
+
+// "Reabrir el inicio de sesión" (N3): los intentos fallidos de antes dejan de contar para el tope
+app.post('/api/superadmin/login/reabrir', verifyAdminToken, verifySuperAdmin, verificarCSRF, async (req, res) => {
+  try {
+    const { error } = await supabase.from('configuracion').upsert({ clave: CLAVE_LOGIN_REABIERTO, valor: new Date().toISOString() }, { onConflict: 'clave' });
+    if (error) throw error;
+    registrarActividad(req.admin.rol, 'Reabrió el inicio de sesión del panel', '');
+    res.json({ mensaje: 'Listo: el inicio de sesión vuelve a estar abierto. Si los intentos siguen, conviene cambiar las contraseñas.' });
+  } catch (error) {
+    manejarError(res, error);
+  }
+});
+
+// "Mandarme la copia ahora": el mismo correo de la copia mensual, en el momento, al correo de
+// alertas. Sirve para comprobar que Brevo acepta los adjuntos sin esperar al día 1. Hasta 5 por
+// día (se cuentan en el registro de actividad). No cambia la marca de la copia del mes.
+const MAX_COPIAS_DESDE_PANEL_POR_DIA = 5;
+const ACCION_COPIA_DESDE_PANEL = 'Se mandó la copia de seguridad por correo desde el panel';
+app.post('/api/superadmin/copia/enviar', verifyAdminToken, verifySuperAdmin, verificarCSRF, async (req, res) => {
+  try {
+    const hoyEnviadas = await contarDeHoy('registro_actividad', 'creado_en', q => q.eq('accion', ACCION_COPIA_DESDE_PANEL));
+    if (hoyEnviadas >= MAX_COPIAS_DESDE_PANEL_POR_DIA) return res.status(429).json({ error: `Hoy ya se mandaron ${MAX_COPIAS_DESDE_PANEL_POR_DIA} copias desde el panel. Probá mañana.` });
+    const resultado = await mandarCopiaPorCorreo(hoyEnAsuncion().toISOString().slice(0, 7), { desdePanel: true });
+    await registrarActividad(req.admin.rol, ACCION_COPIA_DESDE_PANEL, resultado.ok ? (resultado.completa ? 'con la copia completa' : 'solo el CSV') : 'no salió');
+    if (!resultado.ok) return res.status(502).json({ error: `El servicio de correos no aceptó la copia: ${resultado.error}` });
+    res.json({
+      completa: resultado.completa,
+      mensaje: resultado.completa
+        ? `Listo: te mandamos la copia (${resultado.total} reservas, con el CSV y la copia completa) a ${config.email_alertas}.`
+        : `Salió solo el CSV: el servicio de correos rechazó la copia completa (${resultado.error}). Bajala con "Descargar copia completa (.json)" y avisá a la Secretaría de Informática.`
+    });
   } catch (error) {
     manejarError(res, error);
   }
@@ -5273,7 +5398,7 @@ const TABLAS_COPIA = [
   ['espacios', 'id'], ['meses_habilitados', 'id'], ['configuracion', 'clave'], ['reservas', 'id'],
   ['bloqueos', 'id'], ['lista_espera', 'id'], ['reportes_errores', 'id'], ['registro_actividad', 'id']
 ];
-const CLAVES_FUERA_DE_LA_COPIA = ['admin_password_hash'];
+const CLAVES_FUERA_DE_LA_COPIA = ['admin_password_hash', 'login_redes_conocidas'];
 
 async function armarCopiaCompleta() {
   const tablas = {};
@@ -5282,6 +5407,97 @@ async function armarCopiaCompleta() {
     tablas[tabla] = tabla === 'configuracion' ? filas.filter(f => !CLAVES_FUERA_DE_LA_COPIA.includes(f.clave)) : filas;
   }
   return { formato: 'copia-ceq-reservas', version: 1, creada_en: new Date().toISOString(), tablas };
+}
+
+// Un .zip con un solo archivo adentro (comprimido). N1 de la verificación del 23/10: Brevo no acepta
+// adjuntos .gz ni .json (y si un adjunto no se acepta, rechaza el correo entero); .zip sí.
+// Formato ZIP básico: encabezado local + datos + directorio central + fin del directorio.
+function zipUnArchivo(nombre, contenido) {
+  const nombreBytes = Buffer.from(nombre, 'utf8');
+  const comprimido = zlib.deflateRawSync(contenido, { level: 9 });
+  const crc = zlib.crc32(contenido) >>> 0;
+  const ahora = new Date();
+  const hora = (ahora.getHours() << 11) | (ahora.getMinutes() << 5) | Math.floor(ahora.getSeconds() / 2);
+  const fecha = ((ahora.getFullYear() - 1980) << 9) | ((ahora.getMonth() + 1) << 5) | ahora.getDate();
+  const local = Buffer.alloc(30);
+  local.writeUInt32LE(0x04034b50, 0); // firma
+  local.writeUInt16LE(20, 4);         // versión necesaria
+  local.writeUInt16LE(0x0800, 6);     // nombre en UTF-8
+  local.writeUInt16LE(8, 8);          // comprimido con deflate
+  local.writeUInt16LE(hora, 10);
+  local.writeUInt16LE(fecha, 12);
+  local.writeUInt32LE(crc, 14);
+  local.writeUInt32LE(comprimido.length, 18);
+  local.writeUInt32LE(contenido.length, 22);
+  local.writeUInt16LE(nombreBytes.length, 26);
+  local.writeUInt16LE(0, 28);
+  const central = Buffer.alloc(46);
+  central.writeUInt32LE(0x02014b50, 0);
+  central.writeUInt16LE(20, 4);
+  central.writeUInt16LE(20, 6);
+  central.writeUInt16LE(0x0800, 8);
+  central.writeUInt16LE(8, 10);
+  central.writeUInt16LE(hora, 12);
+  central.writeUInt16LE(fecha, 14);
+  central.writeUInt32LE(crc, 16);
+  central.writeUInt32LE(comprimido.length, 20);
+  central.writeUInt32LE(contenido.length, 24);
+  central.writeUInt16LE(nombreBytes.length, 28);
+  // extra, comentario, disco, atributos y posición del encabezado local: todo 0
+  const tamanoLocal = local.length + nombreBytes.length + comprimido.length;
+  const fin = Buffer.alloc(22);
+  fin.writeUInt32LE(0x06054b50, 0);
+  fin.writeUInt16LE(1, 8);
+  fin.writeUInt16LE(1, 10);
+  fin.writeUInt32LE(central.length + nombreBytes.length, 12);
+  fin.writeUInt32LE(tamanoLocal, 16);
+  return Buffer.concat([local, nombreBytes, comprimido, central, nombreBytes, fin]);
+}
+
+// Arma y manda la copia (el CSV y la copia completa en .zip) al correo de alertas. Si Brevo rechaza
+// el correo con los dos adjuntos, lo vuelve a intentar solo con el CSV, para que al menos llegue
+// eso. Devuelve { ok, completa (si salió también la copia completa), total, error }.
+async function mandarCopiaPorCorreo(mes, { desdePanel = false } = {}) {
+  const { csv, total } = await armarCsvReservas();
+  const json = Buffer.from(JSON.stringify(await armarCopiaCompleta()), 'utf8');
+  const completa = zipUnArchivo(`reservas-ceq-${mes}-completa.json`, json);
+  const [anio, numeroMes] = mes.split('-');
+  const nombreMes = ['enero', 'febrero', 'marzo', 'abril', 'mayo', 'junio', 'julio', 'agosto', 'septiembre', 'octubre', 'noviembre', 'diciembre'][Number(numeroMes) - 1];
+  const adjuntoCsv = { name: `reservas-ceq-${mes}.csv`, content: Buffer.from(csv, 'utf8').toString('base64') };
+  const adjuntoZip = { name: `reservas-ceq-${mes}-completa.zip`, content: completa.toString('base64') };
+  const armar = conCompleta => ({
+    to: config.email_alertas,
+    subject: `Copia de seguridad de las reservas: ${nombreMes} ${anio} (${total} reservas)${desdePanel ? ' - pedida desde el panel' : ''}`,
+    html: `
+        <p>Hola,</p>
+        <p>Te mandamos la copia de seguridad ${desdePanel ? 'que pediste desde el panel' : 'mensual'} del sistema de reservas. Trae ${conCompleta ? 'dos archivos' : 'un archivo'}:</p>
+        <ul>
+          <li><strong>reservas-ceq-${mes}.csv</strong>: las <strong>${total} reservas</strong> guardadas hasta hoy, con todos sus datos (también celulares, correos y cancelaciones). Se abre con Excel o con Google Sheets.</li>
+          ${conCompleta
+            ? `<li><strong>reservas-ceq-${mes}-completa.zip</strong>: la base entera (reservas, bloqueos, meses, lista de espera, reglas, textos, correos y Términos). No hace falta abrirlo: sirve para volver a cargar todo en una base nueva con restaurar.js (ver el README del servidor, "Restaurar la base").</li>`
+            : '<li><strong>La copia completa no se pudo adjuntar</strong> (el servicio de correos la rechazó). Bajala desde el panel: Avanzado → Mantenimiento → Copia de seguridad → "Descargar copia completa (.json)".</li>'}
+        </ul>
+        <p><strong>Qué hacer:</strong> ${conCompleta ? 'nada. La copia queda guardada en este correo.' : 'bajar la copia completa desde el panel y avisar a la Secretaría de Informática.'}</p>
+        <p>La base de datos gratuita no guarda copias que se puedan descargar: si algún día se perdiera, estas copias son la forma de recuperarla.</p>
+        <p>Los archivos tienen datos personales: no los reenvíes, no los guardes en otro lado y no los compartas fuera de quienes administran el sistema. El script "Limpiar copias de seguridad" de esta cuenta guarda solo las 2 copias más nuevas y manda las demás a la papelera.</p>
+        <p>Sistema de Reservas del CEQ</p>
+      `,
+    adjuntos: conCompleta ? [adjuntoCsv, adjuntoZip] : [adjuntoCsv]
+  });
+  if (await enviarEmail(armar(true))) return { ok: true, completa: true, total, error: '' };
+  const errorConLosDos = ultimoErrorEmail;
+  if (await enviarEmail(armar(false))) return { ok: true, completa: false, total, error: errorConLosDos };
+  return { ok: false, completa: false, total, error: ultimoErrorEmail || errorConLosDos };
+}
+
+// Si la copia no sale (o sale sin la copia completa), queda anotado para "Estado del sistema" y llega
+// una alerta. Antes reintentaba en silencio todo el mes.
+const CLAVE_ERROR_COPIA = 'copia_mensual_error';
+async function anotarResultadoCopia(mes, resultado) {
+  const problema = !resultado.ok ? `No salió: ${resultado.error}` : !resultado.completa ? `Salió solo el CSV (la copia completa se rechazó: ${resultado.error})` : '';
+  const { error } = await supabase.from('configuracion').upsert({ clave: CLAVE_ERROR_COPIA, valor: problema ? JSON.stringify({ mes, en: new Date().toISOString(), problema: problema.slice(0, 300) }) : '' }, { onConflict: 'clave' });
+  if (error) console.error('⚠️ No se pudo anotar el resultado de la copia:', error.message || error.code);
+  if (problema) anotarAlerta('error', `Copia de seguridad de ${mes}: ${problema}`);
 }
 
 async function enviarCopiaMensual() {
@@ -5300,6 +5516,11 @@ async function enviarCopiaMensual() {
   // copia no llegaba nunca).
   const enviando = String(anterior || '').match(/^(\d{4}-\d{2})\|enviando\|(.+)$/);
   if (enviando && enviando[1] === mes && Date.now() - Date.parse(enviando[2]) < 30 * 60 * 1000) return;
+  // Si en este mes ya falló, se reintenta una vez por hora (antes, cada 5 minutos todo el mes)
+  const { data: filaError } = await supabase.from('configuracion').select('valor').eq('clave', CLAVE_ERROR_COPIA).maybeSingle();
+  let ultimoError = null;
+  try { ultimoError = filaError && filaError.valor ? JSON.parse(filaError.valor) : null; } catch (e) { /* sin anotación */ }
+  if (ultimoError && ultimoError.mes === mes && /^No salió/.test(ultimoError.problema) && Date.now() - Date.parse(ultimoError.en) < 60 * 60 * 1000) return;
   const hecho = enviando ? '' : (anterior || '');
   const marcar = valor => supabase.from('configuracion').upsert({ clave: CLAVE_COPIA_MENSUAL, valor }, { onConflict: 'clave' });
   const { error: errorMarcar } = await marcar(`${mes}|enviando|${new Date().toISOString()}`);
@@ -5307,31 +5528,9 @@ async function enviarCopiaMensual() {
 
   let enviado = false;
   try {
-    const { csv, total } = await armarCsvReservas();
-    // La copia completa va comprimida (el texto de la base ocupa mucho y se achica unas diez veces)
-    const completa = zlib.gzipSync(Buffer.from(JSON.stringify(await armarCopiaCompleta()), 'utf8'));
-    const [anio, numeroMes] = mes.split('-');
-    const nombreMes = ['enero', 'febrero', 'marzo', 'abril', 'mayo', 'junio', 'julio', 'agosto', 'septiembre', 'octubre', 'noviembre', 'diciembre'][Number(numeroMes) - 1];
-    enviado = await enviarEmail({
-      to: config.email_alertas,
-      subject: `Copia de seguridad de las reservas: ${nombreMes} ${anio} (${total} reservas)`,
-      html: `
-        <p>Hola,</p>
-        <p>Te mandamos la copia de seguridad mensual del sistema de reservas. Trae dos archivos:</p>
-        <ul>
-          <li><strong>reservas-ceq-${mes}.csv</strong>: las <strong>${total} reservas</strong> guardadas hasta hoy, con todos sus datos (también celulares, correos y cancelaciones). Se abre con Excel o con Google Sheets.</li>
-          <li><strong>reservas-ceq-${mes}-completa.json.gz</strong>: la base entera (reservas, bloqueos, meses, lista de espera, reglas, textos, correos y Términos). No hace falta abrirlo: sirve para volver a cargar todo en una base nueva con restaurar.js (ver el README del servidor, "Restaurar la base").</li>
-        </ul>
-        <p><strong>Qué hacer:</strong> nada. La copia queda guardada en este correo.</p>
-        <p>La base de datos gratuita no guarda copias que se puedan descargar: si algún día se perdiera, estas copias son la forma de recuperarla.</p>
-        <p>Los archivos tienen datos personales: no los reenvíes, no los guardes en otro lado y no los compartas fuera de quienes administran el sistema. El script "Limpiar copias de seguridad" de esta cuenta guarda solo las 2 copias más nuevas y manda las demás a la papelera.</p>
-        <p>Sistema de Reservas del CEQ</p>
-      `,
-      adjuntos: [
-        { name: `reservas-ceq-${mes}.csv`, content: Buffer.from(csv, 'utf8').toString('base64') },
-        { name: `reservas-ceq-${mes}-completa.json.gz`, content: completa.toString('base64') }
-      ]
-    });
+    const resultado = await mandarCopiaPorCorreo(mes);
+    enviado = resultado.ok;
+    await anotarResultadoCopia(mes, resultado);
   } finally {
     const { error: errorFinal } = await marcar(enviado ? mes : hecho);
     if (errorFinal) console.error('⚠️ No se pudo anotar la copia mensual:', errorFinal.message || errorFinal.code);

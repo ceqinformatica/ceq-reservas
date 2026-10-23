@@ -409,7 +409,7 @@ insert into public.configuracion (clave, valor) values
   ('version_sesiones', '1'),
   ('turnos_frente', '[{"nombre":"Desayuno","inicio":"07:00","fin":"10:00"},{"nombre":"Almuerzo","inicio":"10:00","fin":"13:00"},{"nombre":"Merienda","inicio":"14:00","fin":"18:00"}]'),
   ('max_reservas_por_persona_mes', '2'),
-  ('contacto_email_frente', 'Monsegonza511@gmail.com'),
+  ('contacto_email_frente', 'reservas@ceq-una.com'),
   ('contacto_whatsapp_frente', '595972753471'),
   ('email_alertas', 'ceq.informatica@gmail.com');
 
