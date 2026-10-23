@@ -9,6 +9,7 @@ const bcrypt = require('bcryptjs');
 const jwt = require('jsonwebtoken');
 const crypto = require('crypto');
 const net = require('net');
+const zlib = require('zlib');
 
 const app = express();
 
@@ -552,20 +553,23 @@ function correoDeReserva(clave, r, extra = {}) {
   const calendario = `<p><a href="${escapeHtml(enlaceGoogleCalendar(r.espacio_id, r.fecha, inicio, fin))}">📅 Agregar a Google Calendar</a></p>`;
   const contacto = `<p>Ante cualquier consulta, contactate con: ${getContactoLineaHtml(r.espacio_id)}</p>`;
   const firma = '<p>Centro de Estudiantes de Química</p>';
-  const cancelar = extra.codigo
-    ? `<p>Si necesitas cancelar, usa tu código en: <a href="https://reservas.ceq-una.com/cancelar.html">Cancelar Reserva</a>, o directamente este enlace: <a href="${enlaceCancelacion(r.id)}">Cancelar mi reserva</a></p>`
-    : `<p>Si necesitás cancelar, usá directamente este enlace: <a href="${enlaceCancelacion(r.id)}">Cancelar mi reserva</a></p>`;
+  // El enlace se firma con el código vigente: el nuevo si se acaba de generar, si no el guardado
+  const enlace = () => enlaceCancelacion(r.id, extra.codigo ? hashCodigo(extra.codigo) : r.codigo_cancelacion_hash);
+  // (se arma solo en los correos que lo llevan: los avisos y cancelaciones no tienen enlace)
+  const cancelar = () => extra.codigo
+    ? `<p>Si necesitas cancelar, usa tu código en: <a href="https://reservas.ceq-una.com/cancelar.html">Cancelar Reserva</a>, o directamente este enlace: <a href="${enlace()}">Cancelar mi reserva</a></p>`
+    : `<p>Si necesitás cancelar, usá directamente este enlace: <a href="${enlace()}">Cancelar mi reserva</a></p>`;
   let cuerpo;
   switch (clave) {
     case 'confirmacion':
     case 'reenvio':
     case 'modificada':
-      cuerpo = [p.titulo, p.mensaje, '<hr>', detallesReservaHtml(r, { conMotivo: true, codigo: extra.codigo }), cancelar,
+      cuerpo = [p.titulo, p.mensaje, '<hr>', detallesReservaHtml(r, { conMotivo: true, codigo: extra.codigo }), cancelar(),
         reglaCancelacionHtml(r.espacio_id, r.fecha), calendario, normasHtml(r.espacio_id), contacto, firma];
       break;
     case 'recordatorio':
       cuerpo = [p.titulo, p.mensaje,
-        `<p><a href="${enlaceCancelacion(r.id)}" style="display:inline-block;background:#1F3A68;color:#ffffff;padding:10px 18px;border-radius:6px;text-decoration:none;font-weight:bold">Cancelar mi reserva</a></p>`,
+        `<p><a href="${enlace()}" style="display:inline-block;background:#1F3A68;color:#ffffff;padding:10px 18px;border-radius:6px;text-decoration:none;font-weight:bold">Cancelar mi reserva</a></p>`,
         plazoRecordatorioHtml(r), calendario, normasHtml(r.espacio_id), contacto, firma];
       break;
     case 'cancelacion':
@@ -1380,21 +1384,41 @@ function enlaceGoogleCalendar(espacioId, fecha, horaInicioHHMM, horaFinHHMM) {
 // JWT_SECRET: no se puede fabricar para otra reserva. Si se cambia JWT_SECRET, los enlaces
 // viejos dejan de andar (el código sigue sirviendo). Cancelar por enlace sigue las mismas
 // reglas que con el código (Frente: hasta 2 días antes).
-const CLAVE_ENLACES = crypto.createHmac('sha256', JWT_SECRET).update('enlaces-de-cancelacion-v1').digest();
+// AUD-09: la firma lleva también el código de cancelación cifrado de la reserva. Si el código cambia
+// (se corrige el correo de la reserva o se reenvía la confirmación), el enlace anterior deja de
+// servir. Antes la firma dependía solo del número, y quien tenía un correo viejo seguía pudiendo
+// cancelar.
+const CLAVE_ENLACES_V1 = crypto.createHmac('sha256', JWT_SECRET).update('enlaces-de-cancelacion-v1').digest();
+const CLAVE_ENLACES = crypto.createHmac('sha256', JWT_SECRET).update('enlaces-de-cancelacion-v2').digest();
+// Los enlaces que ya se mandaron antes de este cambio solo dependían del número: siguen sirviendo
+// para las reservas hechas hasta entonces (las más nuevas ya tienen la firma con el código)
+const FIN_ENLACES_V1 = Date.parse('2026-10-24T12:00:00Z');
 
-function tokenCancelacion(reservaId) {
-  return crypto.createHmac('sha256', CLAVE_ENLACES).update(`cancelar:${Number(reservaId)}`).digest('base64url').slice(0, 32);
+function tokenCancelacion(reservaId, codigoHash) {
+  return crypto.createHmac('sha256', CLAVE_ENLACES).update(`cancelar:${Number(reservaId)}:${codigoHash || ''}`).digest('base64url').slice(0, 32);
 }
 
-function tokenCancelacionValido(reservaId, token) {
-  if (!esIdValido(reservaId) || typeof token !== 'string' || token.length !== 32) return false;
-  const esperado = Buffer.from(tokenCancelacion(reservaId));
-  const recibido = Buffer.from(token);
-  return esperado.length === recibido.length && crypto.timingSafeEqual(esperado, recibido);
+function tokenCancelacionV1(reservaId) {
+  return crypto.createHmac('sha256', CLAVE_ENLACES_V1).update(`cancelar:${Number(reservaId)}`).digest('base64url').slice(0, 32);
 }
 
-function enlaceCancelacion(reservaId) {
-  return `https://reservas.ceq-una.com/cancelar.html?r=${Number(reservaId)}&t=${tokenCancelacion(reservaId)}`;
+function mismaFirma(esperado, token) {
+  const a = Buffer.from(esperado);
+  const b = Buffer.from(token);
+  return a.length === b.length && crypto.timingSafeEqual(a, b);
+}
+
+// `reserva` es la fila de la base (con codigo_cancelacion_hash y created_at)
+function tokenCancelacionValido(reserva, token) {
+  if (!reserva || !esIdValido(reserva.id) || typeof token !== 'string' || token.length !== 32) return false;
+  if (mismaFirma(tokenCancelacion(reserva.id, reserva.codigo_cancelacion_hash), token)) return true;
+  const creada = Date.parse(aIsoUtc(reserva.created_at) || '');
+  return Number.isFinite(creada) && creada < FIN_ENLACES_V1 && mismaFirma(tokenCancelacionV1(reserva.id), token);
+}
+
+function enlaceCancelacion(reservaId, codigoHash) {
+  if (!codigoHash) console.warn(`⚠️ Enlace para cancelar la reserva #${reservaId} sin el código cifrado: no va a servir`);
+  return `https://reservas.ceq-una.com/cancelar.html?r=${Number(reservaId)}&t=${tokenCancelacion(reservaId, codigoHash)}`;
 }
 
 // "jueves 16/10/2026" para los correos
@@ -2261,10 +2285,12 @@ async function cancelarComoUsuario(reserva, res) {
 // GET: datos mínimos para mostrar en cancelar.html antes de confirmar (sin datos personales).
 // POST: cancela. Las dos exigen la firma del enlace (ver tokenCancelacion).
 async function reservaDelEnlace(res, r, t) {
-  if (!tokenCancelacionValido(r, t)) {
+  const invalido = () => {
     res.status(404).json({ error: 'El enlace no es válido. Podés cancelar con el código que te llegó en el correo de confirmación.' });
     return null;
-  }
+  };
+  if (!esIdValido(r) || typeof t !== 'string' || t.length !== 32) return invalido();
+  // La firma se comprueba con la reserva (lleva su código cifrado, AUD-09)
   const { data, error } = await supabase
     .from('reservas')
     .select('*')
@@ -2272,9 +2298,14 @@ async function reservaDelEnlace(res, r, t) {
     .maybeSingle();
   if (error) throw error;
   if (!data) {
-    res.status(404).json({ error: 'Esa reserva ya no existe' });
-    return null;
+    // Una reserva borrada desde el panel: solo se dice si el enlace era de verdad (formato viejo)
+    if (mismaFirma(tokenCancelacionV1(r), t)) {
+      res.status(404).json({ error: 'Esa reserva ya no existe' });
+      return null;
+    }
+    return invalido();
   }
+  if (!tokenCancelacionValido(data, t)) return invalido();
   return data;
 }
 
@@ -4332,6 +4363,7 @@ const COMODINES_LEGALES = {
   plazo_cancelacion_altillo: 'Lo mismo para el Altillo. Ej.: "hasta el inicio de la Reserva"',
   recordatorio: 'La frase del recordatorio (Reglas). Ej.: "Dos (2) días antes de la fecha, el Sistema enviará un recordatorio al correo registrado."',
   max_acompanantes: 'Máximo de acompañantes en el Altillo. Ej.: "cuatro (4)"',
+  acompanantes_por_espacio: 'En qué espacios y cuántos acompañantes se anotan (Reglas). Ej.: "solo en el Altillo, hasta cuatro (4) por Reserva"',
   meses_conservacion: 'Plazo de conservación de los datos. Ej.: "seis (6) meses"'
 };
 function valoresComodinesLegales() {
@@ -4355,13 +4387,24 @@ function valoresComodinesLegales() {
   }
   const mismosDias = frente.dias.join() === altillo.dias.join();
   const desde = config.altillo_hora_desde, hasta = config.altillo_hora_hasta;
+  // AUD-12: los acompañantes se configuran por espacio (antes el texto decía siempre "solo Altillo")
+  const enLetras = n => `${NUMEROS_EN_LETRAS[n] || n} (${n})`;
+  const conAcompanantes = [['Frente', frente.acompanantes_max], ['Altillo', altillo.acompanantes_max]].filter(([, n]) => n > 0);
+  const acompanantesPorEspacio = conAcompanantes.length === 0
+    ? 'en ningún espacio'
+    : conAcompanantes.length === 1
+      ? `solo en el ${conAcompanantes[0][0]}, hasta ${enLetras(conAcompanantes[0][1])} por Reserva`
+      : frente.acompanantes_max === altillo.acompanantes_max
+        ? `en el Frente y en el Altillo, hasta ${enLetras(frente.acompanantes_max)} por Reserva`
+        : `en el Frente, hasta ${enLetras(frente.acompanantes_max)}, y en el Altillo, hasta ${enLetras(altillo.acompanantes_max)} por Reserva`;
   return {
     dias_reserva: mismosDias ? diasEnTexto(frente.dias) : `en el Frente, ${diasEnTexto(frente.dias)}, y en el Altillo, ${diasEnTexto(altillo.dias)}`,
     horario_altillo: `entre las ${hora(desde)} y las ${hora(hasta)} (el primer bloque comienza a las ${hora(desde)} y el último, a las ${hora(hasta - 1)}), con una duración mínima de una (1) hora y máxima de ${cantidadLegal(config.altillo_max_horas, 'hora', 'horas', true)} por Reserva`,
     plazo_cancelacion_frente: plazo(frente),
     plazo_cancelacion_altillo: plazo(altillo),
     recordatorio,
-    max_acompanantes: `${NUMEROS_EN_LETRAS[reglaEspacio(1).acompanantes_max] || reglaEspacio(1).acompanantes_max} (${reglaEspacio(1).acompanantes_max})`,
+    max_acompanantes: enLetras(altillo.acompanantes_max),
+    acompanantes_por_espacio: acompanantesPorEspacio,
     meses_conservacion: cantidadLegal(MESES_CONSERVACION, 'mes', 'meses')
   };
 }
@@ -4710,8 +4753,14 @@ app.put('/api/superadmin/reservas/:id', verifyAdminToken, verifySuperAdmin, veri
     if (cambiaHorario) cambios.push('día u horario');
     if (!cambios.length) return res.json({ mensaje: 'No había cambios' });
 
+    // AUD-09: si cambia el correo o el celular, el código anterior (y el enlace firmado con él) deja
+    // de servir: se genera uno nuevo y va en el aviso al contacto nuevo. Si no, quien tenía el
+    // correo equivocado seguía pudiendo cancelar la reserva.
+    const cambiaContacto = datos.contacto !== reserva.contacto;
+    const codigoNuevo = cambiaContacto ? crypto.randomBytes(8).toString('hex').toUpperCase() : null;
     const { data: actualizada, error } = await supabase.from('reservas')
-      .update({ nombre_solicitante: datos.nombre_solicitante, contacto: datos.contacto, fecha: datos.fecha, hora_inicio: ini + ':00', hora_fin: fin + ':00' })
+      .update({ nombre_solicitante: datos.nombre_solicitante, contacto: datos.contacto, fecha: datos.fecha, hora_inicio: ini + ':00', hora_fin: fin + ':00',
+        ...(codigoNuevo ? { codigo_cancelacion_hash: hashCodigo(codigoNuevo) } : {}) })
       .eq('id', reserva.id).eq('estado', 'activa').select();
     if (error) {
       if (error.code === '23P01' || error.code === '23505') return res.status(409).json({ error: 'Ese horario ya está ocupado por otra reserva' });
@@ -4720,11 +4769,12 @@ app.put('/api/superadmin/reservas/:id', verifyAdminToken, verifySuperAdmin, veri
     }
     if (!actualizada || !actualizada.length) return res.status(409).json({ error: 'La reserva cambió mientras la editabas (por ejemplo, se canceló). Volvé a cargarla.' });
 
-    // Aviso a la persona (al correo nuevo, si se cambió), salvo que se pida no avisar
+    // Aviso a la persona (al correo nuevo, si se cambió), salvo que se pida no avisar. Con un código
+    // nuevo se avisa siempre: es la única forma de que la persona lo tenga.
     let avisado = false;
     const email = correoDeContacto(datos.contacto);
-    if (b.avisar !== false && email) {
-      const correo = correoDeReserva('modificada', actualizada[0], { cambios: cambios.join(', ') });
+    if ((b.avisar !== false || codigoNuevo) && email) {
+      const correo = correoDeReserva('modificada', actualizada[0], { cambios: cambios.join(', '), codigo: codigoNuevo });
       avisado = await encolarCorreo({
         to: email,
         subject: correo.asunto,
@@ -4882,9 +4932,18 @@ app.get('/api/superadmin/estado', verifyAdminToken, verifySuperAdmin, async (req
   }
 });
 
-// Copia de seguridad en el momento: el mismo archivo que la copia mensual, para bajarlo ya
+// Copia de seguridad en el momento: los mismos archivos que la copia mensual, para bajarlos ya.
+// ?formato=json: la copia completa (para restaurar.js); si no, el CSV de las reservas.
 app.get('/api/superadmin/copia', verifyAdminToken, verifySuperAdmin, async (req, res) => {
   try {
+    if (req.query.formato === 'json') {
+      const copia = await armarCopiaCompleta();
+      registrarActividad(req.admin.rol, 'Descargó una copia de seguridad completa', `${copia.tablas.reservas.length} reservas`);
+      res.set('Cache-Control', 'no-store');
+      res.set('Content-Type', 'application/json; charset=utf-8');
+      res.set('Content-Disposition', `attachment; filename="reservas-ceq-${hoyEnAsuncion().toISOString().slice(0, 10)}-completa.json"`);
+      return res.send(JSON.stringify(copia));
+    }
     const { csv, total } = await armarCsvReservas();
     registrarActividad(req.admin.rol, 'Descargó una copia de seguridad', `${total} reservas`);
     res.set('Cache-Control', 'no-store');
@@ -5082,7 +5141,8 @@ async function enviarRecordatorios() {
     objetivo.setUTCDate(objetivo.getUTCDate() + regla.recordatorio_dias);
     const { data: filas, error } = await supabase
       .from('reservas')
-      .select('id, espacio_id, fecha, hora_inicio, hora_fin, nombre_solicitante, contacto')
+      // codigo_cancelacion_hash: firma el enlace "Cancelar mi reserva" (AUD-09)
+      .select('id, espacio_id, fecha, hora_inicio, hora_fin, nombre_solicitante, contacto, codigo_cancelacion_hash, created_at')
       .eq('estado', 'activa')
       .eq('espacio_id', id)
       .eq('fecha', objetivo.toISOString().slice(0, 10))
@@ -5227,6 +5287,26 @@ async function armarCsvReservas() {
   return { csv: '﻿' + lineas.join('\r\n') + '\r\n', total: filas.length };
 }
 
+// AUD-06: copia COMPLETA de la base, para volver a cargarla en una base nueva con restaurar.js
+// (ver README, "Restaurar la base"). Además de las reservas (con su código cifrado, así los
+// códigos y los enlaces siguen sirviendo) lleva los bloqueos, los meses, la lista de espera, la
+// configuración (reglas, textos, correos, Términos y su historial), los reportes y el registro.
+// No lleva la contraseña de los admins ni la cola de correos.
+const TABLAS_COPIA = [
+  ['espacios', 'id'], ['meses_habilitados', 'id'], ['configuracion', 'clave'], ['reservas', 'id'],
+  ['bloqueos', 'id'], ['lista_espera', 'id'], ['reportes_errores', 'id'], ['registro_actividad', 'id']
+];
+const CLAVES_FUERA_DE_LA_COPIA = ['admin_password_hash'];
+
+async function armarCopiaCompleta() {
+  const tablas = {};
+  for (const [tabla, orden] of TABLAS_COPIA) {
+    const filas = await leerTodasLasFilas(() => supabase.from(tabla).select('*').order(orden, { ascending: true }), 200000);
+    tablas[tabla] = tabla === 'configuracion' ? filas.filter(f => !CLAVES_FUERA_DE_LA_COPIA.includes(f.clave)) : filas;
+  }
+  return { formato: 'copia-ceq-reservas', version: 1, creada_en: new Date().toISOString(), tablas };
+}
+
 async function enviarCopiaMensual() {
   if (horaActualEnAsuncionEnMinutos() < 8 * 60) return;
   const mes = hoyEnAsuncion().toISOString().slice(0, 7); // "2026-11"
@@ -5251,6 +5331,8 @@ async function enviarCopiaMensual() {
   let enviado = false;
   try {
     const { csv, total } = await armarCsvReservas();
+    // La copia completa va comprimida (el texto de la base ocupa mucho y se achica unas diez veces)
+    const completa = zlib.gzipSync(Buffer.from(JSON.stringify(await armarCopiaCompleta()), 'utf8'));
     const [anio, numeroMes] = mes.split('-');
     const nombreMes = ['enero', 'febrero', 'marzo', 'abril', 'mayo', 'junio', 'julio', 'agosto', 'septiembre', 'octubre', 'noviembre', 'diciembre'][Number(numeroMes) - 1];
     enviado = await enviarEmail({
@@ -5258,13 +5340,20 @@ async function enviarCopiaMensual() {
       subject: `Copia de seguridad de las reservas: ${nombreMes} ${anio} (${total} reservas)`,
       html: `
         <p>Hola,</p>
-        <p>Te mandamos la copia de seguridad mensual del sistema de reservas: el archivo adjunto tiene las <strong>${total} reservas</strong> guardadas hasta hoy, con todos sus datos (también celulares, correos y cancelaciones).</p>
-        <p><strong>Qué hacer:</strong> nada. La copia queda guardada en este correo; si la necesitás, el archivo se abre con Excel o con Google Sheets.</p>
-        <p>La base de datos gratuita no guarda copias que se puedan descargar: si algún día se perdiera, estas copias son la forma de recuperar las reservas.</p>
-        <p>El archivo tiene datos personales: no lo reenvíes, no lo guardes en otro lado y no lo compartas fuera de quienes administran el sistema. Según la Política de Privacidad, las copias se conservan como máximo 6 meses: el script "Limpiar copias de seguridad" de esta cuenta las manda a la papelera solo cuando cumplen ese plazo.</p>
+        <p>Te mandamos la copia de seguridad mensual del sistema de reservas. Trae dos archivos:</p>
+        <ul>
+          <li><strong>reservas-ceq-${mes}.csv</strong>: las <strong>${total} reservas</strong> guardadas hasta hoy, con todos sus datos (también celulares, correos y cancelaciones). Se abre con Excel o con Google Sheets.</li>
+          <li><strong>reservas-ceq-${mes}-completa.json.gz</strong>: la base entera (reservas, bloqueos, meses, lista de espera, reglas, textos, correos y Términos). No hace falta abrirlo: sirve para volver a cargar todo en una base nueva con restaurar.js (ver el README del servidor, "Restaurar la base").</li>
+        </ul>
+        <p><strong>Qué hacer:</strong> nada. La copia queda guardada en este correo.</p>
+        <p>La base de datos gratuita no guarda copias que se puedan descargar: si algún día se perdiera, estas copias son la forma de recuperarla.</p>
+        <p>Los archivos tienen datos personales: no los reenvíes, no los guardes en otro lado y no los compartas fuera de quienes administran el sistema. El script "Limpiar copias de seguridad" de esta cuenta guarda solo las 2 copias más nuevas y manda las demás a la papelera.</p>
         <p>Sistema de Reservas del CEQ</p>
       `,
-      adjuntos: [{ name: `reservas-ceq-${mes}.csv`, content: Buffer.from(csv, 'utf8').toString('base64') }]
+      adjuntos: [
+        { name: `reservas-ceq-${mes}.csv`, content: Buffer.from(csv, 'utf8').toString('base64') },
+        { name: `reservas-ceq-${mes}-completa.json.gz`, content: completa.toString('base64') }
+      ]
     });
   } finally {
     const { error: errorFinal } = await marcar(enviado ? mes : hecho);

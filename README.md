@@ -40,7 +40,8 @@ Las contraseñas de estas cuentas se guardan en un documento privado de la Secre
 | GitHub | organización `ceqinformatica` |
 | Render | `ceq.informatica@gmail.com` (workspace "reservas ceq") |
 | UptimeRobot | `ceq.informatica@gmail.com` |
-| Vercel, Supabase, Brevo, Cloudflare, Hosting PY | completar con la cuenta de cada uno |
+| Cloudflare (DNS y correo de `reservas@ceq-una.com`) | `Oficialceq@gmail.com` |
+| Vercel, Supabase, Brevo, Hosting PY | completar con la cuenta de cada uno (ver sección 13, "Traspaso") |
 | Panel de administración | dos contraseñas: la del **admin** (moderadores) y la del **admin supremo** (solo quien administra el sistema). Ver sección 11 para cambiarlas. |
 
 ## 3. Variables de entorno (Render → servicio `ceq-reservas` → Environment)
@@ -63,7 +64,7 @@ Si falta una obligatoria, el servidor no arranca y lo dice en los Logs de Render
 
 1. En GitHub, editá el archivo con el lápiz, o usá **Add file → Upload files** para reemplazar varios a la vez, y hacé **Commit**.
 2. Render (servidor) y Vercel (páginas) publican solos en 1 a 3 minutos.
-3. **Pruebas automáticas:** con cada cambio, GitHub corre solo unas 300 pruebas (ver [`pruebas/`](pruebas/README.md)). En la página del repo, al lado del último cambio, aparece una ✅ (todo bien) o una ❌ (algo se rompió: entrá a **Actions** para ver qué). Si Render está configurado con **Auto-Deploy: After CI Checks Pass**, un cambio con ❌ ni siquiera se publica.
+3. **Pruebas automáticas:** con cada cambio, GitHub corre solo unas 690 pruebas (ver [`pruebas/`](pruebas/README.md)). En la página del repo, al lado del último cambio, aparece una ✅ (todo bien) o una ❌ (algo se rompió: entrá a **Actions** para ver qué). Render está configurado con **Auto-Deploy: After CI Checks Pass** (desde el 23/10/2026): un cambio con ❌ no se publica y queda en línea la versión anterior. Por eso, si se cambian el servidor y las pruebas juntos, el servidor se publica recién cuando sube el cambio de las pruebas y todo da ✅. Además, Render solo pasa el tráfico a una versión nueva si `/api/health` responde bien (Health Check Path), e instala las librerías con `npm ci` (exactamente las de `package-lock.json`).
 4. Verificá:
    - Render → **Events**: el último deploy tiene que decir **Live**. En los registros de la compilación tiene que aparecer `Using Node.js version 24…`.
    - `https://api.ceq-una.com/api/health` tiene que responder `{"status":"ok","db":"ok"}`.
@@ -87,7 +88,7 @@ Si falta una obligatoria, el servidor no arranca y lo dice en los Logs de Render
 | Revisar reportes | Reportes | Cada reporte nuevo también llega por correo a `EMAIL_MODERADOR` (hasta 20 avisos por día). Cada uno pasa por **Nuevo → En revisión → Resuelto**, con una nota de lo que se hizo. Por defecto se ven los pendientes. |
 | Lista de espera | (la gestiona cada persona) | Al anotarse le llega un correo con un enlace para salir de la lista (página `lista-espera.html`, con un botón para confirmar). El aviso de turno liberado y esa confirmación van **solo en texto**, para que Gmail no los mande a Promociones. |
 | Exportar a Excel | Exportar | Botones **Este mes**, **Mes pasado** y **Todo**, filtro por espacio y por estado. Trae una hoja **Resumen** (totales por espacio, turno, día de la semana y mes) y una hoja por espacio con todos los datos de cada reserva, con fechas reales y filtros. |
-| **Copia de seguridad** | Planilla de Google Sheets | El plan gratuito de Supabase no guarda copias que se puedan recuperar. La planilla guarda sola una copia fija por mes (pestañas "Copia AAAA-MM"). Revisá de vez en cuando que la hora de "Última actualización" sea reciente. Si la planilla no está funcionando, **exportá a Excel una vez por mes**. |
+| **Copia de seguridad** | Llega sola por correo el día 1 (ver "Copia de seguridad mensual"), o Avanzado → Mantenimiento → Copia de seguridad | El plan gratuito de Supabase no guarda copias que se puedan recuperar. La copia **completa** (.json) sirve para restaurar la base entera (sección 10, "Restaurar la base"). La planilla de Google Sheets guarda además una copia por mes, sin celulares ni correos. |
 
 ### Admin supremo
 
@@ -117,7 +118,7 @@ Se entra al mismo panel, pero con la contraseña del admin supremo (`SUPERADMIN_
 | Cambiar las reglas de cada espacio | Avanzado → Reglas de cada espacio | Por espacio: **días de la semana** en que se reserva (si se agrega el sábado o el domingo, el calendario de ese espacio muestra esas columnas), **plazo para cancelar gratis** (N días antes; 0 = hasta que empiece), **recordatorio** (prendido o apagado y cuántos días antes), **anticipación** mínima y máxima, **límite por persona por mes** (el del Frente va de 1 a 20; el del Altillo, 0 = sin límite) y **normas de uso** (si hay, se muestran al reservar, hay que tildar que se leyeron y van en la confirmación y el recordatorio). Se aplica al instante en la página, el servidor y los correos; las reservas que ya existen no cambian. Las reservas de prioridad solo respetan los días. Si una regla queda distinta de lo que dicen los Términos (art. 5.3 días, 7.2 plazo, 7.3 recordatorio), el panel lo avisa: hay que actualizar esos artículos. Se guarda en `configuracion` (claves `reglas_espacios` y `max_reservas_por_persona_mes`). |
 | Cambiar textos de la página y poner un anuncio | Avanzado → Textos de la página | Título, texto de bienvenida, aviso de "mes no habilitado", texto extra de la ventana "reserva confirmada", texto de la lista de espera (con `{espacio}` y `{mes}`) y la ayuda de la página Cancelar. "Original" vuelve al texto de siempre. **Cinta de anuncios:** una franja arriba de todo (azul o roja), con fecha "mostrar hasta" para que se quite sola. El texto debajo de "Crear reserva" (plazo, anticipación y límite) se arma solo con las Reglas. Se guarda en `configuracion` (claves `textos_pagina` y `anuncio`). |
 | Cambiar los correos | Avanzado → Correos automáticos | Asunto, título y mensaje de cada correo a la gente: confirmación, recordatorio, cancelación (por la persona y por un moderador), plazo vencido, confirmación reenviada, reserva modificada y los dos de la lista de espera (esos son solo texto y se edita el texto entero; tienen que incluir su enlace). Comodines como `{nombre}`, `{fecha}`, `{horario}` se insertan con un toque. Los detalles, el código, los enlaces, la regla de cancelación, las normas y el contacto los agrega el sistema siempre; al asunto se le agrega " - CEQ #número". **Enviarme una prueba** manda lo escrito (sin guardarlo) al correo de alertas con datos de ejemplo y "[PRUEBA]" en el asunto (hasta 30 por día). **Volver al original** deshace los cambios. No se aceptan los signos < y >, ni comodines que no existen. Se guarda en `configuracion` (clave `plantillas_correo`, solo los correos cambiados). |
-| Cambiar los Términos y la Política de privacidad | Avanzado → Términos y privacidad | Editor por artículo con vista previa. Formato simple (sin HTML): línea en blanco = párrafo nuevo, "- " = lista, "a) " = lista con letras, `**negrita**`, `[texto](destino)` = enlace (a terminos.html, privacidad.html, https://…, mailto: o `plantilla:nombre`, un correo con asunto y mensaje ya armados que se edita abajo). Comodines como `{plazo_cancelacion_frente}`, `{dias_reserva}`, `{horario_altillo}`, `{recordatorio}`, `{max_acompanantes}` y `{meses_conservacion}` se completan solos con las Reglas y la Configuración, así el texto no las contradice. **Guardar corrección** deja la misma versión (errores de tipeo); **Publicar versión nueva** sube la versión (1.3 → 1.4, o 2.0 si es una reescritura), pide la fecha de vigencia y un resumen, y la anterior queda en el historial (se guardan las últimas 10 con su texto, para verlas o descargarlas). "Descargar los dos en PDF" arma un documento para imprimir o guardar como PDF; las páginas públicas también tienen su botón. Se guarda en `configuracion` (claves `legal_terminos` y `legal_privacidad`); si no hay nada guardado se usa `legal-por-defecto.json` (Términos 1.3 y Privacidad 1.2). Las páginas terminos.html y privacidad.html piden el texto a `/api/legal/terminos` y `/api/legal/privacidad`; si el servidor no responde, muestran el texto que traen escrito. Los cambios se ven al instante. |
+| Cambiar los Términos y la Política de privacidad | Avanzado → Términos y privacidad | Editor por artículo con vista previa. Formato simple (sin HTML): línea en blanco = párrafo nuevo, "- " = lista, "a) " = lista con letras, `**negrita**`, `[texto](destino)` = enlace (a terminos.html, privacidad.html, https://…, mailto: o `plantilla:nombre`, un correo con asunto y mensaje ya armados que se edita abajo). Comodines como `{plazo_cancelacion_frente}`, `{dias_reserva}`, `{horario_altillo}`, `{recordatorio}`, `{max_acompanantes}` (los del Altillo), `{acompanantes_por_espacio}` (en qué espacios y cuántos) y `{meses_conservacion}` se completan solos con las Reglas y la Configuración, así el texto no las contradice. **Guardar corrección** deja la misma versión (errores de tipeo); **Publicar versión nueva** sube la versión (1.3 → 1.4, o 2.0 si es una reescritura), pide la fecha de vigencia y un resumen, y la anterior queda en el historial (se guardan las últimas 10 con su texto, para verlas o descargarlas). "Descargar los dos en PDF" arma un documento para imprimir o guardar como PDF; las páginas públicas también tienen su botón. Se guarda en `configuracion` (claves `legal_terminos` y `legal_privacidad`); si no hay nada guardado se usa `legal-por-defecto.json` (Términos 1.3 y Privacidad 1.2). Las páginas terminos.html y privacidad.html piden el texto a `/api/legal/terminos` y `/api/legal/privacidad`; si el servidor no responde, muestran el texto que traen escrito. Los cambios se ven al instante. |
 | Acompañantes por espacio | Avanzado → Reglas de cada espacio | "Hasta N acompañantes por reserva" en cada espacio (0 = no se piden; máximo 10). Por defecto, Altillo 4 y Frente 0. La base acepta hasta 10 en cualquier espacio (migración `migracion-acompanantes-configurables.sql`, 19/10/2026); lo que se permite de verdad lo controla el servidor con esta regla. Si el Frente admite acompañantes, el panel avisa que el art. 6.2 de los Términos habla solo del Altillo. |
 | Avisos internos a los moderadores | Avanzado → Correos automáticos | Los 4 avisos (nueva reserva, la persona canceló, quiso cancelar fuera de plazo, un moderador canceló) se editan como los demás correos (grupo "Avisos internos"); los datos de la reserva, el contacto y el código los agrega el sistema. **Quién los recibe:** "Quién recibe los avisos internos", de 1 a 5 correos por espacio (clave `avisos_destinatarios`; por defecto, `EMAIL_MODERADOR` y `EMAIL_MODERADOR_FRENTE` de Render). Los avisos de reportes siguen yendo a `EMAIL_MODERADOR`. |
 | Respuestas listas | Avanzado → Respuestas listas → "Editar las respuestas" | Agregar, quitar, ordenar y cambiar los textos para responder pedidos. `{nombre}` = el primer nombre que se escribe arriba; `{plazo_frente}` = el plazo para cancelar del Frente. "Volver a las originales" deja las 6 de siempre. Clave `respuestas_listas`. |
@@ -138,9 +139,13 @@ El admin normal no ve la pestaña Avanzado, y el servidor le rechaza esas accion
 
 ### Copia de seguridad mensual (llega sola por correo)
 
-Supabase gratis no guarda copias que se puedan descargar. Por eso, el **día 1° de cada mes a las 08:00** el servidor manda al **correo de alertas** (Avanzado → Turnos, horarios y contacto) un archivo `reservas-ceq-AAAA-MM.csv` con **todas** las reservas y todos sus datos (también celulares, correos, acompañantes y cancelaciones). Se abre con Excel o Google Sheets.
+Supabase gratis no guarda copias que se puedan descargar. Por eso, el **día 1° de cada mes a las 08:00** el servidor manda al **correo de alertas** (Avanzado → Turnos, horarios y contacto) dos archivos:
+- `reservas-ceq-AAAA-MM.csv`: **todas** las reservas con todos sus datos (también celulares, correos, acompañantes y cancelaciones). Se abre con Excel o Google Sheets.
+- `reservas-ceq-AAAA-MM-completa.json.gz`: la **base entera** (reservas con su código cifrado, bloqueos, meses, lista de espera, configuración con las reglas, los textos, los correos y los Términos con su historial, reportes y registro). No lleva la contraseña de los admins ni la cola de correos. No hace falta abrirlo: es lo que usa `restaurar.js` (sección 10, "Restaurar la base").
 
-**Qué hacer cuando llega:** nada; la copia queda en el correo. **No guardarla en otro lado**: la Política de Privacidad dice que las copias se conservan como máximo 6 meses, y el script `limpiar-copias-de-seguridad.gs` (está en este repositorio; es un proyecto de Apps Script aparte en la cuenta ceq.informatica, con un activador diario) manda a la papelera de Gmail las copias con más de 6 meses desde que llegaron. Gmail vacía la papelera solo a los 30 días, así que una copia puede durar hasta 6 meses y 30 días en total. El script solo toca estos correos de copia (remitente reservas@ceq-una.com, asunto "Copia de seguridad de las reservas"), no el resto del buzón ni la base de datos. Para instalarlo: script.google.com → Nuevo proyecto → pegar el código → ejecutar `activarLimpiezaDiaria` y autorizar (en Chrome). Tiene datos personales: no reenviarlo. Si un mes no llega, revisar Render → Logs (buscar `copia mensual`). El mes ya enviado queda anotado en la tabla `configuracion` (clave `copia_mensual_enviada`): para que se vuelva a mandar, borrá esa fila.
+Los mismos dos archivos se bajan en el momento desde Avanzado → Mantenimiento → Copia de seguridad.
+
+**Qué hacer cuando llega:** nada; la copia queda en el correo. **No guardarla en otro lado.** El script `limpiar-copias-de-seguridad.gs` (está en este repositorio; es un proyecto de Apps Script aparte en la cuenta ceq.informatica, con un activador diario) hace dos cosas: **guarda solo las 2 copias más nuevas** (manda las demás a la papelera) y manda a la papelera **los demás correos del sistema de más de 6 meses** (avisos de reservas y cancelaciones, reportes, alertas). Solo toca correos *recibidos* de reservas@ceq-una.com: las respuestas que la Secretaría manda desde esa cuenta no se tocan, aunque estén en la misma conversación. Gmail vacía la papelera a los 30 días. Los avisos que les llegan a otras casillas (por ejemplo, el correo personal de quien modera el Frente) no se pueden limpiar desde acá: cada moderador tiene que borrarlos. Para instalarlo o actualizarlo: script.google.com → el proyecto "Limpiar copias de seguridad" (o uno nuevo) → reemplazar todo el código → Guardar → ejecutar `activarLimpiezaDiaria` y autorizar (en Chrome). Si un mes la copia no llega, revisar Render → Logs (buscar `copia mensual`). El mes ya enviado queda anotado en la tabla `configuracion` (clave `copia_mensual_enviada`): para que se vuelva a mandar, borrá esa fila.
 
 ### Planilla de Google Sheets (se actualiza sola)
 
@@ -234,7 +239,22 @@ Protecciones que viven en la base (además de las del servidor):
 - **Seguridad (RLS) activada sin políticas:** solo el servidor, con la clave service_role, puede leer y escribir.
 - Los códigos de cancelación se guardan cifrados: **no se pueden recuperar**, ni siquiera desde la base.
 
-**Para recrear la base** (por ejemplo, si hubiera que pasar a otro proyecto de Supabase): crear el proyecto, abrir el **SQL Editor**, pegar y ejecutar `esquema-base-de-datos.sql`, actualizar `SUPABASE_URL` y `SUPABASE_KEY` en Render, y habilitar los meses desde el panel. Las reservas viejas no se recuperan con este archivo (para eso están las exportaciones a Excel).
+### Restaurar la base
+
+Si se perdiera la base (o hubiera que pasar a otro proyecto de Supabase), se recupera **todo** con la última copia completa. Se probó en las pruebas automáticas (`pruebas/probar_restaurar.js`) con un PostgreSQL de verdad.
+
+1. Tener la copia: el adjunto `reservas-ceq-AAAA-MM-completa.json.gz` del último correo "Copia de seguridad de las reservas" (o el `.json` que se baja del panel, si el panel todavía anda).
+2. En una computadora con Node.js, en una copia de este repositorio (no hace falta `npm install`):
+   ```
+   node restaurar.js reservas-ceq-AAAA-MM-completa.json.gz > restaurar.sql
+   ```
+   Dice cuántas filas hay por tabla. Si el archivo no es una copia del sistema, avisa y no arma nada.
+3. Crear el proyecto nuevo de Supabase. En **SQL Editor**: pegar y ejecutar `esquema-base-de-datos.sql` (crea las tablas vacías) y después `restaurar.sql`. Todo va en una sola transacción: si algo falla, no queda nada a medias. Los números de reserva se conservan, así los códigos y los enlaces para cancelar siguen sirviendo. Si `restaurar.sql` es muy grande para el SQL Editor, se puede ejecutar con `psql` y la cadena de conexión del proyecto.
+4. En Render, actualizar `SUPABASE_URL` y `SUPABASE_KEY` (clave service_role del proyecto nuevo) y esperar que el servidor quede en línea.
+5. La contraseña de los admins no viaja en la copia: vuelve a ser la de Render (`ADMIN_PASSWORD_HASH`). Si se había cambiado desde el panel, cambiarla de nuevo (Avanzado → Mantenimiento → Contraseña y sesiones).
+6. Lo que pasó entre la copia y la pérdida (hasta un mes) no está en la copia: revisar los avisos de "Nueva reserva" de ese período y cargar esas reservas a mano como reservas de prioridad.
+
+Para crear una base **vacía** (sin datos), alcanza con el paso 3 sin `restaurar.sql` y después habilitar los meses desde el panel.
 
 Si se cambia la estructura en Supabase, actualizar también ese archivo.
 
@@ -251,6 +271,8 @@ Si se cambia la estructura en Supabase, actualizar también ese archivo.
 
 ## 12. Pendientes conocidos
 
+De la auditoría del 23/10/2026 (AUD-01 a AUD-18) ya están resueltos los de las tandas 1 y 2. Quedan: quitar los permisos por defecto de Supabase que sobran y borrar lo que está en desuso (AUD-14, necesita una migración), las partes públicas que sobran (AUD-16) y las mejoras de mantenimiento del código (AUD-18).
+
 De la auditoría técnica del 24/07/2026 (la respuesta completa está en el Apéndice 1 del 6° informe de la Secretaría de Informática). Ninguno es un riesgo inmediato:
 
 - Separar el JavaScript de las páginas y activar la política de seguridad CSP (SEC-004, ARCH-001).
@@ -259,3 +281,26 @@ De la auditoría técnica del 24/07/2026 (la respuesta completa está en el Apé
 - Guardar celular y correo en columnas separadas (VAL-002).
 - Definir si se siguen mostrando los nombres en el calendario público (PRIV-001, decisión de la Comisión).
 - Paginación del panel cuando haya muchas reservas (PERF-001). Hoy el panel ya trae todas de a 1000; con varios miles convendría mostrarlas por páginas.
+
+## 13. Traspaso (cuando cambia quien administra el sistema)
+
+La Comisión cambia cada año: el sistema no puede depender de una sola persona ni de una sola cuenta. Las contraseñas **nunca** van en este repositorio; se guardan en el gestor de contraseñas o documento privado de la Secretaría de Informática.
+
+**Antes de que alguien deje el cargo** (y al menos una vez por año), revisar con quien lo reemplaza:
+
+| Servicio | Qué tiene que pasar | Qué se pierde si no |
+|---|---|---|
+| Cuenta de Google `ceq.informatica@gmail.com` | Pasar la contraseña y el segundo factor (celular o llaves de respaldo) a la persona nueva. Cambiar el celular de recuperación. | Es la cuenta de casi todo: Render, UptimeRobot, la planilla, las copias de seguridad y las alertas. |
+| Cuenta de Google `reservas@ceq-una.com` (solo para el avatar) | Pasar la contraseña; agregar un celular de recuperación. | Solo la foto que se ve en Gmail. |
+| GitHub, organización `ceqinformatica` | Que haya **al menos dos dueños** (Owner) con segundo factor activado. Activar **Push protection** (Settings → Code security) para que no se pueda subir una clave por error. | Sin dueño, nadie puede cambiar el código ni los permisos. |
+| Render | Agregar a la persona nueva al workspace "reservas ceq" (Settings → Members) con segundo factor. | No se puede publicar, ver los registros ni cambiar las claves. |
+| Supabase | Agregar a la persona nueva a la organización del proyecto `reservas-ceq` como Owner. | No se puede ver ni restaurar la base. |
+| Vercel | Agregar a la persona nueva al equipo del proyecto. | No se pueden ver los despliegues de las páginas (se publican solos desde GitHub). |
+| Brevo | Agregar a la persona nueva como usuario (o pasar la cuenta). La clave SMTP de Gmail **vence el 16/10/2027** (o a los 90 días sin usarse): renovarla antes. | No se ven los envíos ni el límite diario; si vence la clave SMTP, la Secretaría no puede responder como reservas@. |
+| Cloudflare `Oficialceq@gmail.com` | Pasar la contraseña o agregar a la persona nueva como miembro. | No se puede tocar el DNS ni el reenvío de `reservas@ceq-una.com`. |
+| Dominio `ceq-una.com` (Hosting PY) | Saber quién es el dueño y **renovarlo antes del 09/03/2027** (lo paga la Comisión). | Si vence, dejan de andar la página, la API y los correos. |
+| UptimeRobot | La cuenta es `ceq.informatica@gmail.com`: con la cuenta de Google alcanza. | No llegan los avisos de caída. |
+| Panel de administración | **Cambiar la contraseña de los admins** cada vez que cambian los moderadores (Avanzado → Mantenimiento → Contraseña y sesiones). Cambiar la del admin supremo si se va quien la conocía (sección 11). | Quien se fue sigue pudiendo entrar y ver los datos de todas las reservas. |
+| Moderadores | Los avisos internos llegan a los correos de "Quién recibe los avisos internos" (Avanzado → Correos automáticos). Sacar el correo de quien se va y pedirle que borre los avisos de su casilla. | Siguen llegando datos personales a alguien que ya no es moderador. |
+
+**Para la persona nueva:** leer este manual completo, entrar al panel como admin supremo y revisar **Estado del sistema** (Avanzado → Inicio). Si algo aparece en rojo o en naranja, la sección 8 dice qué hacer.
