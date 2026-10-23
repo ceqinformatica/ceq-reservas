@@ -514,8 +514,10 @@ function detallesReservaHtml(r, { conMotivo = false, codigo = null, etiquetasEnN
   return `<p><strong>${titulo}</strong></p>\n<ul>\n  ${filas.join('\n  ')}\n</ul>`;
 }
 
-// Datos de la reserva para los avisos internos (con el contacto de la persona y el código)
-function detallesInternosHtml(r, { codigo = null, motivoCancelacion = null } = {}) {
+// Datos de la reserva para los avisos internos (con el contacto de la persona). Sin el código de
+// cancelación (AUD-04): los moderadores cancelan desde el panel, y el código solo lo tiene la persona
+// (Términos 7.4: "se almacena cifrado").
+function detallesInternosHtml(r, { motivoCancelacion = null } = {}) {
   const inicio = String(r.hora_inicio).substring(0, 5);
   const fin = String(r.hora_fin).substring(0, 5);
   const acompanantes = Array.isArray(r.acompanantes) ? r.acompanantes : [];
@@ -526,7 +528,6 @@ function detallesInternosHtml(r, { codigo = null, motivoCancelacion = null } = {
     `<li><strong>Motivo:</strong> ${escapeHtml(r.motivo) || 'Sin especificar'}</li>`
   ];
   if (acompanantes.length) filas.push(`<li><strong>Acompañantes:</strong> ${escapeHtml(acompanantesTexto(acompanantes))}</li>`);
-  if (codigo) filas.push(`<li><strong>Código:</strong> ${codigo}</li>`);
   if (motivoCancelacion) filas.push(`<li><strong>Motivo de la cancelación:</strong> ${escapeHtml(motivoCancelacion)}</li>`);
   return `<p><strong>Usuario:</strong> ${escapeHtml(r.nombre_solicitante)}</p>\n<p><strong>Contacto:</strong> ${escapeHtml(r.contacto)}</p>\n<hr>\n<ul>\n  ${filas.join('\n  ')}\n</ul>`;
 }
@@ -576,7 +577,7 @@ function correoDeReserva(clave, r, extra = {}) {
         `<p>Si tienes preguntas, contacta con: ${getContactoLineaHtml(r.espacio_id)}</p>`];
       break;
     case 'aviso_nueva':
-      cuerpo = [p.titulo, p.mensaje, detallesInternosHtml(r, { codigo: extra.codigo })];
+      cuerpo = [p.titulo, p.mensaje, detallesInternosHtml(r)];
       break;
     case 'aviso_cancelacion':
     case 'aviso_plazo_vencido':
@@ -941,9 +942,10 @@ async function encolarCorreo({ to, subject, html, text, responderA }) {
   const destinatarios = (Array.isArray(to) ? to : [to]).filter(Boolean);
   if (destinatarios.length === 0) return false;
   try {
+    const ahora = new Date().toISOString();
     const { data, error } = await supabase.from('correos_pendientes').insert([{
       destinatarios, asunto: subject, html: html || '', texto: text || null,
-      responder_a: responderA || null, estado: 'pendiente', proximo_intento: new Date().toISOString()
+      responder_a: responderA || null, estado: 'pendiente', proximo_intento: ahora, creado_en: ahora
     }]).select('id');
     if (error || !data || data.length === 0) throw error || new Error('la cola no devolvió la fila');
     procesarColaCorreos().catch(err => console.error('⚠️ Cola de correos:', err));
@@ -1003,6 +1005,43 @@ async function limpiarColaCorreos() {
   const { error } = await supabase.from('correos_pendientes').delete()
     .in('estado', ['enviado', 'fallido']).lt('creado_en', new Date(Date.now() - 7 * 86400000).toISOString());
   if (error && error.code !== '42P01' && error.code !== 'PGRST205') throw error;
+}
+
+// ========== TOPES DIARIOS DE CORREOS (AUD-01, AUD-17) ==========
+// Brevo gratis manda 300 correos por día EN TOTAL, y lo importante son las confirmaciones con el
+// código. Los correos que no son de una reserva (inscripción y avisos de la lista de espera, avisos
+// de reportes y pruebas del panel) se frenan cuando en el día ya hay LIMITE_CORREOS_OPCIONALES en
+// la cola, así siempre queda lugar para las reservas. Todo se cuenta en la base y no en memoria:
+// antes los topes volvían a cero con cada reinicio o deploy del servidor.
+const LIMITE_CORREOS_OPCIONALES = 250;
+
+// Instante (ISO, en UTC) en que empezó el día de hoy en Paraguay
+function inicioDelDiaEnAsuncion() {
+  const medianocheUtc = hoyEnAsuncion(); // 00:00 UTC de la fecha de hoy en Paraguay
+  const p = Object.fromEntries(new Intl.DateTimeFormat('en-CA', {
+    timeZone: 'America/Asuncion', year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', hourCycle: 'h23'
+  }).formatToParts(medianocheUtc).map(x => [x.type, x.value]));
+  // Qué hora marca el reloj de Paraguay en ese instante: la diferencia es el huso (hoy, 3 horas)
+  const relojParaguay = Date.UTC(Number(p.year), Number(p.month) - 1, Number(p.day), Number(p.hour), Number(p.minute));
+  return new Date(2 * medianocheUtc.getTime() - relojParaguay).toISOString();
+}
+
+// Cuántas filas de `tabla` tienen la fecha `columna` desde que empezó el día (hasta `tope`)
+async function contarDeHoy(tabla, columna, filtrar = q => q, tope = 1000) {
+  const { data, error } = await filtrar(supabase.from(tabla).select('id').gte(columna, inicioDelDiaEnAsuncion())).limit(tope);
+  if (error) throw error;
+  return (data || []).length;
+}
+
+// Cuántos correos más que no son de una reserva se pueden mandar hoy. Si no se puede contar (la
+// base no responde), no se frena nada: el correo igual pasa por la cola.
+async function correosOpcionalesRestantesHoy() {
+  try {
+    return Math.max(LIMITE_CORREOS_OPCIONALES - await contarDeHoy('correos_pendientes', 'creado_en'), 0);
+  } catch (err) {
+    console.error('⚠️ No se pudieron contar los correos de hoy:', err && (err.message || err.code));
+    return LIMITE_CORREOS_OPCIONALES;
+  }
 }
 
 // Configuración de seguridad
@@ -1503,17 +1542,44 @@ async function hashClaveAdmin() {
   return data && /^\$2[aby]\$/.test(String(data.valor)) ? data.valor : ADMIN_PASSWORD_HASH;
 }
 
+// AUD-02: además del límite por IP (loginLimiter), un tope para TODOS los intentos fallidos juntos,
+// por si alguien prueba contraseñas desde muchas IP. Se cuentan en el registro de actividad, así no
+// se pierden con un reinicio. Pasado el tope, nadie puede entrar hasta que esos intentos tengan más
+// de una hora; al llegar al aviso, y al cerrarse el inicio de sesión, sale una alerta por correo.
+const MAX_LOGIN_FALLIDOS_POR_HORA = 30;
+const AVISO_LOGIN_FALLIDOS_POR_HORA = 10;
+const ACCION_LOGIN_FALLIDO = 'Intento de inicio de sesión fallido';
+
+async function loginFallidosUltimaHora() {
+  const { data, error } = await supabase.from('registro_actividad').select('id').eq('accion', ACCION_LOGIN_FALLIDO)
+    .gte('creado_en', new Date(Date.now() - 60 * 60 * 1000).toISOString()).limit(MAX_LOGIN_FALLIDOS_POR_HORA);
+  if (error) throw error;
+  return (data || []).length;
+}
+
 // LOGIN - Endpoint seguro
 app.post('/api/login', loginLimiter, async (req, res) => {
   try {
     const { password } = req.body;
-    
+
     if (!password) {
       return res.status(400).json({ error: 'Contraseña requerida' });
     }
-    
+
     if (typeof password !== 'string' || password.length > 200) {
       return res.status(400).json({ error: 'Contraseña inválida' });
+    }
+
+    // Si no se pueden contar los intentos (la base no responde), se sigue con el límite por IP
+    let fallidos = 0;
+    try {
+      fallidos = await loginFallidosUltimaHora();
+    } catch (err) {
+      console.error('⚠️ No se pudieron contar los intentos de inicio de sesión:', err && (err.message || err.code));
+    }
+    if (fallidos >= MAX_LOGIN_FALLIDOS_POR_HORA) {
+      console.warn(`⚠️ Inicio de sesión cerrado: ${fallidos} intentos fallidos en la última hora`);
+      return res.status(429).json({ error: 'Por seguridad, el inicio de sesión está cerrado por un rato: hubo muchos intentos con una contraseña equivocada. Probá de nuevo en una hora.' });
     }
 
     // Validar contraseña: primero la del admin supremo (si está configurada), después la normal
@@ -1522,7 +1588,14 @@ app.post('/api/login', loginLimiter, async (req, res) => {
 
     if (!passwordValida) {
       console.warn(`⚠️ Intento de login fallido a las ${new Date().toISOString()}`);
-      registrarActividad('-', 'Intento de inicio de sesión fallido');
+      // Se espera a que quede guardado: es lo que cuenta para el tope
+      await registrarActividad('-', ACCION_LOGIN_FALLIDO);
+      const total = fallidos + 1;
+      if (total === AVISO_LOGIN_FALLIDOS_POR_HORA) {
+        anotarAlerta('error', `Hubo ${total} intentos de inicio de sesión fallidos en la última hora en el panel. Si no fueron ustedes, conviene cambiar las contraseñas.`);
+      } else if (total === MAX_LOGIN_FALLIDOS_POR_HORA) {
+        anotarAlerta('error', `Se cerró el inicio de sesión del panel por una hora: ${total} intentos fallidos en la última hora.`);
+      }
       return res.status(401).json({ error: 'Contraseña incorrecta' });
     }
 
@@ -1638,12 +1711,24 @@ app.get('/api/reservas', lecturaPublicaLimiter, async (req, res) => {
     // día 1 (y no desde hoy) para que el mes en curso se siga viendo completo.
     // Se lee de a páginas (CEQ-08): ya no hay un tope que deje turnos ocupados afuera.
     const primerDiaMes = primerDiaMesActual();
+    // AUD-13: con un valor inválido la base rechazaba el filtro y se respondía 500 (con alerta)
+    const espacioIdNum = espacio_id === undefined || espacio_id === '' ? null : enteroPositivo(espacio_id);
+    if (espacioIdNum === null && espacio_id !== undefined && espacio_id !== '') {
+      return res.status(400).json({ error: 'Espacio inválido' });
+    }
+    if (fecha !== undefined && fecha !== '' && !esFechaValida(fecha)) {
+      return res.status(400).json({ error: 'Fecha inválida' });
+    }
+    // AUD-03: los días de meses anteriores no se muestran (nombre y motivo de quién usó cada
+    // espacio): la página nunca los pide, y Privacidad 7.1 justifica mostrarlos solo para
+    // corroborar la propia reserva
+    if (fecha && fecha < primerDiaMes) return res.json([]);
     const armar = () => {
       let query = supabase
         .from('reservas')
         .select('espacio_id, fecha, hora_inicio, hora_fin, nombre_solicitante, motivo')
         .eq('estado', 'activa');
-      if (espacio_id) query = query.eq('espacio_id', parseInt(espacio_id));
+      if (espacioIdNum) query = query.eq('espacio_id', espacioIdNum);
       query = fecha ? query.eq('fecha', fecha) : query.gte('fecha', primerDiaMes);
       return query.order('fecha', { ascending: true }).order('id', { ascending: true });
     };
@@ -2020,7 +2105,7 @@ app.post('/api/reservas', crearReservaLimiter, async (req, res) => {
 
     // Aviso a los moderadores del espacio (plantilla "Aviso interno: nueva reserva")
     const avisoNueva = correoDeReserva('aviso_nueva',
-      { id: reservaId, espacio_id: espacioIdNum, nombre_solicitante, contacto, fecha, hora_inicio, hora_fin, motivo, acompanantes }, { codigo });
+      { id: reservaId, espacio_id: espacioIdNum, nombre_solicitante, contacto, fecha, hora_inicio, hora_fin, motivo, acompanantes });
     correos.push(encolarCorreo({
       to: getEmailModerador(espacioIdNum),
       subject: avisoNueva.asunto,
@@ -2033,10 +2118,12 @@ app.post('/api/reservas', crearReservaLimiter, async (req, res) => {
     // justo en ese instante, la reserva quedaba guardada pero la persona nunca recibía su código.
     // El envío a Brevo sigue en segundo plano. encolarCorreo() nunca lanza error.
     await Promise.all(correos);
+    // Sin el código ni el contacto (AUD-04): el código solo va en el correo de la persona, y la
+    // página no necesita más que el número y el horario
+    const { id, espacio_id: espacioGuardado, fecha: fechaGuardada, hora_inicio: inicioGuardado, hora_fin: finGuardado } = nuevaReserva[0];
     res.status(201).json({
       mensaje: 'Reserva creada exitosamente',
-      reserva: nuevaReserva[0],
-      codigo
+      reserva: { id, espacio_id: espacioGuardado, fecha: fechaGuardada, hora_inicio: inicioGuardado, hora_fin: finGuardado }
     });
   } catch (error) {
     manejarError(res, error);
@@ -2278,21 +2365,70 @@ app.post('/api/cancelar-por-enlace', cancelarLimiter, async (req, res) => {
 // es de quien reserve primero). Cada inscripción se avisa una sola vez; para otro aviso hay que
 // volver a anotarse.
 const MAX_AVISOS_LISTA_ESPERA_POR_DIA = 60; // dentro de los 300 correos diarios de Brevo
+const MAX_INSCRIPCIONES_LISTA_ESPERA_POR_DIA = 60; // cada una manda una confirmación
 const DIAS_VIGENCIA_LISTA_ESPERA = 60; // las inscripciones sin avisar más viejas se borran solas
-let avisosListaEsperaHoy = { dia: '', cantidad: 0 };
 
-function avisosListaEsperaRestantesHoy() {
-  const dia = hoyEnAsuncion().toISOString().slice(0, 10);
-  if (avisosListaEsperaHoy.dia !== dia) return MAX_AVISOS_LISTA_ESPERA_POR_DIA;
-  return MAX_AVISOS_LISTA_ESPERA_POR_DIA - avisosListaEsperaHoy.cantidad;
+// Cuántos avisos de "se liberó un lugar" se pueden mandar todavía hoy. Se cuentan las
+// inscripciones marcadas como avisadas hoy (si un aviso no sale, se desmarca y no cuenta).
+async function avisosListaEsperaRestantesHoy() {
+  const [avisadosHoy, opcionales] = await Promise.all([contarDeHoy('lista_espera', 'avisado_en'), correosOpcionalesRestantesHoy()]);
+  return Math.min(MAX_AVISOS_LISTA_ESPERA_POR_DIA - avisadosHoy, opcionales);
 }
 
-function puedeAvisarListaEspera() {
-  const dia = hoyEnAsuncion().toISOString().slice(0, 10);
-  if (avisosListaEsperaHoy.dia !== dia) avisosListaEsperaHoy = { dia, cantidad: 0 };
-  if (avisosListaEsperaHoy.cantidad >= MAX_AVISOS_LISTA_ESPERA_POR_DIA) return false;
-  avisosListaEsperaHoy.cantidad++;
-  return true;
+// Meses habilitados ('2026-11') en los que ya no queda ningún lugar en el espacio: la misma cuenta
+// que hace la página para mostrar la lista de espera (mesesSinLugar en index.html). Si en algún
+// mes habilitado todavía queda lugar, devuelve [] (no corresponde anotarse: hay que reservar).
+async function mesesSinLugar(espacioId) {
+  const { data: meses, error } = await supabase.from('meses_habilitados').select('anio, mes, habilitado, abrir_en');
+  if (error) throw error;
+  const hoy = hoyEnAsuncion().toISOString().slice(0, 10);
+  const ahora = new Date();
+  const abiertos = (meses || []).filter(m => mesEstaAbierto(m, ahora))
+    .map(m => `${m.anio}-${String(m.mes).padStart(2, '0')}`).filter(clave => clave >= hoy.slice(0, 7)).sort();
+  if (abiertos.length === 0) return [];
+  const desde = `${abiertos[0]}-01`;
+  const [reservas, bloqueos] = await Promise.all([
+    leerTodasLasFilas(() => supabase.from('reservas').select('fecha, hora_inicio, hora_fin')
+      .eq('estado', 'activa').eq('espacio_id', espacioId).gte('fecha', desde).order('id', { ascending: true }), 20000),
+    leerTodasLasFilas(() => supabase.from('bloqueos').select('fecha, hora_inicio, hora_fin')
+      .eq('espacio_id', espacioId).gte('fecha', desde).order('id', { ascending: true }), 20000)
+  ]);
+  const minutos = hhmm => { const [h, m] = String(hhmm).substring(0, 5).split(':').map(Number); return h * 60 + m; };
+  const ocupadoPorDia = new Map();
+  for (const o of [...reservas, ...bloqueos]) {
+    if (!ocupadoPorDia.has(o.fecha)) ocupadoPorDia.set(o.fecha, []);
+    ocupadoPorDia.get(o.fecha).push([minutos(o.hora_inicio), minutos(o.hora_fin)]);
+  }
+  // Los turnos del Frente, o los bloques de 1 hora del Altillo
+  const franjas = Number(espacioId) === 3
+    ? config.turnos_frente.map(t => [minutos(t.inicio), minutos(t.fin)])
+    : Array.from({ length: config.altillo_hora_hasta - config.altillo_hora_desde }, (_, i) => [(config.altillo_hora_desde + i) * 60, (config.altillo_hora_desde + i + 1) * 60]);
+  const regla = reglaEspacio(espacioId);
+  const ahoraMinutos = horaActualEnAsuncionEnMinutos();
+  const llenos = [];
+  for (const clave of abiertos) {
+    const [anio, mes] = clave.split('-').map(Number);
+    const ultimo = new Date(Date.UTC(anio, mes, 0)).getUTCDate();
+    let diasHabiles = 0;
+    let hayLugar = false;
+    for (let d = 1; d <= ultimo && !hayLugar; d++) {
+      const fecha = `${clave}-${String(d).padStart(2, '0')}`;
+      if (fecha < hoy) continue;
+      const faltan = diferenciaEnDiasCalendario(fecha);
+      if (!regla.dias.includes(new Date(fecha + 'T12:00:00Z').getUTCDay()) || faltan < regla.anticipacion_min_dias ||
+          (regla.anticipacion_max_dias > 0 && faltan > regla.anticipacion_max_dias)) continue;
+      diasHabiles++;
+      const ocupado = ocupadoPorDia.get(fecha) || [];
+      hayLugar = franjas.some(([inicio, fin]) => {
+        // Hoy: el turno del Frente que ya empezó, o el bloque del Altillo que ya terminó, no cuentan
+        if (faltan === 0 && (Number(espacioId) === 3 ? inicio <= ahoraMinutos : inicio + 60 <= ahoraMinutos)) return false;
+        return !ocupado.some(([oInicio, oFin]) => oInicio < fin && inicio < oFin);
+      });
+    }
+    if (hayLugar) return [];
+    if (diasHabiles > 0) llenos.push(clave);
+  }
+  return llenos;
 }
 
 // true si ese horario ya empezó (o el día ya pasó), en hora de Paraguay
@@ -2341,9 +2477,9 @@ app.post('/api/lista-espera', listaEsperaLimiter, async (req, res) => {
       return res.status(400).json({ error: 'Elegí un mes válido' });
     }
     const { data: mesData, error: errorMes } = await supabase.from('meses_habilitados')
-      .select('habilitado').eq('anio', Number(partesMes[1])).eq('mes', Number(partesMes[2])).maybeSingle();
+      .select('habilitado, abrir_en').eq('anio', Number(partesMes[1])).eq('mes', Number(partesMes[2])).maybeSingle();
     if (errorMes) throw errorMes;
-    if (!mesData || !mesData.habilitado) {
+    if (!mesEstaAbierto(mesData)) {
       return res.status(400).json({ error: 'Ese mes todavía no está habilitado para reservar' });
     }
 
@@ -2354,7 +2490,30 @@ app.post('/api/lista-espera', listaEsperaLimiter, async (req, res) => {
       return res.status(400).json({ error: 'Ese espacio no se puede reservar por el momento' });
     }
 
-    // Si ya estaba anotado para ese mes (por ejemplo, lo avisaron antes y se volvió a llenar), se reactiva
+    // AUD-01: solo se anota si en ese mes ya no queda ningún lugar (lo mismo que mira la página para
+    // mostrar la lista de espera). Antes se aceptaba siempre, y cada pedido mandaba un correo.
+    if (!(await mesesSinLugar(espacioIdNum)).includes(mesTexto)) {
+      return res.status(409).json({ error: `Todavía quedan lugares en ${nombreDelMes(mesTexto)}: podés reservar directamente desde el calendario.` });
+    }
+
+    // Ya anotado y todavía sin avisar: no se guarda de nuevo ni se manda otra confirmación (si no,
+    // alguien podía llenarle la casilla de correos a cualquier dirección)
+    const { data: previa, error: errorPrevia } = await supabase.from('lista_espera').select('id, avisado_en')
+      .eq('espacio_id', espacioIdNum).eq('email', correo).eq('mes', mesTexto).maybeSingle();
+    if (errorPrevia) throw errorPrevia;
+    if (previa && !previa.avisado_en) {
+      return res.json({ mensaje: `Ya estabas anotado: si se libera un lugar en ${nombreDelMes(mesTexto)}, te avisamos por correo.` });
+    }
+
+    // Tope del día para las inscripciones (cada una manda una confirmación) y lugar para correos
+    // que no son de una reserva
+    const [inscripcionesHoy, opcionales] = await Promise.all([contarDeHoy('lista_espera', 'creado_en'), correosOpcionalesRestantesHoy()]);
+    if (inscripcionesHoy >= MAX_INSCRIPCIONES_LISTA_ESPERA_POR_DIA || opcionales <= 0) {
+      console.warn('⚠️ Se alcanzó el tope diario de inscripciones en la lista de espera');
+      return res.status(503).json({ error: 'Por hoy no podemos anotar a más personas en la lista de espera. Probá de nuevo mañana.' });
+    }
+
+    // Si ya estaba anotado para ese mes y ya lo avisaron (por ejemplo, se volvió a llenar), se reactiva
     const { error: errorGuardar } = await supabase
       .from('lista_espera')
       .upsert({ espacio_id: espacioIdNum, email: correo, nombre: nombreLimpio, mes: mesTexto, creado_en: new Date().toISOString(), avisado_en: null },
@@ -2426,7 +2585,7 @@ async function avisarListaEspera(reserva) {
     // Solo se toman tantas inscripciones como avisos queden hoy (CEQ-06): antes se marcaban
     // todas como avisadas y, pasado el tope diario, el resto quedaba marcado sin recibir nada.
     // Las que no entran siguen esperando el próximo turno que se libere.
-    const disponibles = avisosListaEsperaRestantesHoy();
+    const disponibles = await avisosListaEsperaRestantesHoy();
     if (disponibles <= 0) {
       console.warn('⚠️ Se alcanzó el tope diario de avisos de lista de espera');
       return;
@@ -2457,13 +2616,10 @@ async function avisarListaEspera(reserva) {
     const espacio = getEspacioNombre(reserva.espacio_id);
     const horario = descripcionHorario(reserva.espacio_id, inicio, fin);
     const enlace = `https://reservas.ceq-una.com/?fecha=${reserva.fecha}&espacio=${Number(reserva.espacio_id)}`;
+    // Ya no hace falta contar acá: se tomaron como máximo las que quedaban para hoy, y las marcadas
+    // como avisadas son las que cuentan para el tope
     for (let i = 0; i < tomadas.length; i++) {
       const correo = tomadas[i].email;
-      if (!puedeAvisarListaEspera()) {
-        console.warn('⚠️ Se alcanzó el tope diario de avisos de lista de espera');
-        await devolver(tomadas.slice(i).map(x => x.id));
-        break;
-      }
       // SOLO TEXTO, como un correo escrito por una persona: sin HTML, botones, negritas ni emoji.
       // Con HTML, Brevo agrega la imagen de seguimiento de aperturas y Gmail lo mandaba a
       // "Promociones". El asunto es corto y natural, con el día y el turno (cada aviso es distinto
@@ -2485,10 +2641,7 @@ async function avisarListaEspera(reserva) {
         responderA: correoRespuesta(reserva.espacio_id),
         text: aviso.texto
       });
-      if (!enviado) {
-        avisosListaEsperaHoy.cantidad = Math.max(avisosListaEsperaHoy.cantidad - 1, 0);
-        await devolver([tomadas[i].id]);
-      }
+      if (!enviado) await devolver([tomadas[i].id]);
     }
   } catch (err) {
     console.error('⚠️ No se pudo avisar a la lista de espera:', err);
@@ -2502,14 +2655,17 @@ async function avisarListaEspera(reserva) {
 // sin email de confirmación a las reservas. Pasado el tope, los reportes se siguen
 // guardando igual y se ven en el panel; solo deja de llegar el aviso hasta el día siguiente.
 const MAX_AVISOS_REPORTE_POR_DIA = 20;
-let avisosReporteHoy = { dia: '', cantidad: 0 };
 
-function puedeAvisarReporte() {
-  const dia = hoyEnAsuncion().toISOString().slice(0, 10);
-  if (avisosReporteHoy.dia !== dia) avisosReporteHoy = { dia, cantidad: 0 };
-  if (avisosReporteHoy.cantidad >= MAX_AVISOS_REPORTE_POR_DIA) return false;
-  avisosReporteHoy.cantidad++;
-  return true;
+// Se cuentan los reportes guardados hoy (el recién guardado incluido), así el tope no vuelve a
+// cero si el servidor se reinicia (AUD-17). Si no se pueden contar, se avisa igual.
+async function puedeAvisarReporte() {
+  try {
+    const [reportesHoy, opcionales] = await Promise.all([contarDeHoy('reportes_errores', 'created_at'), correosOpcionalesRestantesHoy()]);
+    return reportesHoy <= MAX_AVISOS_REPORTE_POR_DIA && opcionales > 0;
+  } catch (err) {
+    console.error('⚠️ No se pudieron contar los reportes de hoy:', err && (err.message || err.code));
+    return true;
+  }
 }
 
 // Reportar error (público)
@@ -2538,7 +2694,7 @@ app.post('/api/reportes', reportesLimiter, async (req, res) => {
     res.status(201).json({ mensaje: 'Reporte enviado correctamente' });
 
     // El email sale después de responder, igual que en las reservas (enviarEmail nunca lanza error)
-    if (puedeAvisarReporte()) {
+    if (await puedeAvisarReporte()) {
       const reporteId = reporteCreado?.[0]?.id;
       encolarCorreo({
         to: EMAIL_MODERADOR,
@@ -2956,10 +3112,11 @@ app.post('/api/bloqueos/lote', verifyAdminToken, verificarCSRF, async (req, res)
     if (new Date(desde + 'T00:00:00Z') < hoyEnAsuncion()) return res.status(400).json({ error: 'No se puede bloquear una fecha que ya pasó' });
     const totalDias = (new Date(hasta + 'T00:00:00Z') - new Date(desde + 'T00:00:00Z')) / 86400000 + 1;
     if (totalDias > MAX_DIAS_LOTE_BLOQUEOS) return res.status(400).json({ error: 'El intervalo puede ser de hasta 6 meses' });
-    // Días de la semana: 1 = lunes … 5 = viernes (sábados y domingos no se reservan)
+    // Días de la semana: 0 = domingo, 1 = lunes … 6 = sábado (AUD-10: los sábados y domingos se
+    // pueden habilitar en las Reglas, así que también se tienen que poder bloquear)
     const diasSemana = Array.isArray(dias) ? [...new Set(dias.map(Number))] : [];
-    if (diasSemana.length === 0 || diasSemana.some(d => !Number.isInteger(d) || d < 1 || d > 5)) {
-      return res.status(400).json({ error: 'Elegí al menos un día de la semana (de lunes a viernes)' });
+    if (diasSemana.length === 0 || diasSemana.some(d => !Number.isInteger(d) || d < 0 || d > 6)) {
+      return res.status(400).json({ error: 'Elegí al menos un día de la semana' });
     }
     let horario;
     try {
@@ -4043,8 +4200,16 @@ function reservaDeEjemplo(espacioId) {
   };
 }
 
-let pruebasDeCorreoHoy = { dia: '', cantidad: 0 };
 const MAX_PRUEBAS_DE_CORREO_POR_DIA = 30;
+const PREFIJO_PRUEBA_CORREO = '[PRUEBA] ';
+
+// Las pruebas de hoy se cuentan en la cola de correos (el asunto queda aunque el correo ya salió)
+async function pruebasDeCorreoHoy() {
+  const { data, error } = await supabase.from('correos_pendientes').select('asunto')
+    .gte('creado_en', inicioDelDiaEnAsuncion()).limit(1000);
+  if (error) throw error;
+  return (data || []).filter(c => String(c.asunto || '').startsWith(PREFIJO_PRUEBA_CORREO)).length;
+}
 
 // Un correo con datos de ejemplo, armado exactamente igual que los de verdad (correoDeReserva /
 // correoListaEspera), con lo escrito en el editor aunque no se haya guardado. Lo usan la vista
@@ -4072,7 +4237,7 @@ function correoDeEjemplo(b) {
     config.plantillas_correo = { ...guardadas, [clave]: borrador || guardadas[clave] || {} };
     if (def.tipo === 'html') {
       const c = correoDeReserva(clave, r, {
-        codigo: ['confirmacion', 'reenvio', 'aviso_nueva'].includes(clave) ? 'A1B2C3D4E5F60789' : null,
+        codigo: ['confirmacion', 'reenvio'].includes(clave) ? 'A1B2C3D4E5F60789' : null,
         motivo: 'Mantenimiento del espacio', cambios: 'día u horario', valores: { numero: '1234' }
       });
       // La reserva de ejemplo es la #0 (su enlace para cancelar no sirve para ninguna real); el
@@ -4112,11 +4277,9 @@ app.post('/api/superadmin/plantillas/prueba', verifyAdminToken, verifySuperAdmin
   try {
     const correo = correoDeEjemplo(req.body || {});
     if (correo.error) return res.status(400).json({ error: correo.error });
-    const dia = hoyEnAsuncion().toISOString().slice(0, 10);
-    if (pruebasDeCorreoHoy.dia !== dia) pruebasDeCorreoHoy = { dia, cantidad: 0 };
-    if (pruebasDeCorreoHoy.cantidad >= MAX_PRUEBAS_DE_CORREO_POR_DIA) return res.status(429).json({ error: `Hoy ya se mandaron ${MAX_PRUEBAS_DE_CORREO_POR_DIA} pruebas. Probá mañana.` });
-    pruebasDeCorreoHoy.cantidad++;
-    const enviado = await encolarCorreo({ to: config.email_alertas, subject: `[PRUEBA] ${correo.subject}`, html: correo.html, text: correo.text });
+    if (await pruebasDeCorreoHoy() >= MAX_PRUEBAS_DE_CORREO_POR_DIA) return res.status(429).json({ error: `Hoy ya se mandaron ${MAX_PRUEBAS_DE_CORREO_POR_DIA} pruebas. Probá mañana.` });
+    if (await correosOpcionalesRestantesHoy() <= 0) return res.status(429).json({ error: 'Hoy ya salieron muchos correos: las pruebas se frenan para dejar lugar a las confirmaciones de las reservas. Probá mañana.' });
+    const enviado = await encolarCorreo({ to: config.email_alertas, subject: `${PREFIJO_PRUEBA_CORREO}${correo.subject}`, html: correo.html, text: correo.text });
     res.json({ mensaje: enviado ? `Listo: te mandamos la prueba a ${config.email_alertas}` : 'No se pudo mandar la prueba ahora; quedó para reintentar' });
   } catch (error) {
     manejarError(res, error);
@@ -4589,7 +4752,10 @@ app.get('/api/superadmin/reservas/:id/historial', verifyAdminToken, verifySuperA
     const eventos = [];
     eventos.push({ cuando: aIsoUtc(reserva.created_at), que: reserva.reservado_por_admin ? 'Reserva de prioridad hecha desde el panel' : 'Reserva hecha desde la página' });
     if (reserva.recordatorio_enviado_en) eventos.push({ cuando: aIsoUtc(reserva.recordatorio_enviado_en), que: 'Se mandó el recordatorio' });
-    if (reserva.cancelada_en) eventos.push({ cuando: aIsoUtc(reserva.cancelada_en), que: `Cancelada por ${reserva.cancelada_por === 'admin' ? 'un moderador' : 'la persona'}${reserva.motivo_cancelacion ? ` (motivo: ${reserva.motivo_cancelacion})` : ''}` });
+    // AUD-08: el panel guarda 'moderador' o 'admin supremo' (antes se comparaba con 'admin', y toda
+    // cancelación del panel figuraba como hecha por la persona); 'admin' queda por las más viejas
+    const quienCancelo = { moderador: 'un moderador', admin: 'un moderador', 'admin supremo': 'el admin supremo' }[reserva.cancelada_por] || 'la persona';
+    if (reserva.cancelada_en) eventos.push({ cuando: aIsoUtc(reserva.cancelada_en), que: `Cancelada por ${quienCancelo}${reserva.motivo_cancelacion ? ` (motivo: ${reserva.motivo_cancelacion})` : ''}` });
 
     const { data: actividad, error: errorActividad } = await supabase.from('registro_actividad')
       .select('creado_en, rol, accion, detalle').order('id', { ascending: false }).limit(2000);
