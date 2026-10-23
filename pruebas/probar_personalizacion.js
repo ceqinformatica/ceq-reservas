@@ -177,7 +177,8 @@ const REGLAS_SIEMPRE = {
   const codigoPlazo = codigoDelCorreo(delCorreo('plazo@example.com')[0]);
   let consulta = await pedir('POST', '/api/cancelar-por-codigo/consultar', { codigo: codigoPlazo || 'X' });
   anotar('Frente a 2 días con plazo de 3: avisa que venció el plazo (plazo_dias 3)', consulta.status === 200 && consulta.datos.plazo_vencido === true && consulta.datos.plazo_dias === 3 &&
-    consulta.datos.correo_contacto === 'Monsegonza511@gmail.com', JSON.stringify(consulta.datos));
+    // Sin contacto guardado en la base, el de por defecto (reservas@ desde AUD-16)
+    consulta.datos.correo_contacto === 'reservas@ceq-una.com', JSON.stringify(consulta.datos));
   r = await pedir('POST', '/api/cancelar-por-codigo', { codigo: codigoPlazo || 'X' });
   anotar('...y no la cancela (403)', r.status === 403 && /^EL PERIODO DE CANCELACION/.test(r.datos.error), `${r.status} ${r.datos.error}`);
   consulta = await pedir('POST', '/api/cancelar-por-codigo/consultar', { codigo: codigoFrente || 'X' });

@@ -75,7 +75,7 @@ async function arrancar() {
   const hijo = spawn(process.execPath, ['--require', path.join(ayudantes, 'reloj_falso.js'), '--require', path.join(ayudantes, 'interceptar_brevo.js'), path.join(carpeta, 'server.js')], {
     cwd: carpeta,
     env: { ...process.env, PORT: '3979', SUPABASE_URL: 'http://127.0.0.1:54337', SUPABASE_KEY: 'x', BREVO_API_KEY: 'x', JWT_SECRET: SECRETO, ADMIN_PASSWORD_HASH: 'x',
-      EMAIL_MODERADOR: 'moderador@example.com', BREVO_LOG: brevoLog, RELOJ_FALSO: relojArchivo, INTERVALO_TAREAS_MS: '1000', INTERVALO_COLA_CORREOS_MS: '600000', NODE_ENV: 'development', NODE_OPTIONS: '' }
+      EMAIL_MODERADOR: 'moderador@example.com', BREVO_LOG: brevoLog, RELOJ_FALSO: relojArchivo, BREVO_RECHAZAR: path.join(os.tmpdir(), `ceq-rechazar-${marca}`), INTERVALO_TAREAS_MS: '1000', INTERVALO_COLA_CORREOS_MS: '600000', NODE_ENV: 'development', NODE_OPTIONS: '' }
   });
   let salida = ''; hijo.stdout.on('data', d => salida += d); hijo.stderr.on('data', d => salida += d);
   for (let i = 0; i < 600 && !salida.includes('Servidor corriendo'); i++) await esperar(100);
@@ -168,25 +168,80 @@ const intentar = async (base, sql) => { try { await base.query(sql); return 'ok'
   try { leerCopia(archivoMalo); } catch (e) { error = e.message; }
   anotar('Un archivo que no es una copia del sistema se rechaza con un mensaje claro', /no es una copia completa/.test(error), error);
 
-  // ===== La copia mensual trae también la copia completa comprimida =====
+  // Las copias viejas (.json.gz, de antes del 23/10) se siguen leyendo
+  const archivoGzViejo = path.join(os.tmpdir(), `ceq-copia-vieja-${marca}.json.gz`);
+  fs.writeFileSync(archivoGzViejo, zlib.gzipSync(Buffer.from(JSON.stringify(copia))));
+  anotar('restaurar.js también lee una copia vieja en .json.gz', leerCopia(archivoGzViejo).tablas.reservas.length === 4);
+  fs.unlinkSync(archivoGzViejo);
+
+  // ===== "Mandarme la copia ahora" (desde el panel) =====
+  const enviarDesdePanel = () => fetch('http://127.0.0.1:3979/api/superadmin/copia/enviar', { method: 'POST',
+    headers: { 'content-type': 'application/json', cookie: `admin_token=${token('superadmin')}; csrf_token=c`, 'x-csrf-token': 'c' } });
+  res = await fetch('http://127.0.0.1:3979/api/superadmin/copia/enviar', { method: 'POST', headers: { cookie: `admin_token=${token('admin')}; csrf_token=c`, 'x-csrf-token': 'c' } });
+  anotar('"Mandarme la copia ahora": el admin común no puede (403)', res.status === 403, String(res.status));
+  res = await enviarDesdePanel();
+  let datosPanel = await res.json();
+  await hasta(() => correos().some(c => /pedida desde el panel/.test(c.subject)));
+  const desdePanel = correos().find(c => /pedida desde el panel/.test(c.subject));
+  anotar('...el supremo la recibe en el momento, con el CSV y la copia completa (.zip)', res.status === 200 && datosPanel.completa === true && desdePanel &&
+    (desdePanel.attachment || []).map(a => a.name.replace(/\d{4}-\d{2}/, 'AAAA-MM')).join() === 'reservas-ceq-AAAA-MM.csv,reservas-ceq-AAAA-MM-completa.zip', `${res.status} ${datosPanel.mensaje || datosPanel.error}`);
+  // Si Brevo rechazara el .zip, sale igual el CSV solo (y se avisa)
+  const archivoRechazar = path.join(os.tmpdir(), `ceq-rechazar-${marca}`);
+  fs.writeFileSync(archivoRechazar, 'zip');
+  const antesSoloCsv = correos().length;
+  res = await enviarDesdePanel();
+  datosPanel = await res.json();
+  fs.unlinkSync(archivoRechazar);
+  await hasta(() => correos().length > antesSoloCsv);
+  const soloCsv = correos().slice(antesSoloCsv).find(c => /pedida desde el panel/.test(c.subject));
+  anotar('...si Brevo rechaza la copia completa, sale igual el CSV y el panel lo dice', res.status === 200 && datosPanel.completa === false && /Salió solo el CSV/.test(datosPanel.mensaje) &&
+    soloCsv && (soloCsv.attachment || []).length === 1 && soloCsv.htmlContent.includes('La copia completa no se pudo adjuntar'), `${res.status} ${datosPanel.mensaje || datosPanel.error}`);
+
+  // ===== La copia mensual trae también la copia completa comprimida (.zip) =====
   ponerHora('2026-12-01T11:30:00Z'); // 1/12, 08:30 en Paraguay
-  await hasta(() => correos().some(c => /Copia de seguridad de las reservas: diciembre 2026/.test(c.subject)), 10000);
-  const mensual = correos().find(c => /Copia de seguridad de las reservas: diciembre 2026/.test(c.subject));
+  await hasta(() => correos().some(c => /Copia de seguridad de las reservas: diciembre 2026/.test(c.subject) && !/panel/.test(c.subject)), 10000);
+  const mensual = correos().find(c => /Copia de seguridad de las reservas: diciembre 2026/.test(c.subject) && !/panel/.test(c.subject));
   const adjuntos = (mensual && mensual.attachment) || [];
-  const gz = adjuntos.find(a => a.name === 'reservas-ceq-2026-12-completa.json.gz');
-  anotar('La copia mensual trae el CSV y la copia completa (.json.gz)', adjuntos.some(a => a.name === 'reservas-ceq-2026-12.csv') && !!gz, adjuntos.map(a => a.name).join(', '));
-  if (gz) {
-    const archivoGz = path.join(os.tmpdir(), `ceq-copia-${marca}.json.gz`);
-    fs.writeFileSync(archivoGz, Buffer.from(gz.content, 'base64'));
+  const zip = adjuntos.find(a => a.name === 'reservas-ceq-2026-12-completa.zip');
+  anotar('La copia mensual trae el CSV y la copia completa (.zip, que Brevo sí acepta)', adjuntos.some(a => a.name === 'reservas-ceq-2026-12.csv') && !!zip && adjuntos.length === 2, adjuntos.map(a => a.name).join(', '));
+  if (zip) {
+    const archivoZip = path.join(os.tmpdir(), `ceq-copia-${marca}.zip`);
+    fs.writeFileSync(archivoZip, Buffer.from(zip.content, 'base64'));
+    // El .zip lo abre un programa común (unzip o tar), no solo restaurar.js
+    const { spawnSync } = require('child_process');
+    const abrir = [['unzip', ['-p', archivoZip]], ['tar', ['-xOf', archivoZip]]].map(([cmd, args]) => spawnSync(cmd, args, { maxBuffer: 50 * 1024 * 1024 }))
+      .find(r => r.status === 0 && r.stdout && r.stdout.length);
+    anotar('El .zip lo abre un programa común (unzip o tar) y adentro está la copia en JSON', !!abrir && JSON.parse(abrir.stdout.toString('utf8')).formato === 'copia-ceq-reservas', abrir ? 'ok' : 'ni unzip ni tar lo abrieron');
     let base3;
-    try { base3 = await cargarEnBaseNueva(armarSql(leerCopia(archivoGz)).sql); } catch (e) { anotar('La copia del correo (.json.gz) se restaura', false, e.message); }
+    try { base3 = await cargarEnBaseNueva(armarSql(leerCopia(archivoZip)).sql); } catch (e) { anotar('La copia del correo (.zip) se restaura', false, e.message); }
     if (base3) {
       const n = (await base3.query('select count(*)::int n from public.reservas')).rows[0].n;
-      anotar('La copia del correo (.json.gz) se restaura con todas las reservas', n === 4, String(n));
+      anotar('La copia del correo (.zip) se restaura con todas las reservas', n === 4, String(n));
     }
-    fs.unlinkSync(archivoGz);
+    fs.unlinkSync(archivoZip);
   }
   anotar('El correo explica los dos archivos y la limpieza (guarda las 2 copias más nuevas)', mensual && mensual.htmlContent.includes('restaurar.js') && mensual.htmlContent.includes('2 copias más nuevas'), '');
+  anotar('La copia del mes queda anotada como enviada, sin errores', db.configuracion.find(f => f.clave === 'copia_mensual_enviada').valor === '2026-12' &&
+    !((db.configuracion.find(f => f.clave === 'copia_mensual_error') || {}).valor), JSON.stringify(db.configuracion.filter(f => /copia/.test(f.clave))));
+
+  // ===== Si la copia del mes no sale: alerta, "Estado del sistema" en rojo y reintento por hora =====
+  fs.writeFileSync(archivoRechazar, 'zip csv');
+  ponerHora('2027-01-01T11:30:00Z'); // 1/1, 08:30 en Paraguay
+  const errorCopia = () => { try { return JSON.parse((db.configuracion.find(f => f.clave === 'copia_mensual_error') || {}).valor || 'null'); } catch (e) { return null; } };
+  await hasta(() => errorCopia() && errorCopia().mes === '2027-01', 10000);
+  const estado = await fetch('http://127.0.0.1:3979/api/superadmin/estado', { headers: { cookie: `admin_token=${jwt.sign({ adminId: 'admin', rol: 'superadmin', v: 3, iat: Math.floor((Date.now() + desfase) / 1000), exp: Math.floor((Date.now() + desfase) / 1000) + 3600 }, SECRETO, { algorithm: 'HS256' })}` } }).then(r => r.json());
+  anotar('Si Brevo rechaza la copia: queda anotado el problema y "Estado del sistema" lo muestra', /^No salió/.test((errorCopia() || {}).problema || '') &&
+    estado.copia_mensual_error && /^No salió/.test(estado.copia_mensual_error.problema) && db.configuracion.find(f => f.clave === 'copia_mensual_enviada').valor === '2026-12', JSON.stringify(estado.copia_mensual_error));
+  await hasta(() => correos().some(c => c.to[0].email === 'alertas@example.com' && /Copia de seguridad de 2027-01/.test(c.htmlContent)), 10000);
+  anotar('...y llega una alerta al correo de alertas', correos().some(c => c.to[0].email === 'alertas@example.com' && /Copia de seguridad de 2027-01: No salió/.test(c.htmlContent)), '');
+  const intentosAntes = correos().length;
+  await esperar(3000);
+  anotar('...no reintenta cada 5 minutos (espera una hora)', db.configuracion.find(f => f.clave === 'copia_mensual_enviada').valor === '2026-12' && !correos().slice(intentosAntes).some(c => /enero 2027/.test(c.subject)), '');
+  fs.unlinkSync(archivoRechazar);
+  ponerHora('2027-01-01T12:35:00Z'); // una hora después
+  await hasta(() => correos().some(c => /Copia de seguridad de las reservas: enero 2027/.test(c.subject)), 10000);
+  anotar('...pasada la hora vuelve a intentar, sale y se borra el aviso', correos().some(c => /Copia de seguridad de las reservas: enero 2027/.test(c.subject)) &&
+    db.configuracion.find(f => f.clave === 'copia_mensual_enviada').valor === '2027-01' && !errorCopia(), JSON.stringify(db.configuracion.filter(f => /copia/.test(f.clave))));
 
   hijo.kill(); mini.servidor.close();
   [brevoLog, relojArchivo, archivoJson, archivoMalo].forEach(f => { try { fs.unlinkSync(f); } catch (e) { /* ya no está */ } });

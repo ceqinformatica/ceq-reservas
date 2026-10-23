@@ -302,6 +302,52 @@ const quitar = (tabla, filas) => { const fuera = new Set(filas); db[tabla] = db[
   r = await pedir('POST', '/api/login', { password: CLAVE_ADMIN });
   anotar('...pasada la hora se vuelve a entrar', r.status === 200, `${r.status} ${r.datos.error || ''}`);
 
+  // ===== N2: las IPv6 se cuentan por red /64 =====
+  const loginDesde = (ip, password) => fetch(API + '/api/login', { method: 'POST', headers: { 'content-type': 'application/json', 'cf-connecting-ip': ip }, body: JSON.stringify({ password }) });
+  const estadosV6 = [];
+  for (let i = 1; i <= 6; i++) estadosV6.push((await loginDesde(`2001:db8:abcd:2::${i.toString(16)}`, 'mal' + i)).status);
+  anotar('N2: 6 intentos desde 6 direcciones IPv6 de la misma red /64: el 6.º da 429 (antes, ninguno)', estadosV6.slice(0, 5).every(s => s === 401) && estadosV6[5] === 429, estadosV6.join(','));
+  const otraRed = (await loginDesde('2001:db8:abcd:3::1', 'mal')).status;
+  const mapeada = [];
+  for (let i = 0; i < 6; i++) mapeada.push((await loginDesde(i % 2 ? '::ffff:203.0.113.9' : '203.0.113.9', 'mal' + i)).status);
+  anotar('...otra red /64 tiene su propio contador, y una IPv4 escrita como IPv6 cuenta igual que la IPv4', otraRed === 401 && mapeada[5] === 429, `${otraRed} ${mapeada.join(',')}`);
+
+  // ===== N3: con el inicio de sesión cerrado, entran las redes conocidas, y el supremo lo reabre =====
+  ponerHora('2026-11-16T16:00:00Z');
+  await esperar(500);
+  r = await (await loginDesde('198.51.100.77', CLAVE_ADMIN)).status;
+  const recientes2 = Array.from({ length: 30 }, (_, i) => ({ id: 9980 + i, rol: '-', accion: 'Intento de inicio de sesión fallido', detalle: '', creado_en: new Date(ahoraFalso() - 300000).toISOString() }));
+  db.registro_actividad.push(...recientes2);
+  const nueva = (await loginDesde('198.51.100.88', CLAVE_ADMIN)).status;
+  const conocida = (await loginDesde('198.51.100.77', CLAVE_ADMIN)).status;
+  anotar('N3: con el inicio de sesión cerrado, una red nueva no entra (429) pero una desde la que ya se entró bien, sí', r === 200 && nueva === 429 && conocida === 200, `${r} ${nueva} ${conocida}`);
+  const estadoLogin = await pedir('GET', '/api/superadmin/estado', null, 'superadmin');
+  anotar('..."Estado del sistema" muestra los intentos fallidos y el tope', estadoLogin.datos.login_fallidos_hora === 30 && estadoLogin.datos.login_fallidos_tope === 30, JSON.stringify([estadoLogin.datos.login_fallidos_hora, estadoLogin.datos.login_fallidos_tope]));
+  r = await pedir('POST', '/api/superadmin/login/reabrir', {}, 'admin');
+  const reabrir = await pedir('POST', '/api/superadmin/login/reabrir', {}, 'superadmin');
+  await esperar(300);
+  const trasReabrir = (await loginDesde('198.51.100.88', CLAVE_ADMIN)).status;
+  anotar('...el admin común no puede reabrirlo (403); el supremo sí, y la red nueva vuelve a entrar', r.status === 403 && reabrir.status === 200 && trasReabrir === 200, `${r.status} ${reabrir.status} ${trasReabrir}`);
+  const redes = (db.configuracion.find(f => f.clave === 'login_redes_conocidas') || {}).valor || '';
+  anotar('...las redes conocidas se guardan cifradas (no la dirección)', redes.length > 0 && !redes.includes('198.51.100') && !redes.includes('2001:db8'), redes.slice(0, 80));
+
+  // ===== N4: tope de reservas por persona por día (contando las canceladas) =====
+  const reservarAltillo = (hora, email, celular) => pedir('POST', '/api/reservas', {
+    espacio_id: 1, nombre_solicitante: 'Persona Repetida', contacto: `${celular} | ${email}`, fecha: '2026-11-30', hora_inicio: `${String(hora).padStart(2, '0')}:00`, hora_fin: `${String(hora + 1).padStart(2, '0')}:00`, motivo: 'Estudiar'
+  });
+  const estadosDia = [];
+  for (let h = 8; h < 13; h++) estadosDia.push((await reservarAltillo(h, 'repetida@example.com', '0991 000 811')).status);
+  const sexta = await reservarAltillo(14, 'repetida@example.com', '0991 999 999');
+  const mismoCelular = await reservarAltillo(15, 'otro-correo@example.com', '0991 000 811');
+  anotar('N4: la misma persona puede hacer 5 reservas en el día; la 6.ª (por correo o por celular) da 429', estadosDia.every(s => s === 201) && sexta.status === 429 && /Por hoy ya hiciste 5 reservas/.test(sexta.datos.error) && mismoCelular.status === 429,
+    `${estadosDia.join(',')} ${sexta.status} ${mismoCelular.status}`);
+  const otraPersona = await reservarAltillo(16, 'distinta@example.com', '0992 123 456');
+  anotar('...otra persona sí puede reservar', otraPersona.status === 201, String(otraPersona.status));
+
+  // ===== N5 y AUD-16: contacto por defecto sin el Gmail personal =====
+  const servidorJs = require('fs').readFileSync(path.join(carpeta, 'server.js'), 'utf8');
+  anotar('AUD-16: el contacto del Frente por defecto ya no es un Gmail personal', !/Monsegonza/i.test(servidorJs), '');
+
   hijo.kill(); mini.servidor.close();
   fs.unlinkSync(brevoLog); fs.unlinkSync(relojArchivo);
   let ok = 0;

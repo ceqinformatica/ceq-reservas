@@ -108,7 +108,11 @@ const valorConfig = clave => (db.configuracion.find(c => c.clave === clave) || {
   anotar('Si el envío falla, no sale ninguna copia (y se reintenta después)', !copias().some(c => c.subject.includes('enero 2027')) && (['2026-12', '2027-01'].includes(valorConfig('copia_mensual_enviada')) || /^2027-01\|enviando\|/.test(valorConfig('copia_mensual_enviada'))), valorConfig('copia_mensual_enviada'));
   db.configuracion.find(c => c.clave === 'email_alertas').valor = 'alertas@example.com';
   await esperar(2500);
-  anotar('Cuando el correo vuelve a andar, se manda', copias().some(c => c.subject.includes('enero 2027')) && valorConfig('copia_mensual_enviada') === '2027-01', valorConfig('copia_mensual_enviada'));
+  // Después de un envío que falló, se reintenta una vez por hora (antes, cada 5 minutos todo el mes)
+  anotar('Después de un fallo no reintenta enseguida (espera una hora)', !copias().some(c => c.subject.includes('enero 2027')), valorConfig('copia_mensual_enviada'));
+  ponerHora('2027-01-01T12:15:00Z');
+  await esperar(2500);
+  anotar('Cuando el correo vuelve a andar, pasada la hora, se manda', copias().some(c => c.subject.includes('enero 2027')) && valorConfig('copia_mensual_enviada') === '2027-01', valorConfig('copia_mensual_enviada'));
   // CEQ-06: el servidor se reinició mientras mandaba la copia de febrero (quedó "enviando")
   const fila = db.configuracion.find(c => c.clave === 'copia_mensual_enviada');
   fila.valor = '2027-02|enviando|2027-02-01T11:00:00.000Z';
