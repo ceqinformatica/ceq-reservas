@@ -25,7 +25,9 @@ const ahoraFalso = () => Date.now() + JSON.parse(fs.readFileSync(relojArchivo, '
 const correos = () => fs.readFileSync(brevoLog, 'utf8').split('\n').filter(Boolean).map(l => JSON.parse(l));
 const correosA = email => correos().filter(c => c.to.some(t => t.email === email));
 const sha = t => crypto.createHash('sha256').update(t).digest('hex');
-const tokenEsperado = id => crypto.createHmac('sha256', crypto.createHmac('sha256', SECRETO).update('enlaces-de-cancelacion-v1').digest()).update(`cancelar:${id}`).digest('base64url').slice(0, 32);
+// La firma del enlace lleva el número y el código cifrado de la reserva (AUD-09)
+const tokenEsperado = id => crypto.createHmac('sha256', crypto.createHmac('sha256', SECRETO).update('enlaces-de-cancelacion-v2').digest())
+  .update(`cancelar:${id}:${db.reservas.find(x => x.id === id).codigo_cancelacion_hash}`).digest('base64url').slice(0, 32);
 
 // ---------- Datos: "hoy" es el lunes 16/11/2026 ----------
 let id = 100;

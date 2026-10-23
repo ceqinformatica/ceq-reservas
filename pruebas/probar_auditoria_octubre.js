@@ -224,6 +224,49 @@ const quitar = (tabla, filas) => { const fuera = new Set(filas); db[tabla] = db[
   const h505 = await historial(600);
   anotar('...la que canceló la persona, "Cancelada por la persona"', /Cancelada por la persona/.test(h505), h505);
 
+  // ===== AUD-09: cambiar el contacto de una reserva anula el código y el enlace viejos =====
+  const codigoDe = c => ((c && c.htmlContent.match(/Código de cancelación:<\/strong> ([0-9A-F]{16})/)) || [])[1];
+  const enlaceDe = c => { const m = c && c.htmlContent.match(/cancelar\.html\?r=(\d+)&(?:amp;)?t=([\w-]{32})/); return m ? { r: m[1], t: m[2] } : null; };
+  const antesEditar = correos().length;
+  r = await reservar('2026-11-24', '07:00', '10:00', 'equivocado@example.com');
+  const idEditar = r.datos.reserva && r.datos.reserva.id;
+  await hasta(() => correos().slice(antesEditar).some(c => c.to[0].email === 'equivocado@example.com'));
+  const confVieja = correos().slice(antesEditar).find(c => c.to[0].email === 'equivocado@example.com');
+  const codigoViejo = codigoDe(confVieja), enlaceViejo = enlaceDe(confVieja);
+  let consulta = await pedir('GET', `/api/cancelar-por-enlace?r=${enlaceViejo && enlaceViejo.r}&t=${enlaceViejo && enlaceViejo.t}`);
+  anotar('AUD-09: el enlace del correo de confirmación sirve', r.status === 201 && !!codigoViejo && consulta.status === 200 && consulta.datos.se_puede_cancelar === true, `${r.status} ${consulta.status}`);
+  r = await pedir('PUT', `/api/superadmin/reservas/${idEditar}`, { email: 'correcto@example.com', avisar: false }, 'superadmin');
+  await hasta(() => correos().some(c => c.to[0].email === 'correcto@example.com'));
+  const avisoNuevo = correos().find(c => c.to[0].email === 'correcto@example.com');
+  const codigoNuevo = codigoDe(avisoNuevo), enlaceNuevo = enlaceDe(avisoNuevo);
+  anotar('...al corregir el correo se manda un código nuevo al correo nuevo (aunque se pida no avisar)', r.status === 200 && !!codigoNuevo && codigoNuevo !== codigoViejo && !!enlaceNuevo,
+    `${r.status} ${r.datos.error || r.datos.mensaje} ${avisoNuevo && avisoNuevo.subject}`);
+  consulta = await pedir('POST', '/api/cancelar-por-codigo/consultar', { codigo: codigoViejo });
+  const consultaEnlace = await pedir('GET', `/api/cancelar-por-enlace?r=${enlaceViejo.r}&t=${enlaceViejo.t}`);
+  anotar('...el código viejo ya no encuentra la reserva y el enlace viejo no sirve (404)', consulta.status === 404 && consultaEnlace.status === 404, `${consulta.status} ${consultaEnlace.status}`);
+  consulta = await pedir('GET', `/api/cancelar-por-enlace?r=${enlaceNuevo.r}&t=${enlaceNuevo.t}`);
+  const consultaCodigo = await pedir('POST', '/api/cancelar-por-codigo/consultar', { codigo: codigoNuevo });
+  anotar('...el código y el enlace nuevos sí', consulta.status === 200 && consultaCodigo.status === 200 && consultaCodigo.datos.se_puede_cancelar === true, `${consulta.status} ${consultaCodigo.status}`);
+  r = await pedir('PUT', `/api/superadmin/reservas/${idEditar}`, { nombre_solicitante: 'Nombre Corregido' }, 'superadmin');
+  consulta = await pedir('POST', '/api/cancelar-por-codigo/consultar', { codigo: codigoNuevo });
+  anotar('...cambiar solo el nombre no cambia el código', r.status === 200 && consulta.status === 200, `${r.status} ${consulta.status}`);
+  // Enlaces del formato viejo (solo el número): sirven para las reservas de antes del cambio
+  const crypto = require('crypto');
+  const firmaVieja = id => crypto.createHmac('sha256', crypto.createHmac('sha256', SECRETO).update('enlaces-de-cancelacion-v1').digest()).update(`cancelar:${id}`).digest('base64url').slice(0, 32);
+  db.reservas.push(reserva({ id: 610, fecha: '2026-11-27', created_at: '2026-10-20T12:00:00' }));
+  consulta = await pedir('GET', `/api/cancelar-por-enlace?r=610&t=${firmaVieja(610)}`);
+  const conFirmaVieja = await pedir('GET', `/api/cancelar-por-enlace?r=${idEditar}&t=${firmaVieja(idEditar)}`);
+  anotar('...un enlace viejo de una reserva de antes del cambio sigue sirviendo; para una reserva nueva, no', consulta.status === 200 && conFirmaVieja.status === 404, `${consulta.status} ${conFirmaVieja.status}`);
+
+  // ===== AUD-12: comodín de los acompañantes por espacio para los textos legales =====
+  r = await pedir('GET', '/api/superadmin/legal', null, 'superadmin');
+  const comodin = (r.datos.comodines || []).find(c => c.clave === 'acompanantes_por_espacio');
+  anotar('AUD-12: el comodín {acompanantes_por_espacio} dice en qué espacios y cuántos (por defecto, solo el Altillo, hasta 4)',
+    r.status === 200 && comodin && comodin.valor === 'solo en el Altillo, hasta cuatro (4) por Reserva', JSON.stringify(comodin));
+  const priv = r.datos.documentos && r.datos.documentos.privacidad;
+  r = await pedir('POST', '/api/superadmin/legal/vista-previa', { doc: 'privacidad', intro: 'Acompañantes: {acompanantes_por_espacio}.', articulos: priv.articulos, plantillas: priv.plantillas }, 'superadmin');
+  anotar('...y se puede usar en el texto (la vista previa lo completa)', r.status === 200 && JSON.stringify(r.datos).includes('solo en el Altillo, hasta cuatro (4) por Reserva'), `${r.status} ${r.datos.error || ''}`);
+
   // ===== AUD-02: tope total de intentos fallidos =====
   // 9 fallidos de hace un rato: el 10.º (desde otra IP) dispara la alerta
   const viejos = Array.from({ length: 30 }, (_, i) => ({ id: 9900 + i, rol: '-', accion: 'Intento de inicio de sesión fallido', detalle: '', creado_en: new Date(ahoraFalso() - 2 * 3600000).toISOString() }));

@@ -35,7 +35,9 @@ const PRUEBAS = [
   ['Editor de los Términos y la Política de privacidad: comodines, seguridad, versiones e historial', 'probar_legal.js', [raiz, aqui]],
   ['Plazos de conservación de la Política de Privacidad', 'probar_retencion.js', [raiz, aqui]],
   ['Auditoría del 23/10: topes de correos, lista de espera, inicio de sesión, lecturas públicas, código e historial', 'probar_auditoria_octubre.js', [raiz, aqui]],
-  ['Estructura y reglas de la base de datos', 'probar_esquema.js', [raiz, path.join(raiz, 'esquema-base-de-datos.sql')], '@electric-sql/pglite']
+  ['Limpieza de Gmail (copias de seguridad y avisos viejos)', 'probar_limpieza_gmail.js', [path.join(raiz, 'limpiar-copias-de-seguridad.gs')]],
+  ['Estructura y reglas de la base de datos', 'probar_esquema.js', [raiz, path.join(raiz, 'esquema-base-de-datos.sql')], '@electric-sql/pglite'],
+  ['Copia completa y restauración en una base nueva (restaurar.js)', 'probar_restaurar.js', [raiz, aqui], '@electric-sql/pglite']
 ];
 const LIMITE_MS = 6 * 60 * 1000;
 const EN_GITHUB = process.env.GITHUB_ACTIONS === 'true';
