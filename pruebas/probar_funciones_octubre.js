@@ -220,6 +220,17 @@ const actividad = () => db.registro_actividad.map(a => `${a.rol}|${a.accion}|${a
 
   // ===== Lista de espera (por espacio y mes, con nombre) =====
   const anotarse = (email, espacio_id = 3, ip, extra = {}) => llamar('POST', '/api/lista-espera', { cuerpo: { espacio_id, email, nombre: 'Ana María Espera', mes: '2026-11', ...extra }, ip });
+  // AUD-01: mientras quede algún lugar en noviembre no se puede anotar (ni sale ningún correo)
+  const antesConLugar = correos().length;
+  x = await anotarse('con-lugar@example.com');
+  await esperar(300);
+  anotar('Con lugares libres en el mes no se anota nadie (409) y no sale ningún correo',
+    x.status === 409 && /quedan lugares/.test(x.datos.error) && db.lista_espera.length === 0 && correos().length === antesConLugar, `${x.status} ${x.datos.error}`);
+  // Para el resto de la lista de espera, noviembre queda lleno: se bloquea lo que falta del mes en
+  // los dos espacios (se quita al terminar esta parte)
+  const bloqueosLleno = [];
+  for (let d = 16; d <= 30; d++) for (const espacio of [1, 3]) bloqueosLleno.push({ id: 7000 + d * 10 + espacio, espacio_id: espacio, fecha: `2026-11-${d}`, hora_inicio: '00:00:00', hora_fin: '23:59:00', motivo: 'Mes lleno (prueba)', lote: null });
+  db.bloqueos.push(...bloqueosLleno);
   x = await anotarse('Espera1@Example.com');
   const e2 = await anotarse('espera2@example.com', 3, undefined, { nombre: '  Beto   Ruiz  ' });
   const e3 = await anotarse('espera3@example.com', 1);
@@ -232,7 +243,11 @@ const actividad = () => db.registro_actividad.map(a => `${a.rol}|${a.accion}|${a
     confLE.length === 1 && confLE[0].subject === 'Tu inscripción en la lista de espera del Frente (noviembre de 2026)' && !/salir de la lista|darte de baja|desuscrib/i.test(confLE[0].textContent) &&
     confLE[0].textContent.startsWith('Hola, Ana:') && confLE[0].htmlContent === undefined, confLE[0] && confLE[0].subject);
   x = await anotarse('espera1@example.com');
-  anotar('Anotarse dos veces al mismo espacio y mes no duplica', x.status === 201 && db.lista_espera.filter(f => f.email === 'espera1@example.com').length === 1, String(db.lista_espera.length));
+  await esperar(800);
+  const confirmacionesAna = correos().filter(c => c.to[0].email === 'espera1@example.com' && c.subject.startsWith('Tu inscripción en la lista de espera')).length;
+  anotar('Anotarse dos veces al mismo espacio y mes no duplica ni manda otra confirmación (AUD-01)',
+    x.status === 200 && /Ya estabas anotado/.test(x.datos.mensaje) && db.lista_espera.filter(f => f.email === 'espera1@example.com').length === 1 && confirmacionesAna === 1,
+    `${x.status} ${x.datos.mensaje} filas=${db.lista_espera.length} confirmaciones=${confirmacionesAna}`);
   const listaMalas = [await anotarse('no-es-correo'), await anotarse('t@example.com', 2), await anotarse('t@example.com', 9), await anotarse(''),
     await anotarse('t@example.com', 3, undefined, { nombre: '' }), await anotarse('t@example.com', 3, undefined, { nombre: 'A' }), await anotarse('t@example.com', 3, undefined, { nombre: ['x'] }),
     await anotarse('t@example.com', 3, undefined, { mes: '2026-12' }), await anotarse('t@example.com', 3, undefined, { mes: '2026-10' }),
@@ -278,6 +293,7 @@ const actividad = () => db.registro_actividad.map(a => `${a.rol}|${a.accion}|${a
   await esperar(2300);
   anotar('Si el turno liberado ya empezó (hoy 07:00, son las 10:00), no se avisa', !correos().slice(antes4).some(c => c.subject.startsWith('Se liberó un lugar')) && db.lista_espera.find(f => f.email === 'espera1@example.com').avisado_en === null);
   anotar('Limpieza: se borran las avisadas hace más de 7 días y las pendientes de más de 60', !db.lista_espera.some(f => f.id === 950 || f.id === 951) && db.lista_espera.some(f => f.id === 952) && db.lista_espera.some(f => f.email === 'espera1@example.com'), db.lista_espera.map(f => f.id).join(','));
+  for (const b of bloqueosLleno) db.bloqueos.splice(db.bloqueos.indexOf(b), 1);
 
   // ===== Apertura programada =====
   const en = seg => new Date(ahoraFalso() + seg * 1000).toISOString();

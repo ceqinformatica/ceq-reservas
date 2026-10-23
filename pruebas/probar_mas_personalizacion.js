@@ -155,9 +155,10 @@ const acomp = n => Array.from({ length: n }, (_, i) => ({ nombre: `Acompañante 
   const nueva = await reservar(3, '2026-11-20', '14:00', '18:00', 'otra-persona@example.com', { nombre_solicitante: 'Lía Gómez' });
   await hasta(() => correos().slice(antes3).some(c => c.subject.startsWith('Reserva nueva en el Frente')));
   const avisoEditado = correos().slice(antes3).find(c => c.subject.startsWith('Reserva nueva en el Frente'));
-  anotar('Aviso interno editado: asunto, título y mensaje nuevos, con " - CEQ #número" y los datos automáticos (contacto y código)', r.status === 200 && avisoEditado &&
+  // AUD-04: el aviso trae el contacto, pero no el código de cancelación (solo lo tiene la persona)
+  anotar('Aviso interno editado: asunto, título y mensaje nuevos, con " - CEQ #número", el contacto y sin el código de cancelación', r.status === 200 && avisoEditado &&
     avisoEditado.subject === `Reserva nueva en el Frente de Lía Gómez - CEQ #${nueva.datos.reserva.id}` && avisoEditado.htmlContent.includes('<h2>Entró una reserva</h2>') &&
-    avisoEditado.htmlContent.includes('otra-persona@example.com') && /Código:<\/strong> [0-9A-F]{16}/.test(avisoEditado.htmlContent), avisoEditado && avisoEditado.subject);
+    avisoEditado.htmlContent.includes('otra-persona@example.com') && !/Código/.test(avisoEditado.htmlContent) && !/[0-9A-F]{16}/.test(avisoEditado.htmlContent), avisoEditado && avisoEditado.subject);
   r = await pedir('POST', '/api/superadmin/plantillas/vista-previa', { clave: 'aviso_cancelacion_moderador', espacio_id: 3 }, 'superadmin');
   anotar('Vista previa de un aviso interno: el correo real con el contacto de ejemplo y el motivo', r.status === 200 && r.datos.html.includes('Contacto:</strong> 0981 123 456 | ana.perez@example.com') &&
     r.datos.html.includes('Motivo de la cancelación'), `${r.status} ${r.datos.error || ''}`);

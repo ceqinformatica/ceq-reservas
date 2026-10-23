@@ -30,6 +30,8 @@ const supa = http.createServer((req, res) => {
       reportesGuardados.push({ id, ...filas[0] });
       return enviar(201, [{ id }]);
     }
+    // El tope diario de avisos cuenta los reportes guardados hoy (todos los de la prueba son de hoy)
+    if (req.url.startsWith('/rest/v1/reportes_errores') && req.method === 'GET') return enviar(200, reportesGuardados.map(r => ({ id: r.id })));
     return enviar(200, []);
   });
 });

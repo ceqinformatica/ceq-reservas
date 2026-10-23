@@ -82,6 +82,11 @@ async function pedir(metodo, ruta, cuerpo, { admin = false } = {}) {
   await esperar(800);
 
   // ===== 1. Lista de espera: confirmación con enlace para salir =====
+  // Solo se puede anotar con el mes lleno (AUD-01): se bloquea lo que queda de noviembre en el
+  // Frente mientras dura esta parte
+  const bloqueosLleno = [];
+  for (let d = 16; d <= 30; d++) bloqueosLleno.push({ id: 7100 + d, espacio_id: 3, fecha: `2026-11-${d}`, hora_inicio: '00:00:00', hora_fin: '23:59:00', motivo: 'Mes lleno (prueba)', lote: null });
+  db.bloqueos.push(...bloqueosLleno);
   let r = await pedir('POST', '/api/lista-espera', { espacio_id: 3, email: 'Espera@Example.com', nombre: 'Elena Espera', mes: '2026-11' });
   await hasta(() => correos().some(c => c.subject.startsWith('Tu inscripción en la lista de espera')));
   const conf = correos().find(c => c.subject === 'Tu inscripción en la lista de espera del Frente (noviembre de 2026)');
@@ -101,6 +106,7 @@ async function pedir(metodo, ruta, cuerpo, { admin = false } = {}) {
   anotar('Con el enlace del correo sale de la lista', r.status === 200 && db.lista_espera.length === 0 && /saliste de la lista de espera del Frente/.test(r.datos.mensaje), `${r.status} ${r.datos.mensaje}`);
   r = await pedir('POST', '/api/lista-espera/baja', { s: q.get('s'), e: q.get('e'), t: q.get('t') });
   anotar('Usar el enlace otra vez responde lo mismo (sin error)', r.status === 200, String(r.status));
+  for (const b of bloqueosLleno) db.bloqueos.splice(db.bloqueos.indexOf(b), 1);
 
   // ===== 2. Bloqueos de varios días =====
   const lote = { espacio_id: 1, desde: '2026-11-16', hasta: '2026-11-27', dias: [2, 4], hora_inicio: '14:00', hora_fin: '16:00', motivo: 'Clases' };
@@ -121,7 +127,7 @@ async function pedir(metodo, ruta, cuerpo, { admin = false } = {}) {
 
   const malos = [
     [{ ...lote, dias: [] }, 'sin días'],
-    [{ ...lote, dias: [6] }, 'sábado'],
+    [{ ...lote, dias: [7] }, 'día 7'],
     [{ ...lote, desde: '2026-11-27', hasta: '2026-11-16' }, 'al revés'],
     [{ ...lote, hasta: '2027-06-30' }, 'más de 6 meses'],
     [{ ...lote, hora_inicio: '18:00', hora_fin: '20:00' }, 'Altillo hasta las 20'],
@@ -136,7 +142,10 @@ async function pedir(metodo, ruta, cuerpo, { admin = false } = {}) {
   ];
   const estados = [];
   for (const [cuerpo] of malos) estados.push((await pedir('POST', '/api/bloqueos/lote', cuerpo, { admin: true })).status);
-  anotar('Datos inválidos (sin días, sábado, al revés, más de 6 meses, fuera de horario, pasado, 08:99, 25:00, segundos…): 400', estados.every(s => s === 400), malos.map(([, n], i) => `${n}=${estados[i]}`).join(', '));
+  anotar('Datos inválidos (sin días, día 7, al revés, más de 6 meses, fuera de horario, pasado, 08:99, 25:00, segundos…): 400', estados.every(s => s === 400), malos.map(([, n], i) => `${n}=${estados[i]}`).join(', '));
+  // AUD-10: los sábados y domingos se pueden habilitar en las Reglas, así que también se bloquean en lote
+  r = await pedir('POST', '/api/bloqueos/lote', { ...lote, dias: [6, 0] }, { admin: true });
+  anotar('Sábados y domingos en un lote: vista previa con el 21 y el 22/11', r.status === 200 && JSON.stringify(r.datos.fechas) === '["2026-11-21","2026-11-22"]', `${r.status} ${JSON.stringify(r.datos.fechas || r.datos.error)}`);
   anotar('...y con una hora inválida no se crea nada', db.bloqueos.length === 3, String(db.bloqueos.length));
   r = await pedir('POST', '/api/bloqueos/lote', { ...lote, desde: '2026-12-01', hasta: '2026-12-03', hora_inicio: '14:00:00', hora_fin: '16:00:00' }, { admin: true });
   anotar('Con segundos en 00 sí se acepta (vista previa)', r.status === 200, `${r.status} ${r.datos.error}`);

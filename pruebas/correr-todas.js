@@ -34,6 +34,7 @@ const PRUEBAS = [
   ['Más personalización: acompañantes por espacio, avisos internos, respuestas listas y mensajes de error', 'probar_mas_personalizacion.js', [raiz, aqui]],
   ['Editor de los Términos y la Política de privacidad: comodines, seguridad, versiones e historial', 'probar_legal.js', [raiz, aqui]],
   ['Plazos de conservación de la Política de Privacidad', 'probar_retencion.js', [raiz, aqui]],
+  ['Auditoría del 23/10: topes de correos, lista de espera, inicio de sesión, lecturas públicas, código e historial', 'probar_auditoria_octubre.js', [raiz, aqui]],
   ['Estructura y reglas de la base de datos', 'probar_esquema.js', [raiz, path.join(raiz, 'esquema-base-de-datos.sql')], '@electric-sql/pglite']
 ];
 const LIMITE_MS = 6 * 60 * 1000;

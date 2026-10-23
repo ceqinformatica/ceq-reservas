@@ -147,9 +147,14 @@ const REGLAS_SIEMPRE = {
   anotar('Frente un sábado: no (400)', r.status === 400 && /fuera del rango/.test(r.datos.error), `${r.status} ${r.datos.error}`);
   r = await reservar(3, '2026-11-19', '07:00', '10:00', 'frente@example.com', { nombre: 'Eva <i>López</i>' });
   anotar('Frente a 3 días: sí (201)', r.status === 201, `${r.status} ${r.datos.error}`);
-  const codigoFrente = r.datos.codigo;
+  // AUD-04: la respuesta ya no trae el código ni el contacto; el código solo va en el correo
+  anotar('La respuesta de la reserva no trae el código ni el contacto (AUD-04)', r.datos.codigo === undefined && r.datos.reserva && r.datos.reserva.id > 0 &&
+    r.datos.reserva.contacto === undefined && r.datos.reserva.codigo_cancelacion_hash === undefined, JSON.stringify(r.datos));
+  // El código se toma del correo de confirmación, como lo hace la persona
+  const codigoDelCorreo = correo => ((correo && correo.htmlContent.match(/Código de cancelación:<\/strong> ([0-9A-F]{16})/)) || [])[1];
   await hasta(() => delCorreo('frente@example.com').length > 0);
   let conf1 = delCorreo('frente@example.com')[0];
+  const codigoFrente = codigoDelCorreo(conf1);
   anotar('La confirmación dice el plazo nuevo (hasta el 16/11, 3 días antes), con el código y sin HTML del nombre',
     conf1 && conf1.htmlContent.includes('hasta el <strong>16/11/2026</strong> (3 días antes)') && /Código de cancelación:<\/strong> [0-9A-F]{16}/.test(conf1.htmlContent) &&
     !conf1.htmlContent.includes('<i>López') && conf1.htmlContent.includes('Hola Eva &lt;i&gt;López&lt;/i&gt;,'), conf1 && conf1.htmlContent.slice(0, 400));
@@ -168,7 +173,8 @@ const REGLAS_SIEMPRE = {
 
   // ===== Plazo para cancelar nuevo =====
   r = await reservar(3, '2026-11-18', '10:00', '13:00', 'plazo@example.com');
-  const codigoPlazo = r.datos.codigo;
+  await hasta(() => delCorreo('plazo@example.com').length > 0);
+  const codigoPlazo = codigoDelCorreo(delCorreo('plazo@example.com')[0]);
   let consulta = await pedir('POST', '/api/cancelar-por-codigo/consultar', { codigo: codigoPlazo || 'X' });
   anotar('Frente a 2 días con plazo de 3: avisa que venció el plazo (plazo_dias 3)', consulta.status === 200 && consulta.datos.plazo_vencido === true && consulta.datos.plazo_dias === 3 &&
     consulta.datos.correo_contacto === 'Monsegonza511@gmail.com', JSON.stringify(consulta.datos));
@@ -241,7 +247,12 @@ const REGLAS_SIEMPRE = {
 
   // ===== Lista de espera con la plantilla cambiada =====
   r = await pedir('POST', '/api/superadmin/plantillas', { clave: 'lista_espera_inscripcion', asunto: 'Anotado/a en el {espacio}', texto: '{saludo}\n\nYa estás en la lista para {mes}.\n\nPara salir: {enlace_quitar}' }, 'superadmin');
+  // Solo se puede anotar con el mes lleno (AUD-01): se bloquea lo que queda de noviembre en el Frente
+  const bloqueosLleno = [];
+  for (let d = 16; d <= 30; d++) bloqueosLleno.push({ id: 7200 + d, espacio_id: 3, fecha: `2026-11-${d}`, hora_inicio: '00:00:00', hora_fin: '23:59:00', motivo: 'Mes lleno (prueba)', lote: null });
+  db.bloqueos.push(...bloqueosLleno);
   const anotarse = await pedir('POST', '/api/lista-espera', { espacio_id: 3, email: 'espera@example.com', nombre: 'Lola Gómez', mes: '2026-11' });
+  for (const b of bloqueosLleno) db.bloqueos.splice(db.bloqueos.indexOf(b), 1);
   await hasta(() => delCorreo('espera@example.com').length > 0);
   const insc = delCorreo('espera@example.com')[0];
   anotar('La inscripción a la lista de espera sale con el texto nuevo y el enlace para salir', r.status === 200 && anotarse.status === 201 && insc && insc.subject === 'Anotado/a en el Frente' &&
