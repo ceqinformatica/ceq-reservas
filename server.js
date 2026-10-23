@@ -1072,11 +1072,10 @@ app.use(helmet({
 
 // CORS configurado correctamente
 app.use(cors({
-  origin: [
-    'https://reservas.ceq-una.com',
-    'http://localhost:3000',
-    'http://localhost:5173'
-  ],
+  // AUD-16: las direcciones locales (para probar en una computadora) solo fuera de producción
+  origin: process.env.NODE_ENV === 'production'
+    ? ['https://reservas.ceq-una.com']
+    : ['https://reservas.ceq-una.com', 'http://localhost:3000', 'http://localhost:5173'],
   credentials: true,
   methods: ['GET', 'POST', 'DELETE', 'PUT'],
   allowedHeaders: ['Content-Type', 'Authorization', 'X-CSRF-Token'],
@@ -1690,8 +1689,9 @@ function borrarCookiesSesion(res) {
   res.clearCookie('csrf_token', { httpOnly: false, secure: true, sameSite: 'lax', domain: '.ceq-una.com', path: '/' });
 }
 
-// Cerrar sesión: limpia las cookies del token y del CSRF (AUTH-002)
-app.post('/api/logout', (req, res) => {
+// Cerrar sesión: limpia las cookies del token y del CSRF (AUTH-002). Pide el CSRF como las demás
+// acciones del panel (AUD-16): si no, cualquier otro sitio podía cerrarle la sesión a un admin.
+app.post('/api/logout', verificarCSRF, (req, res) => {
   borrarCookiesSesion(res);
   res.json({ mensaje: 'Sesión cerrada' });
 });
@@ -1706,7 +1706,7 @@ app.get('/api/admin/verificar-sesion', verifyAdminToken, (req, res) => {
 // GET espacios (público): la página usa `publico` y `aviso` para saber qué espacios se
 // pueden reservar y qué aviso mostrar de los que no (se manejan desde el admin supremo).
 // `mostrar_aviso` en false: el espacio se deshabilita sin ventana al entrar.
-app.get('/api/espacios', async (req, res) => {
+app.get('/api/espacios', lecturaPublicaLimiter, async (req, res) => {
   try {
     const { data, error } = await supabase
       .from('espacios')
@@ -5073,31 +5073,8 @@ app.get('/api/sincronizacion/reservas', sincronizacionLimiter, async (req, res) 
   }
 });
 
-// GET estadísticas
-app.get('/api/estadisticas', lecturaPublicaLimiter, async (req, res) => {
-  try {
-    const { count: activas, error: errorActivas } = await supabase
-      .from('reservas')
-      .select('id', { count: 'exact', head: true })
-      .eq('estado', 'activa');
-
-    if (errorActivas) throw errorActivas;
-
-    const { count: canceladas, error: errorCanceladas } = await supabase
-      .from('reservas')
-      .select('id', { count: 'exact', head: true })
-      .eq('estado', 'cancelada');
-
-    if (errorCanceladas) throw errorCanceladas;
-    
-    res.json({
-      reservas_activas: activas || 0,
-      reservas_canceladas: canceladas || 0
-    });
-  } catch (error) {
-    manejarError(res, error);
-  }
-});
+// GET /api/estadisticas se quitó (AUD-16): era pública y ninguna página la usaba. Las estadísticas
+// del panel (Avanzado → Informes) se calculan con las reservas que ya trae el panel.
 
 // ========== TAREAS PERIÓDICAS (cada 5 minutos) ==========
 // Render no tiene tareas programadas en el plan gratuito, pero el servidor nunca se duerme

@@ -4,6 +4,8 @@
 -- Exportado del proyecto de producción el 11/10/2026 (DB-001 de la auditoría técnica),
 -- actualizado con las migraciones del mismo día (migracion-admin-supremo.sql,
 -- migracion-funciones-octubre.sql y migracion-acompanantes-y-lista-espera.sql).
+-- Incluye también migracion-permisos.sql (23/10/2026, AUD-14): sin la tabla cancelaciones ni la
+-- columna reservas.codigo_cancelacion, con el control del estado y sin permisos para anon/authenticated.
 -- Contiene SOLO la estructura (tablas, reglas, triggers y seguridad) y los 3 espacios.
 -- No contiene reservas ni datos personales.
 --
@@ -40,8 +42,8 @@ create table public.espacios (
 -- contacto: "celular | email" (el servidor valida el formato).
 -- estado: 'activa' o 'cancelada'. Las canceladas no ocupan el turno.
 -- horario: columna calculada sola a partir de fecha + horas; la usa la regla anti-superposición.
--- codigo_cancelacion: en desuso (los códigos se guardan solo cifrados en codigo_cancelacion_hash,
---   SEC-005). Se mantiene vacía; no volver a usarla.
+-- codigo_cancelacion_hash: el código de cancelación, cifrado (SEC-005); el código en sí no se guarda.
+--   (La columna vieja codigo_cancelacion, que estaba vacía, se borró con migracion-permisos.sql.)
 -- reservado_por_admin: true en las reservas de prioridad creadas desde el panel.
 -- cancelada_en / cancelada_por / motivo_cancelacion: cuándo, quién ('usuario', 'moderador' o
 --   'admin supremo') y por qué se canceló. Vacías en las canceladas antes del 11/10/2026.
@@ -59,7 +61,6 @@ create table public.reservas (
   hora_fin                time not null,
   estado                  text default 'activa',
   motivo                  text default '',
-  codigo_cancelacion      text unique,
   created_at              timestamp default now(),
   updated_at              timestamp default now(),
   horario                 tsrange generated always as (tsrange(fecha + hora_inicio, fecha + hora_fin, '[)')) stored,
@@ -72,6 +73,7 @@ create table public.reservas (
   asistencia              text,
   acompanantes            jsonb not null default '[]'::jsonb,
 
+  constraint reservas_estado_valido check (estado in ('activa', 'cancelada')),
   constraint reservas_asistencia_valida check (asistencia is null or asistencia in ('vino', 'no_vino')),
   constraint reservas_acompanantes_validos check (jsonb_typeof(acompanantes) = 'array' and jsonb_array_length(acompanantes) <= 10),
 
@@ -102,18 +104,6 @@ create table public.bloqueos (
   unique (espacio_id, fecha, hora_inicio)
 );
 create index idx_bloqueos_lote on public.bloqueos (lote) where lote is not null;
-
--- ---------------------------------------------------------------------
--- CANCELACIONES: tabla en desuso (el servidor actual no la usa; el estado de la
--- cancelación queda en reservas.estado). Se mantiene por compatibilidad.
--- ---------------------------------------------------------------------
-create table public.cancelaciones (
-  id                bigint generated always as identity primary key,
-  reserva_id        bigint references public.reservas(id),
-  motivo            text,
-  aplica_multa      boolean default false,
-  fecha_cancelacion timestamp default now()
-);
 
 -- ---------------------------------------------------------------------
 -- REPORTES DE ERRORES: los envía la opción "Reportar un problema" de la página
@@ -378,13 +368,31 @@ end $$;
 alter table public.espacios          enable row level security;
 alter table public.reservas          enable row level security;
 alter table public.bloqueos          enable row level security;
-alter table public.cancelaciones     enable row level security;
 alter table public.reportes_errores  enable row level security;
 alter table public.meses_habilitados enable row level security;
 alter table public.registro_actividad enable row level security;
 alter table public.configuracion     enable row level security;
 alter table public.lista_espera      enable row level security;
 alter table public.correos_pendientes enable row level security;
+
+-- Segunda barrera (AUD-14, migracion-permisos.sql): los roles públicos de Supabase (anon y
+-- authenticated) no tienen ningún permiso sobre las tablas, secuencias ni funciones, tampoco sobre
+-- las que se creen después. En una base de prueba sin esos roles, este bloque no hace nada.
+do $$
+declare
+  rol text;
+begin
+  foreach rol in array array['anon', 'authenticated'] loop
+    if exists (select 1 from pg_roles where rolname = rol) then
+      execute format('revoke all on all tables in schema public from %I', rol);
+      execute format('revoke all on all sequences in schema public from %I', rol);
+      execute format('revoke all on all functions in schema public from %I', rol);
+      execute format('alter default privileges in schema public revoke all on tables from %I', rol);
+      execute format('alter default privileges in schema public revoke all on sequences from %I', rol);
+      execute format('alter default privileges in schema public revoke all on functions from %I', rol);
+    end if;
+  end loop;
+end $$;
 
 -- ---------------------------------------------------------------------
 -- DATOS INICIALES: los 3 espacios con sus números fijos (solo el Frente abierto al público)

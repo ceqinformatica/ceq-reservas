@@ -71,6 +71,8 @@ Si falta una obligatoria, el servidor no arranca y lo dice en los Logs de Render
    - Abrí la página y probá lo que cambiaste.
 5. **Si algo salió mal:** en Render → Events, elegí el deploy anterior y usá **Rollback** para volver a la versión que andaba. En GitHub, el historial de cada archivo permite recuperar cualquier versión anterior.
 
+**Dependabot** (`.github/dependabot.yml`): una vez por mes, GitHub revisa si hay versiones nuevas de las librerías y abre una propuesta de cambio (pestaña **Pull requests**). Las pruebas corren solas sobre la propuesta: si dan ✅, se acepta con **Merge pull request** (y Render la publica); si dan ❌, se cierra sin aceptar. Mientras nadie la acepte, no cambia nada.
+
 **Librerías:** `package-lock.json` fija las versiones exactas de las librerías del servidor, así cada deploy instala lo mismo que se probó. **No lo borres.** Para actualizarlas hace falta una computadora con Node.js 24: `npm update`, probar, y subir `package.json` y `package-lock.json` juntos. Si alguna vez Render avisa de vulnerabilidades por librerías viejas, usá **Manual Deploy → Clear build cache & deploy**.
 
 ## 5. Tareas frecuentes (panel de administración)
@@ -226,7 +228,7 @@ Para volver a cerrarlo: desmarcar la casilla, escribir el aviso que tiene que ve
 
 ## 10. Base de datos
 
-La estructura completa está en [`esquema-base-de-datos.sql`](esquema-base-de-datos.sql): 10 tablas (`espacios`, `reservas`, `bloqueos`, `meses_habilitados`, `reportes_errores`, `registro_actividad`, `configuracion`, `lista_espera`, `correos_pendientes` y `cancelaciones`, que está en desuso). Los cambios que se le hicieron a una base ya existente quedan como archivos `migracion-*.sql` ([`migracion-admin-supremo.sql`](migracion-admin-supremo.sql), [`migracion-funciones-octubre.sql`](migracion-funciones-octubre.sql) y [`migracion-acompanantes-y-lista-espera.sql`](migracion-acompanantes-y-lista-espera.sql), del 11/10/2026); `esquema-base-de-datos.sql` ya los incluye.
+La estructura completa está en [`esquema-base-de-datos.sql`](esquema-base-de-datos.sql): 9 tablas (`espacios`, `reservas`, `bloqueos`, `meses_habilitados`, `reportes_errores`, `registro_actividad`, `configuracion`, `lista_espera` y `correos_pendientes`; la tabla `cancelaciones`, que estaba en desuso, se borró con `migracion-permisos.sql`). Los cambios que se le hicieron a una base ya existente quedan como archivos `migracion-*.sql` ([`migracion-admin-supremo.sql`](migracion-admin-supremo.sql), [`migracion-funciones-octubre.sql`](migracion-funciones-octubre.sql) y [`migracion-acompanantes-y-lista-espera.sql`](migracion-acompanantes-y-lista-espera.sql), del 11/10/2026); `esquema-base-de-datos.sql` ya los incluye.
 
 **Tareas automáticas:** cada 5 minutos el servidor abre los meses programados, manda los recordatorios del día, limpia la lista de espera vieja, manda la copia de seguridad del mes (una vez por mes), aplica los plazos de conservación de la Política de Privacidad (una vez por día: borra nombre, contacto, acompañantes y textos libres de las reservas de hace más de 6 meses, y borra los reportes de hace más de 6 meses; si se cambia ese plazo, cambiar también `privacidad.html`), relee la configuración y manda las alertas pendientes (ver `tareasPeriodicas()` en `server.js`). Funciona porque UptimeRobot mantiene el servidor despierto.
 
@@ -237,6 +239,7 @@ Protecciones que viven en la base (además de las del servidor):
 - **Tabla `correos_pendientes`** (migración `migracion-cola-correos.sql`): cola de correos. Las confirmaciones, avisos a moderadores, cancelaciones, recordatorios y avisos de reportes se guardan acá y después se mandan; si Brevo falla, el servidor reintenta a los 1, 5, 15, 60 y 180 minutos (y retoma los pendientes si se reinicia). Al enviarse se borra el contenido; las filas se borran a los 7 días. Si un correo falla 6 veces queda en estado `fallido` (con destinatario y asunto) y aparece en el correo de alertas. Para ver si hubo alguno: Supabase → Table Editor → `correos_pendientes`, filtrar `estado = fallido`. Si la tabla no existe, el servidor manda directo, como antes.
 - **Función `crear_reserva_con_cupo`** (migración `migracion-cupo-atomico.sql`): el servidor guarda las reservas públicas con ella. Con un candado por espacio y mes, cuenta las reservas activas del mes de la persona (sin las de prioridad) y guarda en la misma transacción; si llegó al límite, responde el error `CEQ03`. Solo la puede usar el servidor (`service_role`).
 - **Seguridad (RLS) activada sin políticas:** solo el servidor, con la clave service_role, puede leer y escribir.
+- **Sin permisos para los roles públicos** (migración `migracion-permisos.sql`, AUD-14): `anon` y `authenticated` no tienen ningún permiso sobre las tablas, secuencias ni funciones, tampoco sobre las que se creen después. Es una segunda barrera por si algún día se publicara la clave pública. La misma migración agregó el control `reservas_estado_valido` (el estado solo puede ser `activa` o `cancelada`) y borró la columna vacía `reservas.codigo_cancelacion`.
 - Los códigos de cancelación se guardan cifrados: **no se pueden recuperar**, ni siquiera desde la base.
 
 ### Restaurar la base
@@ -271,7 +274,7 @@ Si se cambia la estructura en Supabase, actualizar también ese archivo.
 
 ## 12. Pendientes conocidos
 
-De la auditoría del 23/10/2026 (AUD-01 a AUD-18) ya están resueltos los de las tandas 1 y 2. Quedan: quitar los permisos por defecto de Supabase que sobran y borrar lo que está en desuso (AUD-14, necesita una migración), las partes públicas que sobran (AUD-16) y las mejoras de mantenimiento del código (AUD-18).
+De la auditoría del 23/10/2026 (AUD-01 a AUD-18) están resueltas las tres tandas. Queda, de AUD-18, lo que la propia auditoría recomienda no hacer de golpe: juntar en una sola función la validación de horarios y de superposición (hoy está repetida en varios lugares de `server.js`) y dejar de escribir a mano los números de los espacios (3 y 1). Conviene hacerlo de a poco, cuando se toque cada parte, y es lo que haría falta para poder crear espacios nuevos desde el panel.
 
 De la auditoría técnica del 24/07/2026 (la respuesta completa está en el Apéndice 1 del 6° informe de la Secretaría de Informática). Ninguno es un riesgo inmediato:
 

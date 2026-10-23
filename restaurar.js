@@ -28,8 +28,9 @@ const TABLAS = [
   ['reportes_errores', 'id', false],
   ['registro_actividad', 'id', false]
 ];
-// Columnas que calcula la base sola (no se pueden cargar)
-const CALCULADAS = { reservas: ['horario'] };
+// Columnas que no se cargan: las que calcula la base sola, y las que se borraron de la estructura
+// (las copias de antes del 23/10/2026 todavía traen codigo_cancelacion, siempre vacía)
+const CALCULADAS = { reservas: ['horario', 'codigo_cancelacion'] };
 // Los triggers que impiden reservas sobre bloqueos (y al revés) se apagan mientras se carga: los
 // datos de la copia ya eran válidos, y el orden de carga no tiene que importar
 const TRIGGERS = [['reservas', 'trg_verificar_bloqueo_reserva'], ['bloqueos', 'trg_verificar_reserva_bloqueo']];
