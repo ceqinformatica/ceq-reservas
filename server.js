@@ -939,7 +939,10 @@ let ultimoErrorEmail = '';
 // cancelación en claro). Los que se dan por perdidos lo conservan para poder reintentarlos desde
 // el panel. Todas las filas se borran a los 7 días.
 // Si la tabla no está (o la base no responde), se manda directo, como antes.
-const REINTENTOS_CORREO_MIN = [1, 5, 15, 60, 180];
+// R2 (auditoría del 10/11/2026): los dos últimos reintentos (6 y 12 horas) hacen que se siga
+// probando durante casi un día. Si lo que falló fue el cupo diario de Brevo, el correo sale cuando
+// el cupo se renueva, en vez de darse por perdido a las 4 horas.
+const REINTENTOS_CORREO_MIN = [1, 5, 15, 60, 180, 360, 720];
 const INTERVALO_COLA_CORREOS_MS = Number(process.env.INTERVALO_COLA_CORREOS_MS) || 60 * 1000;
 let colaCorreosEnCurso = false;
 
@@ -988,7 +991,10 @@ async function procesarColaCorreos() {
       const intentos = (correo.intentos || 0) + 1;
       let cambios;
       if (ok) {
-        cambios = { estado: 'enviado', enviado_en: new Date().toISOString(), intentos, html: '', texto: null, destinatarios: [], ultimo_error: null };
+        // Se borran el contenido y las direcciones. Queda un "-" por cada destinatario (R2): Brevo
+        // descuenta del cupo diario uno por destinatario, y así se pueden seguir contando
+        cambios = { estado: 'enviado', enviado_en: new Date().toISOString(), intentos, html: '', texto: null,
+          destinatarios: (Array.isArray(correo.destinatarios) ? correo.destinatarios : []).map(() => '-'), ultimo_error: null };
       } else if (intentos > REINTENTOS_CORREO_MIN.length) {
         // Se da por perdido. Conserva el contenido para poder reintentarlo desde el panel ("Hoy");
         // igual se borra con la fila a los 7 días
@@ -1043,9 +1049,22 @@ async function contarDeHoy(tabla, columna, filtrar = q => q, tope = 1000) {
 
 // Cuántos correos más que no son de una reserva se pueden mandar hoy. Si no se puede contar (la
 // base no responde), no se frena nada: el correo igual pasa por la cola.
+// Cuántos correos cuenta Brevo por una fila de la cola: uno por destinatario (R2). Un aviso interno
+// a 2 moderadores gasta 2 del cupo diario, no 1.
+function destinatariosDe(fila) {
+  return Math.max(Array.isArray(fila && fila.destinatarios) ? fila.destinatarios.length : 0, 1);
+}
+
+// Correos de hoy en la cola, contados como los cuenta Brevo (por destinatario)
+async function correosDeHoy() {
+  const filas = await leerTodasLasFilas(() => supabase.from('correos_pendientes').select('id, destinatarios')
+    .gte('creado_en', inicioDelDiaEnAsuncion()).order('id', { ascending: true }), 5000);
+  return filas.reduce((total, fila) => total + destinatariosDe(fila), 0);
+}
+
 async function correosOpcionalesRestantesHoy() {
   try {
-    return Math.max(LIMITE_CORREOS_OPCIONALES - await contarDeHoy('correos_pendientes', 'creado_en'), 0);
+    return Math.max(LIMITE_CORREOS_OPCIONALES - await correosDeHoy(), 0);
   } catch (err) {
     console.error('⚠️ No se pudieron contar los correos de hoy:', err && (err.message || err.code));
     return LIMITE_CORREOS_OPCIONALES;
@@ -1189,7 +1208,10 @@ const reportesLimiter = rateLimit({
 
 const listaEsperaLimiter = rateLimit({
   windowMs: 60 * 60 * 1000,
-  max: 15,
+  // R6: antes 15. El tope del día es uno solo para todos (60), y con 15 por hora una sola conexión
+  // lo llenaba en 4 horas con correos inventados. Quedan 5 y no menos, porque en el WiFi de la
+  // facultad varias personas salen con la misma IP.
+  max: 5,
   keyGenerator: obtenerIpCliente,
   handler: registrar429,
   standardHeaders: true,
@@ -1411,18 +1433,13 @@ function enlaceGoogleCalendar(espacioId, fecha, horaInicioHHMM, horaFinHHMM) {
 // (se corrige el correo de la reserva o se reenvía la confirmación), el enlace anterior deja de
 // servir. Antes la firma dependía solo del número, y quien tenía un correo viejo seguía pudiendo
 // cancelar.
-const CLAVE_ENLACES_V1 = crypto.createHmac('sha256', JWT_SECRET).update('enlaces-de-cancelacion-v1').digest();
+// R8 (auditoría del 10/11/2026): los enlaces del formato anterior (solo con el número) se aceptaron
+// para las reservas hechas hasta el 24/10/2026; la última de esas fue el 30/10, así que ya no se
+// aceptan.
 const CLAVE_ENLACES = crypto.createHmac('sha256', JWT_SECRET).update('enlaces-de-cancelacion-v2').digest();
-// Los enlaces que ya se mandaron antes de este cambio solo dependían del número: siguen sirviendo
-// para las reservas hechas hasta entonces (las más nuevas ya tienen la firma con el código)
-const FIN_ENLACES_V1 = Date.parse('2026-10-24T12:00:00Z');
 
 function tokenCancelacion(reservaId, codigoHash) {
   return crypto.createHmac('sha256', CLAVE_ENLACES).update(`cancelar:${Number(reservaId)}:${codigoHash || ''}`).digest('base64url').slice(0, 32);
-}
-
-function tokenCancelacionV1(reservaId) {
-  return crypto.createHmac('sha256', CLAVE_ENLACES_V1).update(`cancelar:${Number(reservaId)}`).digest('base64url').slice(0, 32);
 }
 
 function mismaFirma(esperado, token) {
@@ -1434,9 +1451,7 @@ function mismaFirma(esperado, token) {
 // `reserva` es la fila de la base (con codigo_cancelacion_hash y created_at)
 function tokenCancelacionValido(reserva, token) {
   if (!reserva || !esIdValido(reserva.id) || typeof token !== 'string' || token.length !== 32) return false;
-  if (mismaFirma(tokenCancelacion(reserva.id, reserva.codigo_cancelacion_hash), token)) return true;
-  const creada = Date.parse(aIsoUtc(reserva.created_at) || '');
-  return Number.isFinite(creada) && creada < FIN_ENLACES_V1 && mismaFirma(tokenCancelacionV1(reserva.id), token);
+  return mismaFirma(tokenCancelacion(reserva.id, reserva.codigo_cancelacion_hash), token);
 }
 
 function enlaceCancelacion(reservaId, codigoHash) {
@@ -1559,6 +1574,25 @@ const verificarCSRF = (req, res, next) => {
 // El resultado se reutiliza durante 30 segundos, para que llamadas repetidas a esta
 // ruta (que no tiene rate limit) no generen una consulta a la base cada vez.
 let ultimoChequeoBase = { momento: 0, ok: false };
+
+// R5: "error" si en las últimas 24 horas un correo se dio por perdido, o si la copia mensual no
+// salió. Las alertas salen por el mismo servicio de correos: si ese servicio deja de andar, tampoco
+// llega la alerta. Con esto, un monitor externo que busque "correos":"error" en esta respuesta
+// avisa por otro camino. No lleva ningún dato personal. Si no se puede mirar, dice "ok".
+async function estadoCorreosParaSalud() {
+  try {
+    const [perdidos, copia] = await Promise.all([
+      supabase.from('correos_pendientes').select('id').eq('estado', 'fallido')
+        .gte('creado_en', new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString()).limit(1),
+      supabase.from('configuracion').select('valor').eq('clave', 'copia_mensual_error').maybeSingle()
+    ]);
+    if (perdidos.error || copia.error) return 'ok';
+    const copiaNoSalio = /"problema":"No salió/.test(String((copia.data && copia.data.valor) || ''));
+    return (perdidos.data || []).length > 0 || copiaNoSalio ? 'error' : 'ok';
+  } catch (err) {
+    return 'ok';
+  }
+}
 app.get('/api/health', async (req, res) => {
   if (Date.now() - ultimoChequeoBase.momento > 30 * 1000) {
     try {
@@ -1569,14 +1603,14 @@ app.get('/api/health', async (req, res) => {
         .select('mes')
         .limit(1);
       if (error) throw error;
-      ultimoChequeoBase = { momento: Date.now(), ok: true };
+      ultimoChequeoBase = { momento: Date.now(), ok: true, correos: await estadoCorreosParaSalud() };
     } catch (error) {
       console.error('❌ Health check: la base de datos no respondió:', error);
       ultimoChequeoBase = { momento: Date.now(), ok: false };
     }
   }
   if (ultimoChequeoBase.ok) {
-    return res.json({ status: 'ok', db: 'ok' });
+    return res.json({ status: 'ok', db: 'ok', correos: ultimoChequeoBase.correos || 'ok' });
   }
   return res.status(503).json({ status: 'error', db: 'error' });
 });
@@ -2288,8 +2322,19 @@ async function cancelarComoUsuario(reserva, res) {
   // y Altillo hasta que empiece)
   const plazoCancelacion = reglaEspacio(reserva.espacio_id).plazo_cancelacion_dias;
   if (plazoCancelacion > 0 && diferenciaDias < plazoCancelacion) {
+    const avisoPlazo = correoDeReserva('aviso_plazo_vencido', reserva);
+    // R3: los dos correos salen una sola vez por día por reserva. Antes salían en cada intento, y
+    // con apretar varias veces el botón se llenaba la casilla de los moderadores y se gastaba el
+    // cupo de Brevo. El asunto lleva el número de la reserva: si ya está en la cola de hoy, no se
+    // repite. Si no se puede mirar la cola, se mandan igual.
+    let yaAvisadoHoy = false;
+    try {
+      yaAvisadoHoy = await contarDeHoy('correos_pendientes', 'creado_en', q => q.eq('asunto', avisoPlazo.asunto), 1) > 0;
+    } catch (err) {
+      console.error('⚠️ No se pudo mirar la cola de correos:', err && (err.message || err.code));
+    }
     const emailUsuario = reserva.contacto.split('|')[1]?.trim();
-    if (emailUsuario) {
+    if (emailUsuario && !yaAvisadoHoy) {
       const correo = correoDeReserva('plazo_vencido', reserva);
       encolarCorreo({
         to: emailUsuario,
@@ -2300,13 +2345,14 @@ async function cancelarComoUsuario(reserva, res) {
     }
 
     // Aviso a los moderadores: hubo un intento de cancelación fuera del período gratuito
-    const avisoPlazo = correoDeReserva('aviso_plazo_vencido', reserva);
-    encolarCorreo({
-      to: getEmailModerador(reserva.espacio_id),
-      subject: avisoPlazo.asunto,
-      responderA: correoDeContacto(reserva.contacto),
-      html: avisoPlazo.html
-    });
+    if (!yaAvisadoHoy) {
+      encolarCorreo({
+        to: getEmailModerador(reserva.espacio_id),
+        subject: avisoPlazo.asunto,
+        responderA: correoDeContacto(reserva.contacto),
+        html: avisoPlazo.html
+      });
+    }
 
     return res.status(403).json({
       // El contacto es el del espacio (Frente: el de Configuración). La página busca
@@ -2380,15 +2426,7 @@ async function reservaDelEnlace(res, r, t) {
     .eq('id', Number(r))
     .maybeSingle();
   if (error) throw error;
-  if (!data) {
-    // Una reserva borrada desde el panel: solo se dice si el enlace era de verdad (formato viejo)
-    if (mismaFirma(tokenCancelacionV1(r), t)) {
-      res.status(404).json({ error: 'Esa reserva ya no existe' });
-      return null;
-    }
-    return invalido();
-  }
-  if (!tokenCancelacionValido(data, t)) return invalido();
+  if (!data || !tokenCancelacionValido(data, t)) return invalido();
   return data;
 }
 
@@ -4843,7 +4881,10 @@ app.put('/api/superadmin/reservas/:id', verifyAdminToken, verifySuperAdmin, veri
     const codigoNuevo = cambiaContacto ? crypto.randomBytes(8).toString('hex').toUpperCase() : null;
     const { data: actualizada, error } = await supabase.from('reservas')
       .update({ nombre_solicitante: datos.nombre_solicitante, contacto: datos.contacto, fecha: datos.fecha, hora_inicio: ini + ':00', hora_fin: fin + ':00',
-        ...(codigoNuevo ? { codigo_cancelacion_hash: hashCodigo(codigoNuevo) } : {}) })
+        ...(codigoNuevo ? { codigo_cancelacion_hash: hashCodigo(codigoNuevo) } : {}),
+        // R7: si cambia el día, el recordatorio que ya salió era para la fecha anterior: se borra la
+        // marca para que salga otro cuando corresponda a la fecha nueva
+        ...(datos.fecha !== reserva.fecha ? { recordatorio_enviado_en: null } : {}) })
       .eq('id', reserva.id).eq('estado', 'activa').select();
     if (error) {
       if (error.code === '23P01' || error.code === '23505') return res.status(409).json({ error: 'Ese horario ya está ocupado por otra reserva' });
@@ -4980,10 +5021,12 @@ app.get('/api/superadmin/estado', verifyAdminToken, verifySuperAdmin, async (req
     let correos = null;
     try {
       const filas = await leerTodasLasFilas(() => supabase.from('correos_pendientes')
-        .select('id, estado, creado_en').order('id', { ascending: true }), 5000);
+        .select('id, estado, creado_en, destinatarios').order('id', { ascending: true }), 5000);
+      // Los de hoy se cuentan por destinatario, como los cuenta Brevo para el cupo diario (R2)
+      const sumar = lista => lista.reduce((total, f) => total + destinatariosDe(f), 0);
       correos = {
-        hoy: filas.filter(f => f.creado_en >= desde).length,
-        enviados_hoy: filas.filter(f => f.creado_en >= desde && f.estado === 'enviado').length,
+        hoy: sumar(filas.filter(f => f.creado_en >= desde)),
+        enviados_hoy: sumar(filas.filter(f => f.creado_en >= desde && f.estado === 'enviado')),
         pendientes: filas.filter(f => f.estado === 'pendiente' || f.estado === 'enviando').length,
         fallidos: filas.filter(f => f.estado === 'fallido').length
       };
@@ -5334,6 +5377,11 @@ async function aplicarPlazosDeConservacion() {
   if (e4) throw e4;
   const { data: reportes, error: e3 } = await supabase.from('reportes_errores').delete().lt('created_at', fechaLimite + 'T00:00:00').select('id');
   if (e3) throw e3;
+  // R9: los intentos fallidos de inicio de sesión solo sirven para el tope de la última hora. Se
+  // borran los de más de 30 días: si no, el registro (y la copia completa) crecía sin límite.
+  const { error: e5 } = await supabase.from('registro_actividad').delete()
+    .eq('accion', ACCION_LOGIN_FALLIDO).lt('creado_en', new Date(Date.now() - 30 * 86400000).toISOString());
+  if (e5) throw e5;
 
   const anonimizadas = (frente || []).length + (altillo || []).length;
   if (anonimizadas || (reportes || []).length) {
