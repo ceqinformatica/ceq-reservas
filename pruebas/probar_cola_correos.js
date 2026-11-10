@@ -80,7 +80,10 @@ const filasDe = email => db.correos_pendientes.filter(c => c.asunto && JSON.stri
   await hasta(() => db.correos_pendientes.length >= 2 && db.correos_pendientes.every(c => c.estado === 'enviado'));
   anotar('Los dos correos pasaron por la cola y quedaron "enviado"', db.correos_pendientes.length === 2 && db.correos_pendientes.every(c => c.estado === 'enviado' && c.intentos === 1),
     JSON.stringify(db.correos_pendientes.map(c => [c.estado, c.intentos])));
-  anotar('Al enviarse se borra el contenido (código de cancelación) y los destinatarios', db.correos_pendientes.every(c => c.html === '' && c.texto === null && Array.isArray(c.destinatarios) && c.destinatarios.length === 0),
+  // R2 (10/11/2026): en vez de las direcciones queda un "-" por destinatario, para poder contar
+  // los correos como los cuenta Brevo (uno por destinatario)
+  anotar('Al enviarse se borra el contenido (código de cancelación) y las direcciones (queda un "-" por destinatario)',
+    db.correos_pendientes.every(c => c.html === '' && c.texto === null && Array.isArray(c.destinatarios) && c.destinatarios.length >= 1 && c.destinatarios.every(d => d === '-')),
     JSON.stringify(db.correos_pendientes.map(c => [c.html.length, c.destinatarios])));
 
   // ===== 2. Brevo caído: queda pendiente y se reintenta =====
@@ -111,7 +114,7 @@ const filasDe = email => db.correos_pendientes.filter(c => c.asunto && JSON.stri
   await hasta(() => db.correos_pendientes.slice(antes3).length === 2 && db.correos_pendientes.slice(antes3).every(c => c.intentos === 1));
   const perdidas = db.correos_pendientes.slice(antes3);
   const pasos = [];
-  for (const minutos of [2, 6, 16, 61, 181]) {
+  for (const minutos of [2, 6, 16, 61, 181, 361, 721]) {
     const intentosAntes = perdidas.map(c => c.intentos);
     adelantar(minutos);
     // Se espera a que los DOS correos hayan hecho su intento (y guardado el resultado)
@@ -120,7 +123,8 @@ const filasDe = email => db.correos_pendientes.filter(c => c.asunto && JSON.stri
   }
   console.log('   pasos:', pasos.join('  '));
   await hasta(() => perdidas.every(c => c.estado === 'fallido'));
-  anotar('Con Brevo caído siempre: 6 intentos (1, 5, 15, 60 y 180 min) y queda "fallido"', perdidas.every(c => c.estado === 'fallido' && c.intentos === 6),
+  // R2 (10/11/2026): dos reintentos más (6 y 12 horas), para llegar al día siguiente si se acabó el cupo de Brevo
+  anotar('Con Brevo caído siempre: 8 intentos (1, 5, 15, 60, 180, 360 y 720 min) y queda "fallido"', perdidas.every(c => c.estado === 'fallido' && c.intentos === 8),
     JSON.stringify(perdidas.map(c => [c.estado, c.intentos])));
   anotar('El fallido conserva a quién, el asunto y el contenido (para poder reintentarlo desde el panel)', perdidas.every(c => c.html.length > 0 && c.destinatarios.length > 0 && c.asunto),
     JSON.stringify(perdidas.map(c => [c.html.length, c.destinatarios])));

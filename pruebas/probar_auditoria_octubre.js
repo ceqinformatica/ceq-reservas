@@ -250,13 +250,26 @@ const quitar = (tabla, filas) => { const fuera = new Set(filas); db[tabla] = db[
   r = await pedir('PUT', `/api/superadmin/reservas/${idEditar}`, { nombre_solicitante: 'Nombre Corregido' }, 'superadmin');
   consulta = await pedir('POST', '/api/cancelar-por-codigo/consultar', { codigo: codigoNuevo });
   anotar('...cambiar solo el nombre no cambia el código', r.status === 200 && consulta.status === 200, `${r.status} ${consulta.status}`);
-  // Enlaces del formato viejo (solo el número): sirven para las reservas de antes del cambio
+  // Enlaces del formato viejo (solo el número): desde el 10/11/2026 ya no se aceptan (R8): la última
+  // reserva de antes del cambio fue el 30/10
   const crypto = require('crypto');
   const firmaVieja = id => crypto.createHmac('sha256', crypto.createHmac('sha256', SECRETO).update('enlaces-de-cancelacion-v1').digest()).update(`cancelar:${id}`).digest('base64url').slice(0, 32);
   db.reservas.push(reserva({ id: 610, fecha: '2026-11-27', created_at: '2026-10-20T12:00:00' }));
   consulta = await pedir('GET', `/api/cancelar-por-enlace?r=610&t=${firmaVieja(610)}`);
   const conFirmaVieja = await pedir('GET', `/api/cancelar-por-enlace?r=${idEditar}&t=${firmaVieja(idEditar)}`);
-  anotar('...un enlace viejo de una reserva de antes del cambio sigue sirviendo; para una reserva nueva, no', consulta.status === 200 && conFirmaVieja.status === 404, `${consulta.status} ${conFirmaVieja.status}`);
+  anotar('R8: un enlace del formato viejo ya no sirve, ni para una reserva de antes del cambio ni para una nueva', consulta.status === 404 && conFirmaVieja.status === 404, `${consulta.status} ${conFirmaVieja.status}`);
+
+  // ===== Auditoría del 10/11/2026 =====
+  // R7: al cambiar el día de una reserva se borra la marca del recordatorio (sale otro para la fecha nueva)
+  const r610 = db.reservas.find(x => x.id === 610);
+  r610.recordatorio_enviado_en = '2026-10-21T12:00:00Z';
+  r = await pedir('PUT', `/api/superadmin/reservas/610`, { nombre_solicitante: 'Otro Nombre', avisar: false }, 'superadmin');
+  anotar('R7: cambiar solo el nombre no toca la marca del recordatorio', r.status === 200 && r610.recordatorio_enviado_en === '2026-10-21T12:00:00Z', `${r.status} ${r610.recordatorio_enviado_en}`);
+  r = await pedir('PUT', `/api/superadmin/reservas/610`, { fecha: '2026-11-26', avisar: false }, 'superadmin');
+  anotar('R7: cambiar el día borra la marca del recordatorio', r.status === 200 && r610.fecha === '2026-11-26' && r610.recordatorio_enviado_en === null, `${r.status} ${r.datos.error || ''} ${r610.recordatorio_enviado_en}`);
+  // R5: la ruta de salud informa también el estado de los correos, sin datos personales
+  r = await pedir('GET', '/api/health');
+  anotar('R5: /api/health informa el estado de los correos', r.status === 200 && r.datos.db === 'ok' && ['ok', 'error'].includes(r.datos.correos) && Object.keys(r.datos).length === 3, JSON.stringify(r.datos));
 
   // ===== AUD-12: comodín de los acompañantes por espacio para los textos legales =====
   r = await pedir('GET', '/api/superadmin/legal', null, 'superadmin');
