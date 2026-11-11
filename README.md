@@ -130,6 +130,29 @@ Se entra al mismo panel, pero con la contraseña del admin supremo (`SUPERADMIN_
 
 El admin normal no ve la pestaña Avanzado, y el servidor le rechaza esas acciones aunque intente hacerlas por otro lado.
 
+### Espacios, cuentas, detector de abusos, modo pantalla e informe (desde el 10/11/2026)
+
+Todo esto se hace desde el panel, sin tocar el código.
+
+**Crear un espacio** (Avanzado → Espacios y reglas → Crear y cambiar espacios → "+ Crear un espacio nuevo"). Cada espacio tiene:
+
+| Qué | Opciones |
+|---|---|
+| Cómo se reserva | **Bloques de 1 hora** (abre, cierra y máximo de horas, como el Altillo) o **turnos fijos con nombre** (uno por línea: `Mañana, 08:00, 12:00`, como el Frente). |
+| Quién puede reservar | **Cualquier persona** desde la página, o **solo a través de un moderador**: la gente ve el calendario (con nombre y motivo, como en los demás) y un cartel con el contacto, pero no puede reservar; la reserva la carga un moderador en la pestaña "Cargar reserva". |
+| Motivos | Una lista para elegir, o vacío para que la persona lo escriba. |
+| Contacto | Correo y WhatsApp del espacio (a quién responde la gente y lo que figura en los correos). |
+
+El espacio nuevo queda **sin publicar**. Después: sus días, plazos, límites, acompañantes y normas en "Reglas de cada espacio"; quién recibe sus avisos en "Correos automáticos"; y se publica en "Espacios disponibles". Para quitarlo: mismo lugar, "Quitar este espacio" (no deja si tiene reservas activas que no pasaron; las reservas anteriores se conservan). El Frente y el Altillo no se quitan, pero también se pueden pasar a "solo a través de un moderador". Sus turnos, motivos, horario y contacto siguen en "Turnos, horarios y contacto".
+
+**Cuentas del panel** (Avanzado → Mantenimiento → Cuentas del panel). Cada cuenta entra con su **usuario y contraseña** y ve el panel solo con los espacios que se le asignen (reservas, bloqueos, cargar reserva y exportar). Con la casilla "lo general" además puede habilitar meses y ver los reportes y los correos que no salieron. Hay dos cuentas fijas: `supremo` (ve todo; su contraseña está en Render) y `moderadores` (la contraseña compartida de siempre, con el Frente y el Altillo; se cambia en "Contraseña y sesiones"). En el inicio de sesión, el usuario se puede dejar vacío para entrar como antes. Cambiar la contraseña de una cuenta o borrarla cierra sus sesiones. Las contraseñas se guardan cifradas (clave `usuarios_panel` de la tabla `configuracion`) y no van en las copias de seguridad: después de restaurar la base hay que crear las cuentas de nuevo. El registro de actividad dice qué cuenta hizo cada cosa.
+
+**Detector de abusos** (Avanzado → Personas). El límite por persona se controla por correo o por celular, sin verificar ninguno. El detector junta las reservas de los últimos 90 días que parecen de una misma persona con datos distintos (mismo celular con varios correos, mismo correo con varios celulares, mismo nombre con todo distinto, o la misma conexión con 3 o más personas) y marca las que, juntas, pasan el límite del mes. No bloquea ni cancela nada. La señal de "misma conexión" necesita la migración `migracion-huella-red.sql`: guarda una huella cifrada de la red (no la dirección IP), que se borra a los 6 meses.
+
+**Modo pantalla**: `https://reservas.ceq-una.com/pantalla.html` muestra las reservas de hoy en grande, para un monitor. No pide contraseña (muestra lo mismo que el calendario público) y se actualiza sola cada minuto. Con `?espacio=3` muestra un solo espacio.
+
+**Informe para la Comisión** (Avanzado → Informes → Estadísticas → "Armar el informe"). Abre en otra pestaña un informe para imprimir o guardar como PDF: reservas por espacio y por mes, cancelaciones, asistencia, horarios y motivos más pedidos, reportes, correos que no salieron y actividad del panel, sin nombres ni contactos. Sin fechas, toma el semestre en curso.
+
 ### Correos automáticos y lista de espera
 
 - **Recordatorio (por defecto, 2 días antes):** a partir de las 08:00 de ese día llega un correo con un botón **Cancelar mi reserva** (no hace falta el código). Si ese día es el último para cancelar gratis (en el Frente, con las reglas de siempre), lo dice. Cuántos días antes, o si se manda, se cambia por espacio en Avanzado → Reglas de cada espacio. No se manda a las reservas de prioridad ni a las hechas en las últimas 12 horas.

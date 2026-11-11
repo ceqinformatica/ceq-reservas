@@ -155,6 +155,109 @@ const REGLAS_POR_DEFECTO = {
   1: { dias: [1, 2, 3, 4, 5], plazo_cancelacion_dias: 0, recordatorio: true, recordatorio_dias: 2, anticipacion_min_dias: 0, anticipacion_max_dias: 0, limite_por_persona_mes: 0, acompanantes_max: 4, normas: '' }
 };
 
+// ========== ESPACIOS CONFIGURABLES (admin supremo > Espacios) ==========
+// El Frente (3) y el Altillo (1) son los espacios de siempre: sus turnos, motivos, horario y contacto
+// siguen en la configuración de siempre. Los espacios que se crean desde el panel guardan lo suyo
+// en la clave "espacios_def" de la tabla configuracion, y la fila con el nombre en la tabla espacios.
+// Cada espacio tiene:
+//   modo: 'publico' (la gente reserva desde la página) o 'moderador' (la gente solo ve el calendario
+//         y un cartel con el contacto; las reservas las carga un moderador desde el panel)
+//   horario: 'turnos' (turnos fijos con nombre, como el Frente) o 'bloques' (bloques de 1 hora
+//            entre hora_desde y hora_hasta, hasta max_horas por reserva, como el Altillo)
+//   motivos: lista para elegir; vacía = la persona escribe el motivo
+//   contacto_email / contacto_whatsapp: a quién escribir por ese espacio
+//   contacto_texto: el cartel que ve la gente cuando el espacio es 'moderador'
+let espaciosDef = {};
+const NOMBRES_ESPACIOS_DE_SIEMPRE = { 1: 'Altillo', 2: 'Sala de Reuniones', 3: 'Frente' };
+let nombresEspacios = { ...NOMBRES_ESPACIOS_DE_SIEMPRE };
+const MAX_ESPACIOS = 12;
+
+// Los espacios que se pueden usar: los dos de siempre y los creados desde el panel
+function idsEspacios() {
+  return [3, 1, ...Object.keys(espaciosDef).map(Number).filter(id => id !== 3 && id !== 1)];
+}
+function espacioConfigurado(id) {
+  return idsEspacios().includes(Number(id));
+}
+function reglasPorDefecto(id) {
+  return REGLAS_POR_DEFECTO[Number(id)] || { ...REGLAS_POR_DEFECTO[1], acompanantes_max: 0 };
+}
+
+// Todo lo que define a un espacio, venga de la configuración de siempre o de espacios_def
+function defEspacio(espacioId) {
+  const id = Number(espacioId);
+  const propio = espaciosDef[id] || {};
+  const comun = { id, modo: propio.modo === 'moderador' ? 'moderador' : 'publico', contacto_texto: propio.contacto_texto || '' };
+  if (id === 3) {
+    return { ...comun, horario: 'turnos', turnos: config.turnos_frente, motivos: config.motivos_frente,
+      contacto_email: config.contacto_email_frente, contacto_whatsapp: config.contacto_whatsapp_frente };
+  }
+  if (id === 1) {
+    return { ...comun, horario: 'bloques', hora_desde: config.altillo_hora_desde, hora_hasta: config.altillo_hora_hasta,
+      max_horas: config.altillo_max_horas, motivos: [], contacto_email: CORREO_CONTACTO, contacto_whatsapp: '' };
+  }
+  if (espaciosDef[id]) return { ...espaciosDef[id], id };
+  // Un espacio que ya no existe (reservas viejas): solo para poder mostrarlas
+  return { ...comun, horario: 'bloques', hora_desde: 0, hora_hasta: 24, max_horas: 24, motivos: [], contacto_email: CORREO_CONTACTO, contacto_whatsapp: '' };
+}
+
+// El cartel que ve la gente en un espacio que se reserva solo a través de un moderador
+function mensajeSoloModerador(espacioId) {
+  const def = defEspacio(espacioId);
+  return def.contacto_texto || `Las reservas del ${getEspacioNombre(espacioId)} se hacen a través de un moderador. Escribí a ${def.contacto_email || CORREO_CONTACTO} para pedir tu reserva.`;
+}
+
+// Primer y último minuto del día en que se usa el espacio
+function rangoDelEspacio(espacioId) {
+  const def = defEspacio(espacioId);
+  const aMin = hhmm => { const [h, m] = hhmm.split(':').map(Number); return h * 60 + m; };
+  return def.horario === 'turnos'
+    ? [Math.min(...def.turnos.map(t => aMin(t.inicio))), Math.max(...def.turnos.map(t => aMin(t.fin)))]
+    : [def.hora_desde * 60, def.hora_hasta * 60];
+}
+
+// Valida la definición de UN espacio creado desde el panel. Lanza un Error con el mensaje para el panel.
+function validarDefEspacio(valor, id) {
+  const v = valor || {};
+  const modo = v.modo === 'moderador' ? 'moderador' : 'publico';
+  const contactoTexto = String(v.contacto_texto == null ? '' : v.contacto_texto).replace(/\r\n/g, '\n').trim();
+  if (contactoTexto.length > 400) throw new Error('El cartel de contacto puede tener hasta 400 caracteres');
+  if (/[<>]/.test(contactoTexto)) throw new Error('El cartel de contacto no puede tener los signos < ni >');
+  // El Frente y el Altillo: lo demás sigue en la configuración de siempre
+  if (Number(id) === 3 || Number(id) === 1) return { modo, contacto_texto: contactoTexto };
+  const horario = v.horario === 'turnos' ? 'turnos' : 'bloques';
+  const def = { modo, contacto_texto: contactoTexto, horario };
+  if (horario === 'turnos') {
+    def.turnos = VALIDADORES_CONFIG.turnos_frente(v.turnos);
+  } else {
+    def.hora_desde = VALIDADORES_CONFIG.altillo_hora_desde(v.hora_desde == null ? 7 : v.hora_desde);
+    def.hora_hasta = VALIDADORES_CONFIG.altillo_hora_hasta(v.hora_hasta == null ? 19 : v.hora_hasta);
+    def.max_horas = VALIDADORES_CONFIG.altillo_max_horas(v.max_horas == null ? 2 : v.max_horas);
+    if (def.hora_desde >= def.hora_hasta) throw new Error('La hora de apertura tiene que ser anterior a la de cierre');
+    if (def.max_horas > def.hora_hasta - def.hora_desde) throw new Error('El máximo de horas no puede ser mayor que el horario del espacio');
+  }
+  def.motivos = Array.isArray(v.motivos) && v.motivos.length ? VALIDADORES_CONFIG.motivos_frente(v.motivos) : [];
+  const email = String(v.contacto_email == null || v.contacto_email === '' ? CORREO_CONTACTO : v.contacto_email).trim();
+  if (!EMAIL_REGEX.test(email) || email.length > 100) throw new Error('El correo de contacto del espacio no es válido');
+  def.contacto_email = email;
+  const whatsapp = String(v.contacto_whatsapp == null ? '' : v.contacto_whatsapp).replace(/\D/g, '');
+  if (whatsapp && (whatsapp.length < 8 || whatsapp.length > 15)) throw new Error('El WhatsApp tiene que ser el número con código de país, por ejemplo 595981123456');
+  def.contacto_whatsapp = whatsapp;
+  return def;
+}
+
+function validarEspaciosDef(valor) {
+  const v = valor && typeof valor === 'object' && !Array.isArray(valor) ? valor : {};
+  const resultado = {};
+  for (const [clave, def] of Object.entries(v)) {
+    const id = Number(clave);
+    if (!Number.isInteger(id) || id < 1) throw new Error('Espacio inválido en la definición de los espacios');
+    resultado[id] = validarDefEspacio(def, id);
+  }
+  if (Object.keys(resultado).length > MAX_ESPACIOS) throw new Error(`Puede haber hasta ${MAX_ESPACIOS} espacios`);
+  return resultado;
+}
+
 function validarReglasEspacios(valor) {
   const v = valor || {};
   const entero = (x, min, max, nombre) => {
@@ -163,9 +266,9 @@ function validarReglasEspacios(valor) {
     return n;
   };
   const resultado = {};
-  for (const id of [3, 1]) {
-    const r = { ...REGLAS_POR_DEFECTO[id], ...(v[id] || v[String(id)] || {}) };
-    const espacio = id === 3 ? 'Frente' : 'Altillo';
+  for (const id of idsEspacios()) {
+    const r = { ...reglasPorDefecto(id), ...(v[id] || v[String(id)] || {}) };
+    const espacio = getEspacioNombre(id);
     const dias = [...new Set((Array.isArray(r.dias) ? r.dias : []).map(Number))].filter(d => Number.isInteger(d) && d >= 0 && d <= 6).sort();
     if (!dias.length) throw new Error(`${espacio}: elegí al menos un día de la semana`);
     const normas = String(r.normas == null ? '' : r.normas).replace(/\r\n/g, '\n').trim();
@@ -189,7 +292,7 @@ function validarReglasEspacios(valor) {
 }
 
 function reglaEspacio(espacioId) {
-  return config.reglas_espacios[Number(espacioId)] || REGLAS_POR_DEFECTO[Number(espacioId)] || REGLAS_POR_DEFECTO[1];
+  return config.reglas_espacios[Number(espacioId)] || reglasPorDefecto(espacioId);
 }
 
 // Máximo de reservas por persona por mes en el espacio (null = sin límite)
@@ -376,9 +479,10 @@ const PLANTILLAS_CORREO = {
 function validarAvisosDestinatarios(valor) {
   const v = valor || {};
   const resultado = {};
-  for (const id of [3, 1]) {
-    const lista = v[id] || v[String(id)];
-    const espacio = id === 3 ? 'Frente' : 'Altillo';
+  for (const id of idsEspacios()) {
+    // Un espacio creado después de guardar esta lista: sus avisos van al correo general
+    const lista = v[id] || v[String(id)] || (id !== 3 && id !== 1 ? [EMAIL_MODERADOR] : null);
+    const espacio = getEspacioNombre(id);
     if (!Array.isArray(lista)) throw new Error(`${espacio}: falta la lista de correos que reciben los avisos`);
     const correos = [...new Set(lista.map(c => String(c || '').trim().toLowerCase()).filter(Boolean))];
     if (correos.length < 1 || correos.length > 5) throw new Error(`${espacio}: entre 1 y 5 correos para los avisos`);
@@ -495,7 +599,7 @@ function normasHtml(espacioId) {
 
 // "por WhatsApp" (Frente) o "a correo@..." (Altillo): por dónde pedir una cancelación fuera de plazo
 function contactoFueraDePlazoHtml(espacioId) {
-  return Number(espacioId) === 3 ? `por <a href="${enlaceWhatsappFrente()}">WhatsApp</a>` : `a ${escapeHtml(correoRespuesta(espacioId))}`;
+  return defEspacio(espacioId).contacto_whatsapp ? `por <a href="${enlaceWhatsapp(espacioId)}">WhatsApp</a>` : `a ${escapeHtml(correoRespuesta(espacioId))}`;
 }
 
 // Línea de los detalles de la reserva (con o sin negrita en la etiqueta, como estaba cada correo)
@@ -593,7 +697,7 @@ function correoDeReserva(clave, r, extra = {}) {
       break;
     case 'plazo_vencido':
       cuerpo = [p.titulo, p.mensaje, detallesReservaHtml(r, { etiquetasEnNegrita: false, titulo: 'Detalles de la Reserva:' }),
-        `<p>Si de todas formas deseás realizar la cancelación, escribí a ${escapeHtml(correoRespuesta(r.espacio_id))}${Number(r.espacio_id) === 3 ? ` o contactate por WhatsApp: <a href="${enlaceWhatsappFrente()}">Contactar por WhatsApp</a>` : ''}</p>`];
+        `<p>Si de todas formas deseás realizar la cancelación, escribí a ${escapeHtml(correoRespuesta(r.espacio_id))}${defEspacio(r.espacio_id).contacto_whatsapp ? ` o contactate por WhatsApp: <a href="${enlaceWhatsapp(r.espacio_id)}">Contactar por WhatsApp</a>` : ''}</p>`];
       break;
     default:
       throw new Error(`Plantilla de correo desconocida: ${clave}`);
@@ -677,7 +781,7 @@ const CONFIG_POR_DEFECTO = {
 };
 let config = { ...CONFIG_POR_DEFECTO };
 // Las que se guardan en la tabla como JSON (el resto, como texto simple)
-const CLAVES_CONFIG_JSON = ['turnos_frente', 'avisos_ocultos', 'ventana_novedades', 'motivos_frente', 'pausa_reservas', 'reglas_espacios', 'textos_pagina', 'anuncio', 'plantillas_correo', 'legal_terminos', 'legal_privacidad', 'avisos_destinatarios', 'respuestas_listas'];
+const CLAVES_CONFIG_JSON = ['espacios_def', 'turnos_frente', 'avisos_ocultos', 'ventana_novedades', 'motivos_frente', 'pausa_reservas', 'reglas_espacios', 'textos_pagina', 'anuncio', 'plantillas_correo', 'legal_terminos', 'legal_privacidad', 'avisos_destinatarios', 'respuestas_listas'];
 const LIMITES_NOVEDADES = { titulo: 80, intro: 600, bloques: 6, bloqueTitulo: 60, bloqueTexto: 400, cierre: 600 };
 
 // Valida cada valor de configuración. Devuelve el valor normalizado o lanza un Error con un
@@ -766,10 +870,11 @@ const VALIDADORES_CONFIG = {
   respuestas_listas: validarRespuestasListas,
   legal_terminos: valor => validarDocumentoLegal(valor),
   legal_privacidad: valor => validarDocumentoLegal(valor),
+  espacios_def: validarEspaciosDef,
   avisos_ocultos(valor) {
     if (!Array.isArray(valor)) throw new Error('avisos_ocultos tiene que ser una lista');
     const ids = [...new Set(valor.map(Number))];
-    if (ids.some(id => ![1, 3].includes(id))) throw new Error('avisos_ocultos solo admite el Frente y el Altillo');
+    if (ids.some(id => !espacioConfigurado(id))) throw new Error('avisos_ocultos tiene un espacio que no existe');
     return ids.sort();
   },
   ventana_novedades(valor) {
@@ -814,8 +919,28 @@ async function cargarConfiguracion() {
     .select('clave, valor')
     .in('clave', Object.keys(VALIDADORES_CONFIG));
   if (error) throw error;
+  // Los nombres de los espacios (tabla espacios) y los espacios creados desde el panel van primero:
+  // las reglas y los avisos se validan contra la lista de espacios que existen
+  const { data: filasEspacios, error: errorEspacios } = await supabase.from('espacios').select('id, nombre');
+  if (!errorEspacios && filasEspacios && filasEspacios.length) {
+    nombresEspacios = {
+      ...NOMBRES_ESPACIOS_DE_SIEMPRE,
+      ...Object.fromEntries(filasEspacios.filter(e => e.nombre).map(e => [Number(e.id), String(e.nombre)]))
+    };
+  }
+  // Las cuentas del panel (no pasan por los validadores: se validan al guardarlas)
+  const { data: filaUsuarios, error: errorUsuarios } = await supabase.from('configuracion').select('valor').eq('clave', CLAVE_USUARIOS).maybeSingle();
+  if (!errorUsuarios) usuariosPanel = leerUsuariosPanel(filaUsuarios && filaUsuarios.valor);
+  const filaDef = (data || []).find(f => f.clave === 'espacios_def');
+  try {
+    espaciosDef = filaDef ? validarEspaciosDef(JSON.parse(filaDef.valor)) : {};
+  } catch (err) {
+    console.error('⚠️ Configuración "espacios_def" inválida en la base, se ignoran los espacios nuevos:', err.message);
+    espaciosDef = {};
+  }
   const nueva = { ...CONFIG_POR_DEFECTO };
   (data || []).forEach(({ clave, valor }) => {
+    if (clave === 'espacios_def') return;
     try {
       nueva[clave] = VALIDADORES_CONFIG[clave](CLAVES_CONFIG_JSON.includes(clave) ? JSON.parse(valor) : valor);
     } catch (err) {
@@ -858,15 +983,54 @@ function listaTurnosFrenteTexto() {
   return config.turnos_frente.map(t => `${t.nombre} (${t.inicio}-${t.fin})`).join(', ');
 }
 
+// Lo mismo para cualquier espacio que se reserve por turnos ('' si se reserva por bloques)
+function nombreTurno(espacioId, horaInicioHHMM, horaFinHHMM) {
+  const def = defEspacio(espacioId);
+  if (def.horario !== 'turnos') return '';
+  const turno = def.turnos.find(t => t.inicio === horaInicioHHMM && t.fin === horaFinHHMM);
+  return turno ? turno.nombre : '';
+}
+function listaTurnosTexto(espacioId) {
+  return (defEspacio(espacioId).turnos || []).map(t => `${t.nombre} (${t.inicio}-${t.fin})`).join(', ');
+}
+
 function enlaceWhatsappFrente() {
   return `https://wa.me/${config.contacto_whatsapp_frente}`;
+}
+function enlaceWhatsapp(espacioId) {
+  return `https://wa.me/${defEspacio(espacioId).contacto_whatsapp}`;
+}
+
+// Revisa el horario y el motivo de una reserva según cómo se reserva el espacio (turnos o bloques).
+// Devuelve el mensaje de error para la persona, o null si está bien. `motivoLibre`: las reservas
+// que carga un moderador pueden llevar cualquier motivo.
+function errorDeHorarioYMotivo(espacioId, horaInicio, horaFin, motivo, { motivoLibre = false } = {}) {
+  const def = defEspacio(espacioId);
+  const nombre = getEspacioNombre(espacioId);
+  const [hI, mI] = horaInicio.split(':').map(Number);
+  const [hF, mF] = horaFin.split(':').map(Number);
+  const inicioMin = hI * 60 + mI, finMin = hF * 60 + mF;
+  if (def.horario === 'turnos') {
+    // Solo los turnos fijos del espacio: no es una duración libre
+    if (!nombreTurno(espacioId, horaInicio, horaFin)) return `Turno inválido para ${nombre}. Los turnos son: ${listaTurnosTexto(espacioId)}`;
+  } else {
+    // Bloques de 1 hora, solo horas completas (CEQ-04)
+    if (mI !== 0 || mF !== 0) return `El ${nombre} se reserva en bloques de horas completas (por ejemplo, 09:00 a 11:00)`;
+    const duracionHoras = (finMin - inicioMin) / 60;
+    if (duracionHoras < 1 || duracionHoras > def.max_horas) return `La duración debe ser entre 1 y ${def.max_horas} horas`;
+    if (inicioMin < def.hora_desde * 60 || finMin > def.hora_hasta * 60) {
+      return `Horario fuera de rango (${String(def.hora_desde).padStart(2, '0')}:00-${def.hora_hasta}:00)`;
+    }
+  }
+  if (!motivoLibre && def.motivos.length && !def.motivos.includes(String(motivo).trim())) return 'Elegí el motivo de la lista';
+  return null;
 }
 
 // Devuelve el HTML de la línea de contacto a mostrarle al usuario según el espacio.
 // Frente: email de contacto + WhatsApp. Altillo: solo el email general del moderador.
 // A quién responde la persona que reservó: Frente -> su contacto (configurable); el resto -> correo general
 function correoRespuesta(espacio_id) {
-  return Number(espacio_id) === 3 ? config.contacto_email_frente : CORREO_CONTACTO;
+  return defEspacio(espacio_id).contacto_email || CORREO_CONTACTO;
 }
 
 // Correo de la persona que reservó ("celular | email"), para que el moderador le responda directo
@@ -876,10 +1040,10 @@ function correoDeContacto(contacto) {
 }
 
 function getContactoLineaHtml(espacio_id) {
-  if (Number(espacio_id) === 3) {
-    return `${escapeHtml(config.contacto_email_frente)} o por <a href="${enlaceWhatsappFrente()}">WhatsApp</a>`;
+  if (defEspacio(espacio_id).contacto_whatsapp) {
+    return `${escapeHtml(correoRespuesta(espacio_id))} o por <a href="${enlaceWhatsapp(espacio_id)}">WhatsApp</a>`;
   }
-  return CORREO_CONTACTO;
+  return escapeHtml(correoRespuesta(espacio_id));
 }
 
 // Función helper para enviar emails vía la API de Brevo.
@@ -1369,8 +1533,8 @@ function validarDatosDeReserva(body) {
 }
 
 function getEspacioNombre(id) {
-  const espacios = { 1: 'Altillo', 2: 'Sala de Reuniones', 3: 'Frente' };
-  return espacios[id] || 'Espacio ' + id;
+  // Los nombres salen de la tabla espacios (se leen con la configuración)
+  return nombresEspacios[Number(id)] || 'Espacio ' + id;
 }
 
 // Frente reserva por turnos fijos con nombre propio (Desayuno/Almuerzo/Merienda), no por
@@ -1382,11 +1546,8 @@ function getEspacioNombre(id) {
 // se muestra solo con su rango horario.
 function descripcionHorario(espacioId, horaInicioHHMM, horaFinHHMM) {
   const rango = `${horaInicioHHMM} - ${horaFinHHMM}`;
-  if (Number(espacioId) === 3) {
-    const nombreTurno = nombreTurnoFrente(horaInicioHHMM, horaFinHHMM);
-    if (nombreTurno) return `${nombreTurno} (${rango})`;
-  }
-  return rango;
+  const turno = nombreTurno(espacioId, horaInicioHHMM, horaFinHHMM);
+  return turno ? `${turno} (${rango})` : rango;
 }
 
 // Regla de cancelación para los correos (la misma que aplica /api/cancelar-por-codigo): gratis
@@ -1515,7 +1676,69 @@ const verifyAdminToken = async (req, res, next) => {
   }
 
   // Los tokens anteriores a este cambio no traen rol: son del admin normal
-  req.admin = { ...decoded, rol: decoded.rol === 'superadmin' ? 'superadmin' : 'admin' };
+  const rol = decoded.rol === 'superadmin' ? 'superadmin' : 'admin';
+  // Qué espacios ve la cuenta. El admin supremo, todos. La contraseña compartida de siempre (cuenta
+  // "moderadores"), el Frente y el Altillo. Las cuentas creadas desde el panel, los suyos: se leen
+  // de la cuenta en cada pedido, así un cambio (o borrarla) vale al instante.
+  let cuenta = null;
+  if (rol === 'admin' && decoded.u && !USUARIOS_RESERVADOS.includes(decoded.u)) {
+    cuenta = usuariosPanel.find(c => c.usuario === decoded.u);
+    if (!cuenta || (cuenta.v || 1) !== (decoded.uv || 1)) {
+      return res.status(401).json({ error: 'La sesión fue cerrada por un administrador' });
+    }
+  }
+  req.admin = {
+    ...decoded, rol,
+    usuario: rol === 'superadmin' ? 'supremo' : (cuenta ? cuenta.usuario : 'moderadores'),
+    nombre: rol === 'superadmin' ? 'Admin supremo' : (cuenta ? cuenta.nombre : 'Moderadores'),
+    espacios: rol === 'superadmin' ? null : (cuenta ? cuenta.espacios.filter(espacioConfigurado) : [3, 1]),
+    general: rol === 'superadmin' || !cuenta || cuenta.general === true
+  };
+  next();
+};
+
+// ========== CUENTAS DEL PANEL (admin supremo > Cuentas) ==========
+// Cada cuenta tiene usuario, contraseña (cifrada con bcrypt) y los espacios que maneja: al entrar ve
+// el panel solo con lo de esos espacios. "general": además puede habilitar meses y ver los reportes
+// y los correos que no salieron, que no son de un espacio. Se guardan en la tabla configuracion
+// (clave usuarios_panel) y no van en las copias de seguridad, igual que la contraseña de los admins.
+// Dos cuentas existen siempre y no se guardan ahí: "supremo" (SUPERADMIN_PASSWORD_HASH) y
+// "moderadores" (la contraseña compartida de siempre, con el Frente y el Altillo).
+const CLAVE_USUARIOS = 'usuarios_panel';
+const USUARIOS_RESERVADOS = ['supremo', 'moderadores', 'admin', 'superadmin'];
+const MAX_USUARIOS = 30;
+let usuariosPanel = [];
+
+function leerUsuariosPanel(texto) {
+  let lista = [];
+  try { lista = JSON.parse(texto || '[]'); } catch (e) { lista = []; }
+  return (Array.isArray(lista) ? lista : []).filter(c => c && typeof c.usuario === 'string' && /^\$2[aby]\$/.test(String(c.hash)))
+    .map(c => ({
+      usuario: c.usuario, nombre: String(c.nombre || c.usuario), hash: c.hash,
+      espacios: [...new Set((Array.isArray(c.espacios) ? c.espacios : []).map(Number))].filter(id => Number.isInteger(id) && id > 0),
+      general: c.general === true, v: Number(c.v) || 1
+    }));
+}
+
+// Los espacios que puede ver y tocar quien hizo el pedido
+function espaciosDe(req) {
+  return req.admin.rol === 'superadmin' ? idsEspacios() : (req.admin.espacios || []);
+}
+function puedeConEspacio(req, espacioId) {
+  return req.admin.rol === 'superadmin' || espaciosDe(req).includes(Number(espacioId));
+}
+// Limita una consulta a los espacios de la cuenta (el admin supremo ve todo, también lo viejo)
+function soloMisEspacios(req, consulta) {
+  if (req.admin.rol === 'superadmin') return consulta;
+  const ids = espaciosDe(req);
+  return consulta.in('espacio_id', ids.length ? ids : [-1]);
+}
+function sinPermisoDeEspacio(res) {
+  return res.status(403).json({ error: 'Tu cuenta no maneja ese espacio' });
+}
+// Para lo que no es de un espacio (meses, reportes y correos que no salieron)
+const verifyGeneral = (req, res, next) => {
+  if (!req.admin.general) return res.status(403).json({ error: 'Tu cuenta no tiene permiso para esto' });
   next();
 };
 
@@ -1531,7 +1754,13 @@ const verifySuperAdmin = (req, res, next) => {
 // Registro de actividad del panel (admin supremo > Avanzado > Actividad): qué se hizo y
 // cuándo, sin datos personales. Se llama SIN await y nunca lanza error: si falla, solo se
 // loguea en Render, y la acción principal (cancelar, bloquear, etc.) sigue igual.
-async function registrarActividad(rol, accion, detalle = '') {
+async function registrarActividad(quien, accion, detalle = '') {
+  // quien: el rol ('admin', 'superadmin', 'sistema', '-') o la cuenta del pedido (req.admin). Si es
+  // una cuenta creada desde el panel, su usuario queda al final del detalle.
+  const rol = quien && typeof quien === 'object' ? quien.rol : quien;
+  if (quien && typeof quien === 'object' && quien.usuario && !USUARIOS_RESERVADOS.includes(quien.usuario)) {
+    detalle = (String(detalle || '') + ' · cuenta: ' + quien.usuario).replace(/^ · /, '');
+  }
   try {
     const { error } = await supabase
       .from('registro_actividad')
@@ -1708,9 +1937,23 @@ app.post('/api/login', loginLimiter, async (req, res) => {
       return res.status(429).json({ error: 'Por seguridad, el inicio de sesión está cerrado por un rato: hubo muchos intentos con una contraseña equivocada. Probá de nuevo en una hora.' });
     }
 
-    // Validar contraseña: primero la del admin supremo (si está configurada), después la normal
-    const esSuperadmin = SUPERADMIN_PASSWORD_HASH !== '' && await bcrypt.compare(password, SUPERADMIN_PASSWORD_HASH);
-    const passwordValida = esSuperadmin || await bcrypt.compare(password, await hashClaveAdmin());
+    // Con usuario: "supremo", "moderadores" (la contraseña compartida de siempre) o una cuenta creada
+    // desde el panel. Sin usuario (páginas anteriores): primero la del admin supremo, después la normal.
+    const usuario = typeof req.body.usuario === 'string' ? req.body.usuario.trim().toLowerCase().slice(0, 40) : '';
+    const cuenta = usuario && !USUARIOS_RESERVADOS.includes(usuario) ? usuariosPanel.find(c => c.usuario === usuario) : null;
+    let esSuperadmin = false;
+    let passwordValida = false;
+    if (cuenta) {
+      passwordValida = await bcrypt.compare(password, cuenta.hash);
+    } else if (usuario && !USUARIOS_RESERVADOS.includes(usuario)) {
+      // Usuario que no existe: se compara igual contra algo, para que tarde lo mismo que uno que existe
+      await bcrypt.compare(password, ADMIN_PASSWORD_HASH);
+    } else {
+      const probarSupremo = usuario === '' || usuario === 'supremo' || usuario === 'superadmin';
+      const probarModeradores = usuario === '' || usuario === 'moderadores' || usuario === 'admin';
+      esSuperadmin = probarSupremo && SUPERADMIN_PASSWORD_HASH !== '' && await bcrypt.compare(password, SUPERADMIN_PASSWORD_HASH);
+      passwordValida = esSuperadmin || (probarModeradores && await bcrypt.compare(password, await hashClaveAdmin()));
+    }
 
     if (!passwordValida) {
       console.warn(`⚠️ Intento de login fallido a las ${new Date().toISOString()}`);
@@ -1731,7 +1974,8 @@ app.post('/api/login', loginLimiter, async (req, res) => {
 
     // Generar JWT (válido por 8 horas). Lleva el rol y la versión de sesiones vigente.
     const token = jwt.sign(
-      { adminId: 'admin', rol, v: await obtenerVersionSesiones(), timestamp: Date.now() },
+      { adminId: 'admin', rol, v: await obtenerVersionSesiones(), timestamp: Date.now(),
+        ...(cuenta ? { u: cuenta.usuario, uv: cuenta.v || 1 } : {}) },
       JWT_SECRET,
       { expiresIn: '8h', algorithm: 'HS256' }
     );
@@ -1767,8 +2011,8 @@ app.post('/api/login', loginLimiter, async (req, res) => {
       path: '/'
     });
     
-    console.log(`✅ Login exitoso (${rol}) a las ${new Date().toISOString()}`);
-    registrarActividad(rol, 'Inicio de sesión');
+    console.log(`✅ Login exitoso (${rol}${cuenta ? `, cuenta ${cuenta.usuario}` : ''}) a las ${new Date().toISOString()}`);
+    registrarActividad(rol, 'Inicio de sesión', cuenta ? `cuenta: ${cuenta.usuario}` : '');
     res.json({
       mensaje: 'Sesión iniciada correctamente',
       expiresIn: '8h',
@@ -1805,7 +2049,11 @@ app.post('/api/logout', verificarCSRF, (req, res) => {
 // o el login al cargar la página, ya que el token ya no se puede leer desde el
 // JavaScript del cliente)
 app.get('/api/admin/verificar-sesion', verifyAdminToken, (req, res) => {
-  res.json({ ok: true, rol: req.admin.rol });
+  // Además del rol: la cuenta, los espacios que maneja (con su nombre) y si ve lo general
+  res.json({
+    ok: true, rol: req.admin.rol, usuario: req.admin.usuario, nombre: req.admin.nombre, general: req.admin.general,
+    espacios: espaciosDe(req).map(id => ({ id, nombre: getEspacioNombre(id) }))
+  });
 });
 
 // GET espacios (público): la página usa `publico` y `aviso` para saber qué espacios se
@@ -1978,7 +2226,18 @@ app.get('/api/configuracion', lecturaPublicaLimiter, (req, res) => {
     pausa_reservas: config.pausa_reservas.activa ? config.pausa_reservas : null,
     // Personalización: reglas de cada espacio, textos de la página (con los de siempre si no se
     // cambiaron) y la cinta de anuncios si está vigente
-    reglas: Object.fromEntries([3, 1].map(id => {
+    // Cómo se reserva cada espacio (los de siempre y los creados desde el panel): turnos o bloques,
+    // motivos, contacto y si se reserva solo a través de un moderador
+    espacios: Object.fromEntries(idsEspacios().map(id => {
+      const d = defEspacio(id);
+      return [id, {
+        nombre: getEspacioNombre(id), modo: d.modo, horario: d.horario,
+        ...(d.horario === 'turnos' ? { turnos: d.turnos } : { hora_desde: d.hora_desde, hora_hasta: d.hora_hasta, max_horas: d.max_horas }),
+        motivos: d.motivos, contacto: { email: d.contacto_email, whatsapp: d.contacto_whatsapp || null },
+        aviso_moderador: d.modo === 'moderador' ? mensajeSoloModerador(id) : null
+      }];
+    })),
+    reglas: Object.fromEntries(idsEspacios().map(id => {
       const r = reglaEspacio(id);
       return [id, {
         dias: r.dias, plazo_cancelacion_dias: r.plazo_cancelacion_dias, recordatorio: r.recordatorio, recordatorio_dias: r.recordatorio_dias,
@@ -2020,10 +2279,15 @@ app.post('/api/reservas', crearReservaLimiter, async (req, res) => {
     if (!espacioData) {
       return res.status(400).json({ error: 'Espacio inválido' });
     }
-    if (!espacioData.publico) {
+    if (!espacioData.publico || !espacioConfigurado(espacioIdNum)) {
       return res.status(400).json({ error: 'Ese espacio no se puede reservar por el momento' });
     }
-    
+    // Espacios que se reservan solo a través de un moderador: la página muestra el calendario y el
+    // cartel con el contacto, y la reserva la carga el moderador desde el panel
+    if (defEspacio(espacioIdNum).modo === 'moderador') {
+      return res.status(403).json({ error: mensajeSoloModerador(espacioIdNum), solo_moderador: true });
+    }
+
     // Validar formato de hora
     if (!/^\d{2}:\d{2}$/.test(hora_inicio) || !/^\d{2}:\d{2}$/.test(hora_fin)) {
       return res.status(400).json({ error: 'Formato de hora inválido' });
@@ -2044,36 +2308,18 @@ app.post('/api/reservas', crearReservaLimiter, async (req, res) => {
       return res.status(400).json({ error: 'La hora de inicio debe ser anterior a la hora de fin' });
     }
 
-    if (espacioIdNum === 3) {
-      // Frente: solo se permiten los turnos fijos de la configuración (por defecto Desayuno,
-      // Almuerzo y Merienda). No es una duración libre, por eso no se valida como rango 1-3h.
-      if (!nombreTurnoFrente(hora_inicio, hora_fin)) {
-        return res.status(400).json({ error: `Turno inválido para Frente. Los turnos son: ${listaTurnosFrenteTexto()}` });
-      }
-      if (!config.motivos_frente.includes(String(motivo).trim())) {
-        return res.status(400).json({ error: 'Elegí el motivo de la lista' });
-      }
-    } else {
-      // Altillo: bloques de 1 hora entre las 07:00 y las 19:00, de 1 a 2 horas. Solo horas
-      // completas (CEQ-04): el calendario de la página trabaja por horas enteras.
-      if (horaIniM !== 0 || horaFinM !== 0) {
-        return res.status(400).json({ error: 'El Altillo se reserva en bloques de horas completas (por ejemplo, 09:00 a 11:00)' });
-      }
-      const duracionHoras = (finMin - inicioMin) / 60;
-      if (duracionHoras < 1 || duracionHoras > config.altillo_max_horas) {
-        return res.status(400).json({ error: `La duración debe ser entre 1 y ${config.altillo_max_horas} horas` });
-      }
-
-      if (inicioMin < config.altillo_hora_desde * 60 || finMin > config.altillo_hora_hasta * 60) {
-        return res.status(400).json({ error: `Horario fuera de rango (${String(config.altillo_hora_desde).padStart(2, '0')}:00-${config.altillo_hora_hasta}:00)` });
-      }
+    // Turnos fijos (como el Frente) o bloques de 1 hora (como el Altillo), y el motivo de la lista
+    // si el espacio tiene una: lo dice la definición del espacio
+    const errorHorario = errorDeHorarioYMotivo(espacioIdNum, hora_inicio, hora_fin, motivo);
+    if (errorHorario) {
+      return res.status(400).json({ error: errorHorario });
     }
 
     // Acompañantes: cuántos permite el espacio (Reglas; por defecto solo el Altillo, hasta 4)
     const maxAcompanantes = reglaEspacio(espacioIdNum).acompanantes_max;
     const pedidos = req.body.acompanantes;
     if (maxAcompanantes === 0 && pedidos != null && !(Array.isArray(pedidos) && pedidos.length === 0)) {
-      const conAcompanantes = [3, 1].filter(id => reglaEspacio(id).acompanantes_max > 0).map(getEspacioNombre);
+      const conAcompanantes = idsEspacios().filter(id => reglaEspacio(id).acompanantes_max > 0).map(getEspacioNombre);
       return res.status(400).json({ error: conAcompanantes.length
         ? `Los acompañantes se anotan solo en las reservas del ${conAcompanantes.join(' y del ')}`
         : 'Por el momento no se anotan acompañantes en las reservas' });
@@ -2139,7 +2385,7 @@ app.post('/api/reservas', crearReservaLimiter, async (req, res) => {
     // terminado (a las 11:30 todavía se puede tomar el bloque de las 11:00, a las 12:00 ya no).
     if (fechaReserva.getTime() === hoy.getTime()) {
       const minutosActuales = horaActualEnAsuncionEnMinutos();
-      const limite = espacioIdNum === 3 ? inicioMin : inicioMin + 60;
+      const limite = defEspacio(espacioIdNum).horario === 'turnos' ? inicioMin : inicioMin + 60;
       if (limite <= minutosActuales) {
         return res.status(400).json({ error: textoPagina('error_horario_pasado') });
       }
@@ -2229,6 +2475,7 @@ app.post('/api/reservas', crearReservaLimiter, async (req, res) => {
     // que Gmail no junte en una conversación dos reservas distintas con el mismo asunto. Nombre,
     // motivo y contacto los escribe cualquier persona: correoDeReserva los escapa (SEC-006).
     const reservaId = nuevaReserva[0].id;
+    guardarHuellaDeRed(reservaId, req); // para el detector de abusos (no guarda la dirección)
 
     // Enviar email al usuario (si existe email)
     const correos = [];
@@ -2462,7 +2709,7 @@ function datosParaCancelar(reserva) {
     se_puede_cancelar: reserva.estado === 'activa' && !yaPaso && !plazoVencido,
     plazo_vencido: reserva.estado === 'activa' && !yaPaso && plazoVencido,
     plazo_dias: plazo,
-    whatsapp: Number(reserva.espacio_id) === 3 ? config.contacto_whatsapp_frente : null,
+    whatsapp: defEspacio(reserva.espacio_id).contacto_whatsapp || null,
     // A quién escribir si venció el plazo para cancelar (Frente: el contacto del Frente). Solo en
     // ese caso: si no, no hace falta mandar ningún correo
     correo_contacto: plazoVencido ? correoRespuesta(reserva.espacio_id) : null
@@ -2552,9 +2799,11 @@ async function mesesSinLugar(espacioId) {
     ocupadoPorDia.get(o.fecha).push([minutos(o.hora_inicio), minutos(o.hora_fin)]);
   }
   // Los turnos del Frente, o los bloques de 1 hora del Altillo
-  const franjas = Number(espacioId) === 3
-    ? config.turnos_frente.map(t => [minutos(t.inicio), minutos(t.fin)])
-    : Array.from({ length: config.altillo_hora_hasta - config.altillo_hora_desde }, (_, i) => [(config.altillo_hora_desde + i) * 60, (config.altillo_hora_desde + i + 1) * 60]);
+  const def = defEspacio(espacioId);
+  const porTurnos = def.horario === 'turnos';
+  const franjas = porTurnos
+    ? def.turnos.map(t => [minutos(t.inicio), minutos(t.fin)])
+    : Array.from({ length: def.hora_hasta - def.hora_desde }, (_, i) => [(def.hora_desde + i) * 60, (def.hora_desde + i + 1) * 60]);
   const regla = reglaEspacio(espacioId);
   const ahoraMinutos = horaActualEnAsuncionEnMinutos();
   const llenos = [];
@@ -2573,7 +2822,7 @@ async function mesesSinLugar(espacioId) {
       const ocupado = ocupadoPorDia.get(fecha) || [];
       hayLugar = franjas.some(([inicio, fin]) => {
         // Hoy: el turno del Frente que ya empezó, o el bloque del Altillo que ya terminó, no cuentan
-        if (faltan === 0 && (Number(espacioId) === 3 ? inicio <= ahoraMinutos : inicio + 60 <= ahoraMinutos)) return false;
+        if (faltan === 0 && (porTurnos ? inicio <= ahoraMinutos : inicio + 60 <= ahoraMinutos)) return false;
         return !ocupado.some(([oInicio, oFin]) => oInicio < fin && inicio < oFin);
       });
     }
@@ -2619,8 +2868,12 @@ app.post('/api/lista-espera', listaEsperaLimiter, async (req, res) => {
       return res.status(400).json({ error: 'Escribí tu nombre' });
     }
     const espacioIdNum = Number(espacio_id);
-    if (![1, 3].includes(espacioIdNum)) {
+    if (!espacioConfigurado(espacioIdNum)) {
       return res.status(400).json({ error: 'Espacio inválido' });
+    }
+    // En los espacios que se reservan a través de un moderador no hay lista de espera
+    if (defEspacio(espacioIdNum).modo === 'moderador') {
+      return res.status(400).json({ error: mensajeSoloModerador(espacioIdNum) });
     }
     // El mes tiene que estar habilitado y no haber terminado
     const mesTexto = typeof mes === 'string' ? mes : '';
@@ -2714,7 +2967,7 @@ app.post('/api/lista-espera/baja', cancelarLimiter, async (req, res) => {
     const correo = String(e || '').trim().toLowerCase();
     const esperado = Buffer.from(tokenBajaListaEspera(espacioIdNum, correo));
     const recibido = Buffer.from(typeof t === 'string' ? t : '');
-    if (![1, 3].includes(espacioIdNum) || !EMAIL_REGEX.test(correo) ||
+    if (!Number.isInteger(espacioIdNum) || espacioIdNum < 1 || !EMAIL_REGEX.test(correo) ||
         esperado.length !== recibido.length || !crypto.timingSafeEqual(esperado, recibido)) {
       return res.status(400).json({ error: 'El enlace no es válido. Copialo completo desde el correo.' });
     }
@@ -2781,7 +3034,7 @@ async function avisarListaEspera(reserva) {
       const dia = fechaLarga(reserva.fecha); // "lunes 02/11/2026"
       const diaCorto = dia.replace(/\/\d{4}$/, ''); // "lunes 02/11"
       // {turno}: el nombre del turno en el Frente, "09:00 a 11:00" en el Altillo
-      const turno = (Number(reserva.espacio_id) === 3 && nombreTurnoFrente(inicio, fin)) || `${inicio} a ${fin}`;
+      const turno = nombreTurno(reserva.espacio_id, inicio, fin) || `${inicio} a ${fin}`;
       // Texto: plantilla "Lista de espera: se liberó un lugar" (admin supremo > Correos)
       const aviso = correoListaEspera('lista_espera_aviso', {
         saludo: saludoCorreo(tomadas[i].nombre), espacio, mes: nombreDelMes(mesLiberado),
@@ -2875,9 +3128,9 @@ app.get('/api/admin/reservas', verifyAdminToken, async (req, res) => {
   try {
     // Todas las reservas, de a 1000 (antes se pedían en un solo pedido y Supabase corta en 1000:
     // al pasar ese número, el panel y el Excel iban a dejar de ver las más viejas sin avisar)
-    const data = await leerTodasLasFilas(() => supabase
+    const data = await leerTodasLasFilas(() => soloMisEspacios(req, supabase
       .from('reservas')
-      .select('*')
+      .select('*'))
       .order('fecha', { ascending: false })
       .order('id', { ascending: false }));
 
@@ -2891,9 +3144,9 @@ app.get('/api/admin/reservas', verifyAdminToken, async (req, res) => {
 // del endpoint público /api/bloqueos que solo expone lo necesario para pintar el calendario)
 app.get('/api/admin/bloqueos', verifyAdminToken, async (req, res) => {
   try {
-    const { data, error } = await supabase
+    const { data, error } = await soloMisEspacios(req, supabase
       .from('bloqueos')
-      .select('*')
+      .select('*'))
       .order('fecha', { ascending: false });
 
     if (error) throw error;
@@ -2932,7 +3185,7 @@ app.get('/api/admin/meses-habilitados', verifyAdminToken, async (req, res) => {
 });
 
 // POST habilitar/deshabilitar un mes puntual (admin)
-app.post('/api/admin/meses-habilitados', verifyAdminToken, verificarCSRF, async (req, res) => {
+app.post('/api/admin/meses-habilitados', verifyAdminToken, verifyGeneral, verificarCSRF, async (req, res) => {
   try {
     const { anio, mes, habilitado } = req.body;
     const anioNum = parseInt(anio);
@@ -2987,7 +3240,7 @@ app.post('/api/admin/meses-habilitados', verifyAdminToken, verificarCSRF, async 
       );
 
     if (error) throw error;
-    registrarActividad(req.admin.rol, habilitado ? 'Habilitó un mes' : 'Deshabilitó un mes', `${String(mesNum).padStart(2, '0')}/${anioNum}`);
+    registrarActividad(req.admin, habilitado ? 'Habilitó un mes' : 'Deshabilitó un mes', `${String(mesNum).padStart(2, '0')}/${anioNum}`);
     res.json({ mensaje: 'Actualizado correctamente' });
   } catch (error) {
     manejarError(res, error);
@@ -3005,7 +3258,7 @@ function fechaHoraAsuncionTexto(fecha) {
 
 // POST programar (o cancelar, con abrir_en: null) la apertura automática de un mes.
 // A esa hora exacta el mes empieza a contar como habilitado (ver mesEstaAbierto).
-app.post('/api/admin/meses-habilitados/programar', verifyAdminToken, verificarCSRF, async (req, res) => {
+app.post('/api/admin/meses-habilitados/programar', verifyAdminToken, verifyGeneral, verificarCSRF, async (req, res) => {
   try {
     const { anio, mes, abrir_en } = req.body || {};
     const anioNum = parseInt(anio);
@@ -3024,7 +3277,7 @@ app.post('/api/admin/meses-habilitados/programar', verifyAdminToken, verificarCS
         .update({ abrir_en: null, updated_at: new Date().toISOString() })
         .eq('anio', anioNum).eq('mes', mesNum).eq('habilitado', false);
       if (error) throw error;
-      registrarActividad(req.admin.rol, 'Canceló la apertura programada de un mes', etiquetaMes);
+      registrarActividad(req.admin, 'Canceló la apertura programada de un mes', etiquetaMes);
       return res.json({ mensaje: 'Apertura programada cancelada' });
     }
 
@@ -3073,7 +3326,7 @@ app.post('/api/admin/meses-habilitados/programar', verifyAdminToken, verificarCS
         { onConflict: 'anio,mes' }
       );
     if (error) throw error;
-    registrarActividad(req.admin.rol, 'Programó la apertura de un mes', `${etiquetaMes} · se abre el ${fechaHoraAsuncionTexto(momento)}`);
+    registrarActividad(req.admin, 'Programó la apertura de un mes', `${etiquetaMes} · se abre el ${fechaHoraAsuncionTexto(momento)}`);
     res.json({ mensaje: 'Apertura programada', abrir_en: momento.toISOString() });
   } catch (error) {
     manejarError(res, error);
@@ -3091,9 +3344,10 @@ app.post('/api/bloqueos', verifyAdminToken, verificarCSRF, async (req, res) => {
     if (!esFechaValida(fecha) || typeof hora_inicio !== 'string' || typeof hora_fin !== 'string') {
       return res.status(400).json({ error: 'Fecha inválida' });
     }
-    if (![1, 3].includes(Number(espacio_id))) {
+    if (!espacioConfigurado(espacio_id)) {
       return res.status(400).json({ error: 'Espacio inválido' });
     }
+    if (!puedeConEspacio(req, espacio_id)) return sinPermisoDeEspacio(res);
 
     // VAL-003: un bloqueo en una fecha que ya pasó (en Paraguay) no tiene efecto y solo
     // ensucia la lista de bloqueos del panel. Hoy sí se permite.
@@ -3118,10 +3372,7 @@ app.post('/api/bloqueos', verifyAdminToken, verificarCSRF, async (req, res) => {
     if (!isBloqueCompleto) {
       // El rango sale de la configuración de cada espacio (CEQ-04): el Frente, de sus turnos;
       // el Altillo, de 07:00 a 19:00. Antes había un tope fijo de 18:00 para los dos.
-      const aMin = hhmm => { const [h, m] = hhmm.split(':').map(Number); return h * 60 + m; };
-      const [desdeMin, hastaMin] = Number(espacio_id) === 3
-        ? [Math.min(...config.turnos_frente.map(t => aMin(t.inicio))), Math.max(...config.turnos_frente.map(t => aMin(t.fin)))]
-        : [config.altillo_hora_desde * 60, config.altillo_hora_hasta * 60];
+      const [desdeMin, hastaMin] = rangoDelEspacio(espacio_id);
       const texto = m => `${String(Math.floor(m / 60)).padStart(2, '0')}:${String(m % 60).padStart(2, '0')}`;
       const iniMin = horaI * 60 + minI;
       const finMin = horaF * 60 + minF;
@@ -3190,7 +3441,7 @@ app.post('/api/bloqueos', verifyAdminToken, verificarCSRF, async (req, res) => {
       throw error;
     }
     
-    registrarActividad(req.admin.rol, 'Creó un bloqueo',
+    registrarActividad(req.admin, 'Creó un bloqueo',
       `${getEspacioNombre(Number(espacio_id))}, ${fechaDMY(fecha)}, ${isBloqueCompleto ? 'todo el día' : `${hora_inicio.substring(0, 5)} - ${hora_fin.substring(0, 5)}`}`);
     res.status(201).json({ mensaje: 'Bloqueo creado' });
   } catch (error) {
@@ -3207,6 +3458,9 @@ app.delete('/api/bloqueos/:id', verifyAdminToken, verificarCSRF, async (req, res
       return res.status(400).json({ error: 'ID inválido' });
     }
     
+    const { data: previo, error: errorPrevio } = await supabase.from('bloqueos').select('espacio_id').eq('id', id).maybeSingle();
+    if (errorPrevio) throw errorPrevio;
+    if (previo && !puedeConEspacio(req, previo.espacio_id)) return sinPermisoDeEspacio(res);
     const { data, error } = await supabase
       .from('bloqueos')
       .delete()
@@ -3218,7 +3472,7 @@ app.delete('/api/bloqueos/:id', verifyAdminToken, verificarCSRF, async (req, res
       return res.status(404).json({ error: 'Bloqueo no encontrado' });
     }
     const b = data[0];
-    registrarActividad(req.admin.rol, 'Eliminó un bloqueo', `${getEspacioNombre(b.espacio_id)}, ${fechaDMY(b.fecha)}`);
+    registrarActividad(req.admin, 'Eliminó un bloqueo', `${getEspacioNombre(b.espacio_id)}, ${fechaDMY(b.fecha)}`);
     res.json({ mensaje: 'Bloqueo eliminado' });
   } catch (error) {
     manejarError(res, error);
@@ -3246,9 +3500,7 @@ function validarHorarioBloqueo(espacioId, horaInicio, horaFin) {
   const aMin = hhmm => { const [h, m] = hhmm.split(':').map(Number); return h * 60 + m; };
   const ini = aMin(horaInicio), fin = aMin(horaFin);
   if (ini === 0 && fin === 23 * 60 + 59) return { completo: true, ini, fin };
-  const [desde, hasta] = Number(espacioId) === 3
-    ? [Math.min(...config.turnos_frente.map(t => aMin(t.inicio))), Math.max(...config.turnos_frente.map(t => aMin(t.fin)))]
-    : [config.altillo_hora_desde * 60, config.altillo_hora_hasta * 60];
+  const [desde, hasta] = rangoDelEspacio(espacioId);
   const texto = m => `${String(Math.floor(m / 60)).padStart(2, '0')}:${String(m % 60).padStart(2, '0')}`;
   if (ini < desde || fin > hasta || ini >= fin) throw new Error(`Horario inválido (${texto(desde)}-${texto(hasta)})`);
   return { completo: false, ini, fin };
@@ -3258,7 +3510,8 @@ app.post('/api/bloqueos/lote', verifyAdminToken, verificarCSRF, async (req, res)
   try {
     const { espacio_id, desde, hasta, dias, hora_inicio, hora_fin, motivo, confirmar } = req.body || {};
     const espacioIdNum = Number(espacio_id);
-    if (![1, 3].includes(espacioIdNum)) return res.status(400).json({ error: 'Espacio inválido' });
+    if (!espacioConfigurado(espacioIdNum)) return res.status(400).json({ error: 'Espacio inválido' });
+    if (!puedeConEspacio(req, espacioIdNum)) return sinPermisoDeEspacio(res);
     if (!esFechaValida(desde) || !esFechaValida(hasta)) return res.status(400).json({ error: 'Fechas inválidas' });
     if (desde > hasta) return res.status(400).json({ error: 'La fecha "desde" tiene que ser anterior a "hasta"' });
     if (new Date(desde + 'T00:00:00Z') < hoyEnAsuncion()) return res.status(400).json({ error: 'No se puede bloquear una fecha que ya pasó' });
@@ -3324,7 +3577,7 @@ app.post('/api/bloqueos/lote', verifyAdminToken, verificarCSRF, async (req, res)
       }
       throw error;
     }
-    registrarActividad(req.admin.rol, 'Creó bloqueos de varios días',
+    registrarActividad(req.admin, 'Creó bloqueos de varios días',
       `${getEspacioNombre(espacioIdNum)}, ${aCrear.length} día(s) del ${fechaDMY(aCrear[0])} al ${fechaDMY(aCrear[aCrear.length - 1])}, ${horario.completo ? 'todo el día' : `${hora_inicio.substring(0, 5)} - ${hora_fin.substring(0, 5)}`}`);
     res.status(201).json({ mensaje: `Se bloquearon ${aCrear.length} día(s)`, lote, creados: aCrear.length, conflictos, ya_bloqueadas: yaBloqueadas });
   } catch (error) {
@@ -3337,10 +3590,13 @@ app.delete('/api/bloqueos/lote/:lote', verifyAdminToken, verificarCSRF, async (r
   try {
     const { lote } = req.params;
     if (!/^[0-9a-f-]{36}$/i.test(lote)) return res.status(400).json({ error: 'Lote inválido' });
+    const { data: delLote, error: errorLote } = await supabase.from('bloqueos').select('espacio_id').eq('lote', lote).limit(1);
+    if (errorLote) throw errorLote;
+    if (delLote && delLote.length && !puedeConEspacio(req, delLote[0].espacio_id)) return sinPermisoDeEspacio(res);
     const { data, error } = await supabase.from('bloqueos').delete().eq('lote', lote).select('espacio_id, fecha');
     if (error) throw error;
     if (!data || data.length === 0) return res.status(404).json({ error: 'No se encontraron esos bloqueos' });
-    registrarActividad(req.admin.rol, 'Eliminó bloqueos de varios días', `${getEspacioNombre(data[0].espacio_id)}, ${data.length} día(s)`);
+    registrarActividad(req.admin, 'Eliminó bloqueos de varios días', `${getEspacioNombre(data[0].espacio_id)}, ${data.length} día(s)`);
     res.json({ mensaje: `Se eliminaron ${data.length} bloqueo(s)`, eliminados: data.length });
   } catch (error) {
     manejarError(res, error);
@@ -3369,9 +3625,12 @@ app.post('/api/admin/reservas', verifyAdminToken, verificarCSRF, async (req, res
 
     // Este endpoint es solo para Frente — la prioridad de la Comisión Directiva
     // aplica únicamente ahí, no tiene sentido para Altillo.
-    if (espacioIdNum !== 3) {
-      return res.status(400).json({ error: 'Este endpoint es solo para Frente' });
+    // Antes era solo para el Frente (prioridad de la Comisión). Ahora sirve para cualquier espacio
+    // que maneje la cuenta: es la forma de cargar las reservas de los espacios "solo por moderador".
+    if (!espacioConfigurado(espacioIdNum)) {
+      return res.status(400).json({ error: 'Espacio inválido' });
     }
+    if (!puedeConEspacio(req, espacioIdNum)) return sinPermisoDeEspacio(res);
 
     if (!/^\d{2}:\d{2}$/.test(hora_inicio) || !/^\d{2}:\d{2}$/.test(hora_fin)) {
       return res.status(400).json({ error: 'Formato de hora inválido' });
@@ -3392,8 +3651,16 @@ app.post('/api/admin/reservas', verifyAdminToken, verificarCSRF, async (req, res
       return res.status(400).json({ error: 'La hora de inicio debe ser anterior a la hora de fin' });
     }
 
-    if (!nombreTurnoFrente(hora_inicio, hora_fin)) {
-      return res.status(400).json({ error: `Turno inválido. Los turnos son: ${listaTurnosFrenteTexto()}` });
+    const errorHorario = errorDeHorarioYMotivo(espacioIdNum, hora_inicio, hora_fin, motivo, { motivoLibre: true });
+    if (errorHorario) {
+      return res.status(400).json({ error: errorHorario });
+    }
+    // Acompañantes, si el espacio los permite (Reglas)
+    let acompanantes;
+    try {
+      acompanantes = validarAcompanantes(req.body.acompanantes, reglaEspacio(espacioIdNum).acompanantes_max);
+    } catch (err) {
+      return res.status(400).json({ error: err.message });
     }
 
     // A diferencia del endpoint público, acá NO se chequea meses_habilitados — es
@@ -3403,13 +3670,13 @@ app.post('/api/admin/reservas', verifyAdminToken, verificarCSRF, async (req, res
     const hoy = hoyEnAsuncion();
     const fechaReserva = new Date(fecha + 'T00:00:00Z');
 
-    if (isNaN(fechaReserva.getTime()) || fechaReserva < hoy || !reglaEspacio(3).dias.includes(fechaReserva.getUTCDay())) {
+    if (isNaN(fechaReserva.getTime()) || fechaReserva < hoy || !reglaEspacio(espacioIdNum).dias.includes(fechaReserva.getUTCDay())) {
       return res.status(400).json({ error: 'Fecha fuera del rango permitido para reservar' });
     }
 
     if (fechaReserva.getTime() === hoy.getTime()) {
       const minutosActuales = horaActualEnAsuncionEnMinutos();
-      if (inicioMin <= minutosActuales) {
+      if ((defEspacio(espacioIdNum).horario === 'turnos' ? inicioMin : inicioMin + 60) <= minutosActuales) {
         return res.status(400).json({ error: 'No se puede reservar un horario que ya pasó' });
       }
     }
@@ -3451,6 +3718,7 @@ app.post('/api/admin/reservas', verifyAdminToken, verificarCSRF, async (req, res
         estado: 'activa',
         motivo,
         codigo_cancelacion_hash: codigoHash,
+        acompanantes,
         reservado_por_admin: true
       }])
       .select();
@@ -3470,7 +3738,7 @@ app.post('/api/admin/reservas', verifyAdminToken, verificarCSRF, async (req, res
     // de prioridad — para que la Comisión Directiva también tenga registro/código.
     const email = contacto.split('|')[1].trim();
     const confirmacion = correoDeReserva('confirmacion',
-      { id: nuevaReserva[0].id, espacio_id: espacioIdNum, nombre_solicitante, fecha, hora_inicio, hora_fin, motivo, acompanantes: [] }, { codigo });
+      { id: nuevaReserva[0].id, espacio_id: espacioIdNum, nombre_solicitante, fecha, hora_inicio, hora_fin, motivo, acompanantes }, { codigo });
     encolarCorreo({
       to: email,
       subject: confirmacion.asunto,
@@ -3481,8 +3749,8 @@ app.post('/api/admin/reservas', verifyAdminToken, verificarCSRF, async (req, res
     // A propósito no se manda aviso al moderador acá (a diferencia del formulario
     // público): quien crea esto ya es el moderador, y está viendo el resultado en
     // pantalla al toque, no hace falta que se notifique a sí mismo.
-    registrarActividad(req.admin.rol, 'Creó una reserva de prioridad',
-      `#${nuevaReserva[0].id} · Frente, ${fechaDMY(fecha)}, ${descripcionHorario(espacioIdNum, hora_inicio, hora_fin)}`);
+    registrarActividad(req.admin, 'Creó una reserva de prioridad',
+      `#${nuevaReserva[0].id} · ${getEspacioNombre(espacioIdNum)}, ${fechaDMY(fecha)}, ${descripcionHorario(espacioIdNum, hora_inicio, hora_fin)}`);
     res.json({ mensaje: 'Reserva de prioridad creada correctamente', reserva: nuevaReserva[0] });
   } catch (error) {
     manejarError(res, error);
@@ -3510,6 +3778,7 @@ app.post('/api/admin/cancelar/:reserva_id', verifyAdminToken, verificarCSRF, asy
     }
 
     const reserva = data[0];
+    if (!puedeConEspacio(req, reserva.espacio_id)) return sinPermisoDeEspacio(res);
 
     if (reserva.estado !== 'activa') {
       return res.json({ mensaje: 'La reserva ya se encontraba cancelada' });
@@ -3558,7 +3827,7 @@ app.post('/api/admin/cancelar/:reserva_id', verifyAdminToken, verificarCSRF, asy
       html: avisoModerador.html
     });
 
-    registrarActividad(req.admin.rol, 'Canceló una reserva',
+    registrarActividad(req.admin, 'Canceló una reserva',
       `#${reserva.id} · ${getEspacioNombre(reserva.espacio_id)}, ${fechaDMY(reserva.fecha)}, ${descripcionHorario(reserva.espacio_id, reserva.hora_inicio.substring(0, 5), reserva.hora_fin.substring(0, 5))}`);
     res.json({ mensaje: 'Reserva cancelada por admin' });
     avisarListaEspera(reserva); // se liberó un lugar (en segundo plano)
@@ -3589,6 +3858,7 @@ app.post('/api/admin/reservas/:id/asistencia', verifyAdminToken, verificarCSRF, 
     if (!reserva) {
       return res.status(404).json({ error: 'Reserva no encontrada' });
     }
+    if (!puedeConEspacio(req, reserva.espacio_id)) return sinPermisoDeEspacio(res);
     if (reserva.estado !== 'activa') {
       return res.status(400).json({ error: 'Solo se marca la asistencia de reservas activas' });
     }
@@ -3603,7 +3873,7 @@ app.post('/api/admin/reservas/:id/asistencia', verifyAdminToken, verificarCSRF, 
     if (error) throw error;
 
     const textos = { vino: 'Vino', no_vino: 'No vino' };
-    registrarActividad(req.admin.rol, asistencia ? 'Marcó la asistencia de una reserva' : 'Borró la asistencia de una reserva',
+    registrarActividad(req.admin, asistencia ? 'Marcó la asistencia de una reserva' : 'Borró la asistencia de una reserva',
       `#${reserva.id}${asistencia ? ' · ' + textos[asistencia] : ''} · ${getEspacioNombre(reserva.espacio_id)}, ${fechaDMY(reserva.fecha)}`);
     res.json({ mensaje: 'Asistencia guardada', asistencia });
   } catch (error) {
@@ -3612,7 +3882,7 @@ app.post('/api/admin/reservas/:id/asistencia', verifyAdminToken, verificarCSRF, 
 });
 
 // GET reportes
-app.get('/api/admin/reportes', verifyAdminToken, async (req, res) => {
+app.get('/api/admin/reportes', verifyAdminToken, verifyGeneral, async (req, res) => {
   try {
     const { data, error } = await supabase
       .from('reportes_errores')
@@ -3630,7 +3900,7 @@ app.get('/api/admin/reportes', verifyAdminToken, async (req, res) => {
 // Estado de un reporte: nuevo → en revisión → resuelto, con una nota (por ejemplo, qué se hizo)
 const ESTADOS_REPORTE = ['nuevo', 'en_revision', 'resuelto'];
 const NOMBRES_ESTADO_REPORTE = { nuevo: 'nuevo', en_revision: 'en revisión', resuelto: 'resuelto' };
-app.post('/api/admin/reportes/:id/estado', verifyAdminToken, verificarCSRF, async (req, res) => {
+app.post('/api/admin/reportes/:id/estado', verifyAdminToken, verifyGeneral, verificarCSRF, async (req, res) => {
   try {
     const { id } = req.params;
     if (!esIdValido(id)) return res.status(400).json({ error: 'ID inválido' });
@@ -3644,7 +3914,7 @@ app.post('/api/admin/reportes/:id/estado', verifyAdminToken, verificarCSRF, asyn
       .eq('id', id).select('id, estado, nota');
     if (error) throw error;
     if (!data || data.length === 0) return res.status(404).json({ error: 'Reporte no encontrado' });
-    registrarActividad(req.admin.rol, 'Cambió el estado de un reporte', `#${id} · ${NOMBRES_ESTADO_REPORTE[estado]}`);
+    registrarActividad(req.admin, 'Cambió el estado de un reporte', `#${id} · ${NOMBRES_ESTADO_REPORTE[estado]}`);
     res.json({ mensaje: 'Reporte actualizado', reporte: data[0] });
   } catch (error) {
     manejarError(res, error);
@@ -3653,7 +3923,7 @@ app.post('/api/admin/reportes/:id/estado', verifyAdminToken, verificarCSRF, asyn
 
 // Correos de los últimos 7 días que no salieron (pendientes de reintento o perdidos), para el
 // panel "Hoy". No se manda el contenido (tiene códigos de cancelación): solo a quién y el asunto.
-app.get('/api/admin/correos', verifyAdminToken, async (req, res) => {
+app.get('/api/admin/correos', verifyAdminToken, verifyGeneral, async (req, res) => {
   try {
     const { data, error } = await supabase.from('correos_pendientes')
       .select('id, destinatarios, asunto, estado, intentos, ultimo_error, creado_en, proximo_intento')
@@ -3670,7 +3940,7 @@ app.get('/api/admin/correos', verifyAdminToken, async (req, res) => {
 });
 
 // Reintentar un correo perdido: vuelve a la cola como nuevo, con todos sus intentos
-app.post('/api/admin/correos/:id/reintentar', verifyAdminToken, verificarCSRF, async (req, res) => {
+app.post('/api/admin/correos/:id/reintentar', verifyAdminToken, verifyGeneral, verificarCSRF, async (req, res) => {
   try {
     const { id } = req.params;
     if (!esIdValido(id)) return res.status(400).json({ error: 'ID inválido' });
@@ -3679,7 +3949,7 @@ app.post('/api/admin/correos/:id/reintentar', verifyAdminToken, verificarCSRF, a
       .eq('id', id).eq('estado', 'fallido').select('id, asunto');
     if (error) throw error;
     if (!data || data.length === 0) return res.status(404).json({ error: 'Ese correo no está entre los fallidos' });
-    registrarActividad(req.admin.rol, 'Reintentó un correo', data[0].asunto);
+    registrarActividad(req.admin, 'Reintentó un correo', data[0].asunto);
     procesarColaCorreos().catch(err => console.error('⚠️ Cola de correos:', err));
     res.json({ mensaje: 'El correo volvió a la cola' });
   } catch (error) {
@@ -3688,7 +3958,7 @@ app.post('/api/admin/correos/:id/reintentar', verifyAdminToken, verificarCSRF, a
 });
 
 // POST marcar reporte como leído
-app.post('/api/admin/reportes/:id/leer', verifyAdminToken, verificarCSRF, async (req, res) => {
+app.post('/api/admin/reportes/:id/leer', verifyAdminToken, verifyGeneral, verificarCSRF, async (req, res) => {
   try {
     const { id } = req.params;
 
@@ -3710,7 +3980,7 @@ app.post('/api/admin/reportes/:id/leer', verifyAdminToken, verificarCSRF, async 
     if (!data || data.length === 0) {
       return res.status(404).json({ error: 'Reporte no encontrado' });
     }
-    registrarActividad(req.admin.rol, 'Marcó un reporte como leído', `#${id}`);
+    registrarActividad(req.admin, 'Marcó un reporte como leído', `#${id}`);
     res.json({ mensaje: 'Reporte marcado como leído' });
   } catch (error) {
     manejarError(res, error);
@@ -3737,8 +4007,8 @@ function listaIds(ids) {
 app.post('/api/superadmin/espacios/:id', verifyAdminToken, verifySuperAdmin, verificarCSRF, async (req, res) => {
   try {
     const id = Number(req.params.id);
-    if (![1, 3].includes(id)) {
-      return res.status(400).json({ error: 'Solo se pueden configurar el Frente y el Altillo' });
+    if (!espacioConfigurado(id)) {
+      return res.status(400).json({ error: 'Ese espacio no existe' });
     }
     const { publico, aviso, mostrar_aviso } = req.body;
     if (typeof publico !== 'boolean') {
@@ -3783,8 +4053,254 @@ app.post('/api/superadmin/espacios/:id', verifyAdminToken, verifySuperAdmin, ver
       ? 'Guardó el aviso de un espacio'
       : (publico ? 'Habilitó un espacio para el público' : 'Deshabilitó un espacio para el público');
     const conAviso = !config.avisos_ocultos.includes(id);
-    registrarActividad(req.admin.rol, accion, publico || conAviso ? getEspacioNombre(id) : `${getEspacioNombre(id)} (sin aviso al entrar)`);
+    registrarActividad(req.admin, accion, publico || conAviso ? getEspacioNombre(id) : `${getEspacioNombre(id)} (sin aviso al entrar)`);
     res.json({ mensaje: 'Espacio actualizado', espacio: { ...data[0], mostrar_aviso: conAviso } });
+  } catch (error) {
+    manejarError(res, error);
+  }
+});
+
+// ========== ESPACIOS: CREAR, CAMBIAR Y QUITAR (admin supremo > Espacios) ==========
+// La fila de la tabla espacios lleva el nombre, si está publicado y el aviso; cómo se reserva
+// (turnos o bloques, motivos, contacto y si es solo por moderador) va en la clave espacios_def.
+function nombreDeEspacioValido(valor) {
+  const nombre = String(valor == null ? '' : valor).replace(/\s+/g, ' ').trim();
+  if (nombre.length < 2 || nombre.length > 40) throw new Error('El nombre del espacio tiene que tener entre 2 y 40 caracteres');
+  if (/[<>"\\]/.test(nombre)) throw new Error('El nombre del espacio no puede tener los signos < > " ni \\');
+  return nombre;
+}
+
+// Lo que el panel necesita de cada espacio para mostrarlo y editarlo
+async function espaciosParaElPanel() {
+  const { data, error } = await supabase.from('espacios').select('id, nombre, publico, aviso').order('id', { ascending: true });
+  if (error) throw error;
+  // En el orden de siempre: el Frente, el Altillo y después los creados desde el panel
+  const orden = idsEspacios();
+  return (data || []).filter(e => espacioConfigurado(e.id)).sort((a, b) => orden.indexOf(Number(a.id)) - orden.indexOf(Number(b.id))).map(e => {
+    const d = defEspacio(e.id);
+    return {
+      id: Number(e.id), nombre: e.nombre, publico: e.publico === true, aviso: e.aviso || '',
+      mostrar_aviso: !config.avisos_ocultos.includes(Number(e.id)),
+      de_siempre: Number(e.id) === 3 || Number(e.id) === 1,
+      modo: d.modo, contacto_texto: d.contacto_texto || '', horario: d.horario,
+      turnos: d.turnos || [], hora_desde: d.hora_desde == null ? null : d.hora_desde, hora_hasta: d.hora_hasta == null ? null : d.hora_hasta,
+      max_horas: d.max_horas == null ? null : d.max_horas, motivos: d.motivos || [],
+      contacto_email: d.contacto_email || '', contacto_whatsapp: d.contacto_whatsapp || '',
+      reglas: reglaEspacio(e.id), avisos_destinatarios: getEmailModerador(e.id)
+    };
+  });
+}
+
+app.get('/api/superadmin/espacios', verifyAdminToken, verifySuperAdmin, async (req, res) => {
+  try {
+    res.set('Cache-Control', 'no-store');
+    res.json({ espacios: await espaciosParaElPanel(), maximo: MAX_ESPACIOS });
+  } catch (error) {
+    manejarError(res, error);
+  }
+});
+
+async function guardarEspaciosDef(nuevaDef) {
+  const { error } = await supabase.from('configuracion')
+    .upsert({ clave: 'espacios_def', valor: JSON.stringify(validarEspaciosDef(nuevaDef)) }, { onConflict: 'clave' });
+  if (error) throw error;
+  await cargarConfiguracion();
+}
+
+// Crear un espacio. Queda sin publicar: se publica cuando ya tiene sus reglas (Espacios disponibles).
+app.post('/api/superadmin/espacios', verifyAdminToken, verifySuperAdmin, verificarCSRF, async (req, res) => {
+  try {
+    const b = req.body || {};
+    let nombre, def;
+    try {
+      nombre = nombreDeEspacioValido(b.nombre);
+      def = validarDefEspacio(b, 0);
+    } catch (err) {
+      return res.status(400).json({ error: err.message });
+    }
+    if (idsEspacios().length >= MAX_ESPACIOS) return res.status(400).json({ error: `Puede haber hasta ${MAX_ESPACIOS} espacios` });
+    const { data: existentes, error: errorExistentes } = await supabase.from('espacios').select('id, nombre');
+    if (errorExistentes) throw errorExistentes;
+    if ((existentes || []).some(e => String(e.nombre).toLowerCase() === nombre.toLowerCase())) {
+      return res.status(409).json({ error: 'Ya hay un espacio con ese nombre' });
+    }
+    const { data: creado, error } = await supabase.from('espacios')
+      .insert([{ nombre, descripcion: null, publico: false, aviso: null }]).select('id, nombre');
+    if (error) throw error;
+    const id = Number(creado[0].id);
+    try {
+      await guardarEspaciosDef({ ...espaciosDef, [id]: def });
+    } catch (err) {
+      // Si no se pudo guardar cómo se reserva, no queda un espacio a medias
+      await supabase.from('espacios').delete().eq('id', id);
+      throw err;
+    }
+    registrarActividad(req.admin, 'Creó un espacio', `${nombre} (${def.horario === 'turnos' ? 'por turnos' : 'por bloques de 1 hora'}${def.modo === 'moderador' ? ', solo por moderador' : ''})`);
+    res.status(201).json({ mensaje: `Se creó el espacio ${nombre}. Todavía no está publicado: revisá sus reglas y publicalo.`, id, espacios: await espaciosParaElPanel() });
+  } catch (error) {
+    manejarError(res, error);
+  }
+});
+
+// Cambiar el nombre y cómo se reserva un espacio. En el Frente y el Altillo se cambian el nombre, si
+// es solo por moderador y el cartel; sus turnos, motivos, horario y contacto siguen en
+// "Turnos, horarios y contacto".
+app.put('/api/superadmin/espacios/:id/definicion', verifyAdminToken, verifySuperAdmin, verificarCSRF, async (req, res) => {
+  try {
+    const id = Number(req.params.id);
+    if (!espacioConfigurado(id)) return res.status(404).json({ error: 'Ese espacio no existe' });
+    const b = req.body || {};
+    let nombre, def;
+    try {
+      nombre = nombreDeEspacioValido(b.nombre == null ? getEspacioNombre(id) : b.nombre);
+      def = validarDefEspacio(b, id);
+    } catch (err) {
+      return res.status(400).json({ error: err.message });
+    }
+    // Con reservas activas que todavía no pasaron no se cambia la forma de reservar (turnos o
+    // bloques) ni se achican los horarios por debajo de ellas: primero hay que cancelarlas o esperar
+    if (id !== 3 && id !== 1) {
+      const hoy = hoyEnAsuncion().toISOString().slice(0, 10);
+      const futuras = await leerTodasLasFilas(() => supabase.from('reservas').select('id, hora_inicio, hora_fin')
+        .eq('espacio_id', id).eq('estado', 'activa').gte('fecha', hoy).order('id', { ascending: true }), 20000);
+      const antes = espaciosDef;
+      const encaja = r => {
+        espaciosDef = { ...antes, [id]: def };
+        try {
+          return !errorDeHorarioYMotivo(id, String(r.hora_inicio).substring(0, 5), String(r.hora_fin).substring(0, 5), '', { motivoLibre: true });
+        } finally {
+          espaciosDef = antes;
+        }
+      };
+      const afuera = futuras.filter(r => !encaja(r));
+      if (afuera.length) {
+        return res.status(409).json({ error: `Hay ${afuera.length} reserva(s) activa(s) que no entran en el horario nuevo (por ejemplo, la #${afuera[0].id}). Cancelalas o movelas antes de cambiar el horario.` });
+      }
+    }
+    const { data: existentes, error: errorExistentes } = await supabase.from('espacios').select('id, nombre');
+    if (errorExistentes) throw errorExistentes;
+    if ((existentes || []).some(e => Number(e.id) !== id && String(e.nombre).toLowerCase() === nombre.toLowerCase())) {
+      return res.status(409).json({ error: 'Ya hay otro espacio con ese nombre' });
+    }
+    const { error } = await supabase.from('espacios').update({ nombre }).eq('id', id);
+    if (error) throw error;
+    await guardarEspaciosDef({ ...espaciosDef, [id]: def });
+    registrarActividad(req.admin, 'Cambió un espacio', nombre);
+    res.json({ mensaje: 'Espacio guardado', espacios: await espaciosParaElPanel() });
+  } catch (error) {
+    manejarError(res, error);
+  }
+});
+
+// Quitar un espacio creado desde el panel. Con reservas activas que no pasaron, no se puede. Si tuvo
+// reservas, la fila queda (las reservas viejas siguen mostrando su nombre) pero deja de usarse.
+app.delete('/api/superadmin/espacios/:id', verifyAdminToken, verifySuperAdmin, verificarCSRF, async (req, res) => {
+  try {
+    const id = Number(req.params.id);
+    if (id === 3 || id === 1) return res.status(400).json({ error: 'El Frente y el Altillo no se pueden quitar: se pueden deshabilitar en "Espacios disponibles"' });
+    if (!espacioConfigurado(id)) return res.status(404).json({ error: 'Ese espacio no existe' });
+    const hoy = hoyEnAsuncion().toISOString().slice(0, 10);
+    const { data: futuras, error: errorFuturas } = await supabase.from('reservas').select('id')
+      .eq('espacio_id', id).eq('estado', 'activa').gte('fecha', hoy).limit(1);
+    if (errorFuturas) throw errorFuturas;
+    if (futuras && futuras.length) {
+      return res.status(409).json({ error: 'Ese espacio tiene reservas activas que todavía no pasaron. Cancelalas primero (así les llega el aviso).' });
+    }
+    const nombre = getEspacioNombre(id);
+    const { error: errorOcultar } = await supabase.from('espacios').update({ publico: false }).eq('id', id);
+    if (errorOcultar) throw errorOcultar;
+    // Lo que ya no hace falta: bloqueos, lista de espera y la definición
+    const { error: errorBloqueos } = await supabase.from('bloqueos').delete().eq('espacio_id', id);
+    if (errorBloqueos) throw errorBloqueos;
+    const { error: errorEspera } = await supabase.from('lista_espera').delete().eq('espacio_id', id);
+    if (errorEspera) throw errorEspera;
+    const resto = { ...espaciosDef };
+    delete resto[id];
+    await guardarEspaciosDef(resto);
+    // Si nunca tuvo reservas, se borra también la fila
+    const { data: alguna, error: errorAlguna } = await supabase.from('reservas').select('id').eq('espacio_id', id).limit(1);
+    if (errorAlguna) throw errorAlguna;
+    let borrado = false;
+    if (!alguna || alguna.length === 0) {
+      const { error: errorBorrar } = await supabase.from('espacios').delete().eq('id', id);
+      borrado = !errorBorrar;
+    }
+    // Las cuentas dejan de tenerlo
+    if (usuariosPanel.some(c => c.espacios.includes(id))) {
+      await guardarUsuariosPanel(usuariosPanel.map(c => ({ ...c, espacios: c.espacios.filter(e => e !== id) })));
+    }
+    registrarActividad(req.admin, 'Quitó un espacio', nombre);
+    res.json({ mensaje: borrado ? `Se quitó el espacio ${nombre}` : `Se quitó el espacio ${nombre}. Sus reservas anteriores se conservan.`, espacios: await espaciosParaElPanel() });
+  } catch (error) {
+    manejarError(res, error);
+  }
+});
+
+// ========== CUENTAS DEL PANEL: VER, CREAR, CAMBIAR Y BORRAR (admin supremo > Cuentas) ==========
+async function guardarUsuariosPanel(lista) {
+  const { error } = await supabase.from('configuracion')
+    .upsert({ clave: CLAVE_USUARIOS, valor: JSON.stringify(lista) }, { onConflict: 'clave' });
+  if (error) throw error;
+  usuariosPanel = leerUsuariosPanel(JSON.stringify(lista));
+}
+
+function cuentasParaElPanel() {
+  return [
+    { usuario: 'supremo', nombre: 'Admin supremo', espacios: idsEspacios(), general: true, fija: true },
+    { usuario: 'moderadores', nombre: 'Moderadores (contraseña compartida de siempre)', espacios: [3, 1], general: true, fija: true },
+    ...usuariosPanel.map(c => ({ usuario: c.usuario, nombre: c.nombre, espacios: c.espacios.filter(espacioConfigurado), general: c.general, fija: false }))
+  ];
+}
+
+app.get('/api/superadmin/usuarios', verifyAdminToken, verifySuperAdmin, (req, res) => {
+  res.set('Cache-Control', 'no-store');
+  res.json({ cuentas: cuentasParaElPanel(), maximo: MAX_USUARIOS });
+});
+
+// Crear una cuenta o cambiar una que ya existe (si no se manda contraseña, queda la que tenía).
+// Cambiar la contraseña cierra las sesiones abiertas de esa cuenta.
+app.post('/api/superadmin/usuarios', verifyAdminToken, verifySuperAdmin, verificarCSRF, async (req, res) => {
+  try {
+    const b = req.body || {};
+    const usuario = String(b.usuario == null ? '' : b.usuario).trim().toLowerCase();
+    if (!/^[a-z0-9][a-z0-9._-]{2,29}$/.test(usuario)) {
+      return res.status(400).json({ error: 'El usuario tiene que tener entre 3 y 30 caracteres: letras sin tilde, números, punto, guion o guion bajo' });
+    }
+    if (USUARIOS_RESERVADOS.includes(usuario)) return res.status(400).json({ error: 'Ese nombre de usuario está reservado' });
+    const nombre = String(b.nombre == null || b.nombre === '' ? usuario : b.nombre).replace(/\s+/g, ' ').trim();
+    if (nombre.length > 60 || /[<>]/.test(nombre)) return res.status(400).json({ error: 'El nombre de la cuenta puede tener hasta 60 caracteres, sin < ni >' });
+    const espacios = [...new Set((Array.isArray(b.espacios) ? b.espacios : []).map(Number))];
+    if (espacios.length === 0 || espacios.some(id => !espacioConfigurado(id))) {
+      return res.status(400).json({ error: 'Elegí al menos un espacio para la cuenta' });
+    }
+    const anterior = usuariosPanel.find(c => c.usuario === usuario);
+    const clave = b.password;
+    if (!anterior && !clave) return res.status(400).json({ error: 'Escribí una contraseña para la cuenta nueva' });
+    if (clave != null && clave !== '' && (typeof clave !== 'string' || clave.length < 10 || clave.length > 200)) {
+      return res.status(400).json({ error: 'La contraseña tiene que tener al menos 10 caracteres' });
+    }
+    if (!anterior && usuariosPanel.length >= MAX_USUARIOS) return res.status(400).json({ error: `Puede haber hasta ${MAX_USUARIOS} cuentas` });
+    const cuenta = {
+      usuario, nombre, espacios, general: b.general === true,
+      hash: clave ? await bcrypt.hash(clave, 12) : anterior.hash,
+      v: clave && anterior ? (anterior.v || 1) + 1 : (anterior ? anterior.v || 1 : 1)
+    };
+    await guardarUsuariosPanel([...usuariosPanel.filter(c => c.usuario !== usuario), cuenta]);
+    registrarActividad(req.admin, anterior ? 'Cambió una cuenta del panel' : 'Creó una cuenta del panel',
+      `${usuario}: ${espacios.map(getEspacioNombre).join(', ')}${cuenta.general ? ' + lo general' : ''}${clave && anterior ? ' · contraseña nueva' : ''}`);
+    res.status(anterior ? 200 : 201).json({ mensaje: anterior ? 'Cuenta guardada' : 'Cuenta creada', cuentas: cuentasParaElPanel() });
+  } catch (error) {
+    manejarError(res, error);
+  }
+});
+
+app.delete('/api/superadmin/usuarios/:usuario', verifyAdminToken, verifySuperAdmin, verificarCSRF, async (req, res) => {
+  try {
+    const usuario = String(req.params.usuario || '').toLowerCase();
+    if (!usuariosPanel.some(c => c.usuario === usuario)) return res.status(404).json({ error: 'Esa cuenta no existe' });
+    await guardarUsuariosPanel(usuariosPanel.filter(c => c.usuario !== usuario));
+    registrarActividad(req.admin, 'Borró una cuenta del panel', usuario);
+    res.json({ mensaje: 'Cuenta borrada: sus sesiones abiertas dejaron de valer', cuentas: cuentasParaElPanel() });
   } catch (error) {
     manejarError(res, error);
   }
@@ -3815,7 +4331,7 @@ app.post('/api/superadmin/reservas/eliminar', verifyAdminToken, verifySuperAdmin
 
     const eliminadas = (data || []).map(r => r.id);
     if (eliminadas.length > 0) {
-      registrarActividad(req.admin.rol, `Eliminó ${eliminadas.length} reserva${eliminadas.length === 1 ? '' : 's'} cancelada${eliminadas.length === 1 ? '' : 's'}`, listaIds(eliminadas));
+      registrarActividad(req.admin, `Eliminó ${eliminadas.length} reserva${eliminadas.length === 1 ? '' : 's'} cancelada${eliminadas.length === 1 ? '' : 's'}`, listaIds(eliminadas));
     }
     res.json({ eliminadas: eliminadas.length, ignoradas: ids.length - eliminadas.length });
   } catch (error) {
@@ -3840,7 +4356,7 @@ app.post('/api/superadmin/reportes/eliminar', verifyAdminToken, verifySuperAdmin
     if (error) throw error;
     const eliminados = (data || []).map(r => r.id);
     if (eliminados.length > 0) {
-      registrarActividad(req.admin.rol, `Eliminó ${eliminados.length} reporte${eliminados.length === 1 ? '' : 's'}`, listaIds(eliminados));
+      registrarActividad(req.admin, `Eliminó ${eliminados.length} reporte${eliminados.length === 1 ? '' : 's'}`, listaIds(eliminados));
     }
     res.json({ eliminados: eliminados.length });
   } catch (error) {
@@ -3908,7 +4424,7 @@ app.post('/api/superadmin/novedades', verifyAdminToken, verifySuperAdmin, verifi
       .upsert({ clave: 'ventana_novedades', valor: comoTexto('ventana_novedades', ventana) }, { onConflict: 'clave' });
     if (error) throw error;
     await cargarConfiguracion();
-    registrarActividad(req.admin.rol,
+    registrarActividad(req.admin,
       !ventana.activa ? 'Quitó la ventana de novedades' : (nuevaVersion ? 'Publicó la ventana de novedades' : 'Corrigió la ventana de novedades'),
       ventana.titulo);
     res.json({ mensaje: 'Ventana guardada', ventana_novedades: config.ventana_novedades });
@@ -3945,7 +4461,7 @@ app.post('/api/superadmin/configuracion', verifyAdminToken, verifySuperAdmin, ve
       const { error } = await supabase.from('configuracion').upsert(cambiadas, { onConflict: 'clave' });
       if (error) throw error;
       await cargarConfiguracion();
-      registrarActividad(req.admin.rol, 'Cambió la configuración', cambiadas.map(f => NOMBRES_CONFIG[f.clave]).join(', '));
+      registrarActividad(req.admin, 'Cambió la configuración', cambiadas.map(f => NOMBRES_CONFIG[f.clave]).join(', '));
     }
     res.json({ mensaje: cambiadas.length > 0 ? 'Configuración guardada' : 'No había cambios', config });
   } catch (error) {
@@ -4094,7 +4610,7 @@ app.post('/api/superadmin/persona/borrar', verifyAdminToken, verifySuperAdmin, v
     const pendiente = [];
     try {
       for (const r of propias) {
-        const motivoQueda = Number(r.espacio_id) === 3 && config.motivos_frente.includes(r.motivo) ? r.motivo : '';
+        const motivoQueda = defEspacio(r.espacio_id).motivos.includes(r.motivo) ? r.motivo : '';
         const { error } = await supabase.from('reservas')
           .update({ nombre_solicitante: NOMBRE_ANONIMIZADO, contacto: '-', acompanantes: [], motivo_cancelacion: null, motivo: motivoQueda })
           .eq('id', r.id);
@@ -4125,7 +4641,7 @@ app.post('/api/superadmin/persona/borrar', verifyAdminToken, verifySuperAdmin, v
       else hecho.correos = correos.length;
     }
     // Sin datos personales en el registro: solo cuántas cosas se borraron
-    registrarActividad(req.admin.rol, pendiente.length ? 'Borró en parte los datos de una persona' : 'Borró los datos de una persona',
+    registrarActividad(req.admin, pendiente.length ? 'Borró en parte los datos de una persona' : 'Borró los datos de una persona',
       `${hecho.reservas} reserva(s), ${hecho.como_acompanante} como acompañante, ${hecho.lista_espera} en lista de espera, ${hecho.correos} correo(s) en cola` +
       (pendiente.length ? ` — faltó: ${pendiente.join(', ')}` : ''));
     if (pendiente.length) {
@@ -4164,8 +4680,9 @@ function plantillaParaEditor(clave) {
 
 app.get('/api/superadmin/personalizacion', verifyAdminToken, verifySuperAdmin, (req, res) => {
   res.json({
-    reglas: config.reglas_espacios,
-    reglas_defecto: REGLAS_POR_DEFECTO,
+    // De todos los espacios (los de siempre y los creados desde el panel)
+    reglas: Object.fromEntries(idsEspacios().map(id => [id, reglaEspacio(id)])),
+    reglas_defecto: Object.fromEntries(idsEspacios().map(id => [id, reglasPorDefecto(id)])),
     max_reservas_por_persona_mes: config.max_reservas_por_persona_mes,
     textos: Object.fromEntries(Object.entries(TEXTOS_PAGINA).map(([k, d]) => [k, {
       grupo: d.grupo, nombre: d.nombre, max: d.max, defecto: d.defecto, comodines: d.comodines || [], ayuda: d.ayuda || '', obligatorio: !!d.obligatorio,
@@ -4175,7 +4692,7 @@ app.get('/api/superadmin/personalizacion', verifyAdminToken, verifySuperAdmin, (
     anuncio_visible: !!anuncioVigente(),
     // Qué reglas se actualizan solas en los Términos (porque el texto usa su comodín)
     legal_comodines_usados: comodinesUsados(config.legal_terminos),
-    avisos_destinatarios: config.avisos_destinatarios,
+    avisos_destinatarios: Object.fromEntries(idsEspacios().map(id => [id, getEmailModerador(id)])),
     respuestas_listas: config.respuestas_listas,
     respuestas_defecto: RESPUESTAS_POR_DEFECTO,
     // Valor de {plazo_frente} en las respuestas listas (el plazo para cancelar del Frente)
@@ -4200,7 +4717,7 @@ app.post('/api/superadmin/reglas', verifyAdminToken, verifySuperAdmin, verificar
       return res.status(400).json({ error: err.message });
     }
     const cambios = [];
-    for (const id of [3, 1]) {
+    for (const id of idsEspacios()) {
       const antes = reglaEspacio(id);
       const campos = Object.keys(NOMBRES_REGLAS).filter(k => JSON.stringify(antes[k]) !== JSON.stringify(reglas[id][k])).map(k => NOMBRES_REGLAS[k]);
       if (id === 3 && maximo !== config.max_reservas_por_persona_mes) campos.push(`límite por persona (${maximo})`);
@@ -4211,7 +4728,7 @@ app.post('/api/superadmin/reglas', verifyAdminToken, verifySuperAdmin, verificar
       { clave: 'reglas_espacios', valor: comoTexto('reglas_espacios', reglas) },
       { clave: 'max_reservas_por_persona_mes', valor: comoTexto('max_reservas_por_persona_mes', maximo) }
     ]);
-    registrarActividad(req.admin.rol, 'Cambió las reglas de los espacios', cambios.join(' · '));
+    registrarActividad(req.admin, 'Cambió las reglas de los espacios', cambios.join(' · '));
     res.json({ mensaje: 'Reglas guardadas', reglas: config.reglas_espacios, max_reservas_por_persona_mes: config.max_reservas_por_persona_mes });
   } catch (error) {
     manejarError(res, error);
@@ -4241,7 +4758,7 @@ app.post('/api/superadmin/textos', verifyAdminToken, verifySuperAdmin, verificar
       { clave: 'textos_pagina', valor: comoTexto('textos_pagina', textos) },
       { clave: 'anuncio', valor: comoTexto('anuncio', anuncio) }
     ]);
-    registrarActividad(req.admin.rol, 'Cambió los textos de la página', cambios.join(' · '));
+    registrarActividad(req.admin, 'Cambió los textos de la página', cambios.join(' · '));
     res.json({ mensaje: 'Textos guardados', textos_pagina: config.textos_pagina, anuncio: config.anuncio });
   } catch (error) {
     manejarError(res, error);
@@ -4260,7 +4777,7 @@ app.post('/api/superadmin/avisos-destinatarios', verifyAdminToken, verifySuperAd
     if (JSON.stringify(destinatarios) === JSON.stringify(config.avisos_destinatarios)) return res.json({ mensaje: 'No había cambios' });
     await guardarFilasConfig([{ clave: 'avisos_destinatarios', valor: comoTexto('avisos_destinatarios', destinatarios) }]);
     // Sin los correos en el registro (son datos de personas): solo cuántos quedaron
-    registrarActividad(req.admin.rol, 'Cambió quién recibe los avisos internos', `Frente: ${destinatarios[3].length} correo(s) · Altillo: ${destinatarios[1].length} correo(s)`);
+    registrarActividad(req.admin, 'Cambió quién recibe los avisos internos', `Frente: ${destinatarios[3].length} correo(s) · Altillo: ${destinatarios[1].length} correo(s)`);
     res.json({ mensaje: 'Guardado', avisos_destinatarios: config.avisos_destinatarios });
   } catch (error) {
     manejarError(res, error);
@@ -4279,7 +4796,7 @@ app.post('/api/superadmin/respuestas', verifyAdminToken, verifySuperAdmin, verif
     }
     if (JSON.stringify(respuestas) === JSON.stringify(config.respuestas_listas)) return res.json({ mensaje: 'No había cambios', respuestas_listas: config.respuestas_listas });
     await guardarFilasConfig([{ clave: 'respuestas_listas', valor: comoTexto('respuestas_listas', respuestas) }]);
-    registrarActividad(req.admin.rol, b.restaurar === true ? 'Volvió a las respuestas listas originales' : 'Cambió las respuestas listas', `${respuestas.length} respuesta(s)`);
+    registrarActividad(req.admin, b.restaurar === true ? 'Volvió a las respuestas listas originales' : 'Cambió las respuestas listas', `${respuestas.length} respuesta(s)`);
     res.json({ mensaje: 'Guardado', respuestas_listas: config.respuestas_listas });
   } catch (error) {
     manejarError(res, error);
@@ -4303,7 +4820,7 @@ app.post('/api/superadmin/anuncio', verifyAdminToken, verifySuperAdmin, verifica
     }
     if (JSON.stringify(anuncio) !== JSON.stringify(config.anuncio)) {
       await guardarFilasConfig([{ clave: 'anuncio', valor: comoTexto('anuncio', anuncio) }]);
-      registrarActividad(req.admin.rol, anuncio.activo ? 'Publicó un anuncio' : 'Quitó el anuncio',
+      registrarActividad(req.admin, anuncio.activo ? 'Publicó un anuncio' : 'Quitó el anuncio',
         anuncio.activo ? `"${anuncio.texto}"${anuncio.hasta ? ` (hasta el ${fechaDMY(anuncio.hasta)})` : ''}` : '');
     }
     res.json({ mensaje: anuncio.activo ? 'Anuncio publicado' : 'Anuncio quitado', anuncio: config.anuncio, visible: !!anuncioVigente() });
@@ -4329,7 +4846,7 @@ app.post('/api/superadmin/plantillas', verifyAdminToken, verifySuperAdmin, verif
       return res.status(400).json({ error: err.message });
     }
     await guardarFilasConfig([{ clave: 'plantillas_correo', valor: comoTexto('plantillas_correo', plantillas) }]);
-    registrarActividad(req.admin.rol, b.restaurar === true ? 'Volvió al correo original' : 'Cambió un correo', PLANTILLAS_CORREO[clave].nombre);
+    registrarActividad(req.admin, b.restaurar === true ? 'Volvió al correo original' : 'Cambió un correo', PLANTILLAS_CORREO[clave].nombre);
     res.json({ mensaje: b.restaurar === true ? 'Listo: el correo volvió al texto original' : 'Correo guardado', plantilla: plantillaParaEditor(clave) });
   } catch (error) {
     manejarError(res, error);
@@ -4757,7 +5274,7 @@ app.post('/api/superadmin/legal/:doc', verifyAdminToken, verifySuperAdmin, verif
       return res.status(400).json({ error: err.message });
     }
     await guardarFilasConfig([{ clave: `legal_${clave}`, valor: comoTexto(`legal_${clave}`, validado) }]);
-    registrarActividad(req.admin.rol, publicar === 'correccion' ? `Corrigió ${LEGAL_DOCS[clave]}` : `Publicó ${LEGAL_DOCS[clave]} v${validado.version}`,
+    registrarActividad(req.admin, publicar === 'correccion' ? `Corrigió ${LEGAL_DOCS[clave]}` : `Publicó ${LEGAL_DOCS[clave]} v${validado.version}`,
       publicar === 'correccion' ? `v${validado.version}` : `vigente desde el ${fechaDMY(validado.vigente_desde)} · ${validado.historial[0].resumen}`);
     res.json({ mensaje: publicar === 'correccion' ? 'Corrección guardada' : `Publicada la versión ${validado.version}`, version: validado.version, vigente_desde: validado.vigente_desde });
   } catch (error) {
@@ -4800,7 +5317,7 @@ app.post('/api/superadmin/reservas/:id/reenviar', verifyAdminToken, verifySuperA
       responderA: correoRespuesta(reserva.espacio_id),
       html: correo.html
     });
-    registrarActividad(req.admin.rol, 'Reenvió la confirmación de una reserva', `#${reserva.id}`);
+    registrarActividad(req.admin, 'Reenvió la confirmación de una reserva', `#${reserva.id}`);
     res.json({ mensaje: enviado ? `Listo: se reenvió la confirmación a ${email}` : 'No se pudo enviar el correo ahora; quedó para reintentar' });
   } catch (error) {
     manejarError(res, error);
@@ -4843,12 +5360,13 @@ app.put('/api/superadmin/reservas/:id', verifyAdminToken, verifySuperAdmin, veri
     const ini = datos.hora_inicio.substring(0, 5), fin = datos.hora_fin.substring(0, 5);
     if (!/^([01]\d|2[0-3]):[0-5]\d$/.test(ini) || !/^([01]\d|2[0-3]):[0-5]\d$/.test(fin)) return res.status(400).json({ error: 'Horario inválido' });
     const espacioId = Number(reserva.espacio_id);
-    if (espacioId === 3) {
-      if (!config.turnos_frente.some(t => t.inicio === ini && t.fin === fin)) return res.status(400).json({ error: 'En el Frente el horario tiene que ser uno de los turnos' });
+    const defEditar = defEspacio(espacioId);
+    if (defEditar.horario === 'turnos') {
+      if (!nombreTurno(espacioId, ini, fin)) return res.status(400).json({ error: `En el ${getEspacioNombre(espacioId)} el horario tiene que ser uno de los turnos` });
     } else {
       const hI = Number(ini.slice(0, 2)), hF = Number(fin.slice(0, 2));
-      if (ini.slice(3) !== '00' || fin.slice(3) !== '00' || hI < config.altillo_hora_desde || hF > config.altillo_hora_hasta || hF <= hI || hF - hI > config.altillo_max_horas) {
-        return res.status(400).json({ error: `Horario inválido para el Altillo (horas enteras entre ${config.altillo_hora_desde}:00 y ${config.altillo_hora_hasta}:00, hasta ${config.altillo_max_horas} h)` });
+      if (ini.slice(3) !== '00' || fin.slice(3) !== '00' || hI < defEditar.hora_desde || hF > defEditar.hora_hasta || hF <= hI || hF - hI > defEditar.max_horas) {
+        return res.status(400).json({ error: `Horario inválido para el ${getEspacioNombre(espacioId)} (horas enteras entre ${defEditar.hora_desde}:00 y ${defEditar.hora_hasta}:00, hasta ${defEditar.max_horas} h)` });
       }
     }
     const nueva = { ...reserva, nombre_solicitante: datos.nombre_solicitante, contacto: datos.contacto, fecha: datos.fecha, hora_inicio: ini + ':00', hora_fin: fin + ':00' };
@@ -4907,7 +5425,7 @@ app.put('/api/superadmin/reservas/:id', verifyAdminToken, verifySuperAdmin, veri
       });
     }
     // Sin datos personales en el registro: qué se cambió y nada más
-    registrarActividad(req.admin.rol, 'Modificó una reserva', `#${reserva.id} · ${cambios.join(', ')}${cambiaHorario ? ` · ${fechaDMY(datos.fecha)} ${ini}-${fin}` : ''}`);
+    registrarActividad(req.admin, 'Modificó una reserva', `#${reserva.id} · ${cambios.join(', ')}${cambiaHorario ? ` · ${fechaDMY(datos.fecha)} ${ini}-${fin}` : ''}`);
     res.json({ mensaje: `Reserva actualizada${avisado ? ' y se le avisó por correo' : ''}`, reserva: actualizada[0] });
   } catch (error) {
     manejarError(res, error);
@@ -4976,7 +5494,7 @@ app.post('/api/superadmin/pausa', verifyAdminToken, verifySuperAdmin, verificarC
       .upsert({ clave: 'pausa_reservas', valor: comoTexto('pausa_reservas', pausa) }, { onConflict: 'clave' });
     if (error) throw error;
     await cargarConfiguracion();
-    registrarActividad(req.admin.rol, pausa.activa ? 'Pausó las reservas' : 'Reanudó las reservas', pausa.activa ? pausa.mensaje : '');
+    registrarActividad(req.admin, pausa.activa ? 'Pausó las reservas' : 'Reanudó las reservas', pausa.activa ? pausa.mensaje : '');
     res.json({ mensaje: pausa.activa ? 'Reservas pausadas' : 'Reservas reanudadas', pausa_reservas: config.pausa_reservas });
   } catch (error) {
     manejarError(res, error);
@@ -5004,7 +5522,7 @@ app.post('/api/superadmin/clave-admin', verifyAdminToken, verifySuperAdmin, veri
     ], { onConflict: 'clave' });
     if (error) throw error;
     versionSesiones = nuevaVersion;
-    registrarActividad(req.admin.rol, 'Cambió la contraseña del panel de los admins', 'se cerraron todas las sesiones');
+    registrarActividad(req.admin, 'Cambió la contraseña del panel de los admins', 'se cerraron todas las sesiones');
     borrarCookiesSesion(res);
     res.json({ mensaje: 'Contraseña cambiada. Se cerraron todas las sesiones: volvé a entrar con la tuya.' });
   } catch (error) {
@@ -5071,14 +5589,14 @@ app.get('/api/superadmin/copia', verifyAdminToken, verifySuperAdmin, async (req,
   try {
     if (req.query.formato === 'json') {
       const copia = await armarCopiaCompleta();
-      registrarActividad(req.admin.rol, 'Descargó una copia de seguridad completa', `${copia.tablas.reservas.length} reservas`);
+      registrarActividad(req.admin, 'Descargó una copia de seguridad completa', `${copia.tablas.reservas.length} reservas`);
       res.set('Cache-Control', 'no-store');
       res.set('Content-Type', 'application/json; charset=utf-8');
       res.set('Content-Disposition', `attachment; filename="reservas-ceq-${hoyEnAsuncion().toISOString().slice(0, 10)}-completa.json"`);
       return res.send(JSON.stringify(copia));
     }
     const { csv, total } = await armarCsvReservas();
-    registrarActividad(req.admin.rol, 'Descargó una copia de seguridad', `${total} reservas`);
+    registrarActividad(req.admin, 'Descargó una copia de seguridad', `${total} reservas`);
     res.set('Cache-Control', 'no-store');
     res.set('Content-Type', 'text/csv; charset=utf-8');
     res.set('Content-Disposition', `attachment; filename="reservas-ceq-${hoyEnAsuncion().toISOString().slice(0, 10)}.csv"`);
@@ -5093,7 +5611,7 @@ app.post('/api/superadmin/login/reabrir', verifyAdminToken, verifySuperAdmin, ve
   try {
     const { error } = await supabase.from('configuracion').upsert({ clave: CLAVE_LOGIN_REABIERTO, valor: new Date().toISOString() }, { onConflict: 'clave' });
     if (error) throw error;
-    registrarActividad(req.admin.rol, 'Reabrió el inicio de sesión del panel', '');
+    registrarActividad(req.admin, 'Reabrió el inicio de sesión del panel', '');
     res.json({ mensaje: 'Listo: el inicio de sesión vuelve a estar abierto. Si los intentos siguen, conviene cambiar las contraseñas.' });
   } catch (error) {
     manejarError(res, error);
@@ -5110,13 +5628,202 @@ app.post('/api/superadmin/copia/enviar', verifyAdminToken, verifySuperAdmin, ver
     const hoyEnviadas = await contarDeHoy('registro_actividad', 'creado_en', q => q.eq('accion', ACCION_COPIA_DESDE_PANEL));
     if (hoyEnviadas >= MAX_COPIAS_DESDE_PANEL_POR_DIA) return res.status(429).json({ error: `Hoy ya se mandaron ${MAX_COPIAS_DESDE_PANEL_POR_DIA} copias desde el panel. Probá mañana.` });
     const resultado = await mandarCopiaPorCorreo(hoyEnAsuncion().toISOString().slice(0, 7), { desdePanel: true });
-    await registrarActividad(req.admin.rol, ACCION_COPIA_DESDE_PANEL, resultado.ok ? (resultado.completa ? 'con la copia completa' : 'solo el CSV') : 'no salió');
+    await registrarActividad(req.admin, ACCION_COPIA_DESDE_PANEL, resultado.ok ? (resultado.completa ? 'con la copia completa' : 'solo el CSV') : 'no salió');
     if (!resultado.ok) return res.status(502).json({ error: `El servicio de correos no aceptó la copia: ${resultado.error}` });
     res.json({
       completa: resultado.completa,
       mensaje: resultado.completa
         ? `Listo: te mandamos la copia (${resultado.total} reservas, con el CSV y la copia completa) a ${config.email_alertas}.`
         : `Salió solo el CSV: el servicio de correos rechazó la copia completa (${resultado.error}). Bajala con "Descargar copia completa (.json)" y avisá a la Secretaría de Informática.`
+    });
+  } catch (error) {
+    manejarError(res, error);
+  }
+});
+
+// ========== DETECTOR DE ABUSOS (admin supremo > Personas) ==========
+// El límite por persona se controla por correo O por celular, sin verificar ninguno de los dos
+// (decisión del CEQ). Esto no bloquea nada: junta las reservas de los últimos 90 días que parecen
+// de una misma persona con datos distintos, para que el moderador las mire y decida.
+//   - el mismo celular con varios correos, o el mismo correo con varios celulares
+//   - el mismo nombre con correo y celular distintos en el mismo espacio y mes
+//   - la misma red (conexión) con 3 o más personas distintas
+// De la red no se guarda la dirección: solo una huella cifrada (HMAC), que no se puede volver atrás
+// y se borra con los datos personales a los 6 meses. Necesita la columna reservas.huella_red
+// (migracion-huella-red.sql); si todavía no está, el detector funciona igual sin esa señal.
+const CLAVE_HUELLA_RED = crypto.createHmac('sha256', JWT_SECRET).update('huella-red-reservas-v1').digest();
+let huellaRedDisponible = true;
+
+// Se llama (sin await) al crear una reserva desde la página. Nunca lanza error.
+async function guardarHuellaDeRed(reservaId, req) {
+  if (!huellaRedDisponible) return;
+  try {
+    const huella = crypto.createHmac('sha256', CLAVE_HUELLA_RED).update(obtenerIpCliente(req)).digest('base64url').slice(0, 16);
+    const { error } = await supabase.from('reservas').update({ huella_red: huella }).eq('id', reservaId);
+    if (error) {
+      // Sin la columna (falta aplicar la migración): no se vuelve a intentar hasta el próximo reinicio
+      huellaRedDisponible = false;
+      console.warn('⚠️ No se guarda la huella de red de las reservas (falta la columna huella_red):', error.message || error.code);
+    }
+  } catch (err) {
+    console.error('⚠️ No se pudo guardar la huella de red:', err && (err.message || err.code));
+  }
+}
+
+function nombreNormalizado(nombre) {
+  return String(nombre || '').toLowerCase().normalize('NFD').replace(/[̀-ͯ]/g, '').replace(/[^a-z\s]/g, ' ').split(/\s+/).filter(Boolean).sort().join(' ');
+}
+
+app.get('/api/superadmin/abusos', verifyAdminToken, verifySuperAdmin, async (req, res) => {
+  try {
+    const limite = hoyEnAsuncion();
+    limite.setUTCDate(limite.getUTCDate() - 90);
+    const desde = limite.toISOString().slice(0, 10);
+    const leer = columnas => leerTodasLasFilas(() => supabase.from('reservas').select(columnas)
+      .gte('fecha', desde).neq('contacto', '-').order('id', { ascending: true }), 50000);
+    const base = 'id, espacio_id, fecha, hora_inicio, hora_fin, nombre_solicitante, contacto, estado, reservado_por_admin';
+    let filas, conRed = true;
+    try {
+      filas = await leer(base + ', huella_red');
+    } catch (err) {
+      conRed = false;
+      filas = await leer(base);
+    }
+    const reservas = filas.filter(r => !r.reservado_por_admin).map(r => {
+      const p = identidadContacto(r.contacto);
+      return { ...r, email: p.email, celular: p.celular, persona: p.email || p.celular, nombreNorm: nombreNormalizado(r.nombre_solicitante) };
+    });
+    const agrupar = clave => {
+      const mapa = new Map();
+      reservas.forEach(r => { const k = clave(r); if (k) { if (!mapa.has(k)) mapa.set(k, []); mapa.get(k).push(r); } });
+      return [...mapa.entries()];
+    };
+    const distintos = (lista, campo) => [...new Set(lista.map(r => r[campo]).filter(Boolean))];
+    // ¿En algún espacio y mes, juntas pasan el límite por persona?
+    const pasaElLimite = lista => {
+      const cuenta = {};
+      lista.filter(r => r.estado === 'activa').forEach(r => { const k = `${r.espacio_id}|${String(r.fecha).slice(0, 7)}`; cuenta[k] = (cuenta[k] || 0) + 1; });
+      return Object.entries(cuenta).some(([k, n]) => { const tope = limitePorPersona(Number(k.split('|')[0])); return tope && n > tope; });
+    };
+    const casos = [];
+    const agregar = (tipo, descripcion, lista) => casos.push({
+      tipo, descripcion, pasa_el_limite: pasaElLimite(lista),
+      reservas: lista.sort((a, b) => (a.fecha < b.fecha ? -1 : 1)).map(r => ({
+        id: r.id, espacio: getEspacioNombre(r.espacio_id), fecha: r.fecha,
+        horario: descripcionHorario(r.espacio_id, String(r.hora_inicio).substring(0, 5), String(r.hora_fin).substring(0, 5)),
+        nombre: r.nombre_solicitante, contacto: r.contacto, estado: r.estado
+      }))
+    });
+    agrupar(r => r.celular).forEach(([celular, lista]) => {
+      const correos = distintos(lista, 'email');
+      if (correos.length >= 2) agregar('celular', `El mismo celular (termina en ${celular.slice(-4)}) con ${correos.length} correos distintos`, lista);
+    });
+    agrupar(r => r.email).forEach(([email, lista]) => {
+      const celulares = distintos(lista, 'celular');
+      if (celulares.length >= 2) agregar('correo', `El mismo correo (${email}) con ${celulares.length} celulares distintos`, lista);
+    });
+    agrupar(r => (r.nombreNorm.split(' ').length >= 2 ? `${r.nombreNorm}|${r.espacio_id}|${String(r.fecha).slice(0, 7)}` : null)).forEach(([, lista]) => {
+      // Mismo nombre y apellido, sin ningún dato de contacto en común
+      const correos = distintos(lista, 'email'), celulares = distintos(lista, 'celular');
+      if (correos.length >= 2 && celulares.length >= 2 && correos.length === lista.length && celulares.length === lista.length) {
+        agregar('nombre', `El mismo nombre (${lista[0].nombre_solicitante}) con correo y celular distintos, en el mismo espacio y mes`, lista);
+      }
+    });
+    if (conRed) {
+      agrupar(r => r.huella_red).forEach(([, lista]) => {
+        const personas = distintos(lista, 'persona');
+        if (personas.length >= 3) agregar('red', `La misma conexión de internet con ${personas.length} personas distintas (puede ser el WiFi de la facultad)`, lista);
+      });
+    }
+    casos.sort((a, b) => (b.pasa_el_limite - a.pasa_el_limite) || (b.reservas.length - a.reservas.length));
+    res.set('Cache-Control', 'no-store');
+    res.json({ desde, revisadas: reservas.length, con_red: conRed, casos: casos.slice(0, 100) });
+  } catch (error) {
+    manejarError(res, error);
+  }
+});
+
+// ========== INFORME DEL PERÍODO (admin supremo > Estadísticas) ==========
+// Todo lo que el sistema puede contar de un período (por defecto, el semestre en curso), para la
+// Comisión: reservas por espacio y por mes, cancelaciones, asistencia, lista de espera, reportes,
+// correos que no salieron y actividad del panel. Sin nombres ni contactos.
+app.get('/api/superadmin/informe', verifyAdminToken, verifySuperAdmin, async (req, res) => {
+  try {
+    const hoy = hoyEnAsuncion();
+    const anio = hoy.getUTCFullYear();
+    const primerSemestre = hoy.getUTCMonth() < 6;
+    const desde = req.query.desde || `${anio}-${primerSemestre ? '01' : '07'}-01`;
+    const hasta = req.query.hasta || `${anio}-${primerSemestre ? '06-30' : '12-31'}`;
+    if (!esFechaValida(desde) || !esFechaValida(hasta) || desde > hasta) return res.status(400).json({ error: 'Fechas inválidas' });
+    if ((new Date(hasta + 'T00:00:00Z') - new Date(desde + 'T00:00:00Z')) / 86400000 > 400) return res.status(400).json({ error: 'El período puede ser de hasta un año' });
+    const desdeIso = desde + 'T00:00:00', hastaIso = hasta + 'T23:59:59';
+
+    const [reservas, bloqueos, reportes, actividad, espera, correos] = await Promise.all([
+      leerTodasLasFilas(() => supabase.from('reservas')
+        .select('id, espacio_id, fecha, hora_inicio, hora_fin, contacto, motivo, estado, reservado_por_admin, asistencia, cancelada_por, acompanantes')
+        .gte('fecha', desde).lte('fecha', hasta).order('id', { ascending: true }), 200000),
+      leerTodasLasFilas(() => supabase.from('bloqueos').select('id, espacio_id').gte('fecha', desde).lte('fecha', hasta).order('id', { ascending: true }), 50000),
+      leerTodasLasFilas(() => supabase.from('reportes_errores').select('id, estado').gte('created_at', desdeIso).lte('created_at', hastaIso).order('id', { ascending: true }), 50000),
+      leerTodasLasFilas(() => supabase.from('registro_actividad').select('id, accion').gte('creado_en', desdeIso).lte('creado_en', hastaIso).order('id', { ascending: true }), 200000),
+      leerTodasLasFilas(() => supabase.from('lista_espera').select('id, espacio_id, avisado_en').order('id', { ascending: true }), 50000),
+      leerTodasLasFilas(() => supabase.from('correos_pendientes').select('id, estado').order('id', { ascending: true }), 20000).catch(() => [])
+    ]);
+
+    const hoyTexto = hoy.toISOString().slice(0, 10);
+    const contar = (lista, campo) => { const c = {}; lista.forEach(x => { const k = campo(x); if (k != null && k !== '') c[k] = (c[k] || 0) + 1; }); return c; };
+    const idsConReservas = [...new Set([...idsEspacios(), ...reservas.map(r => Number(r.espacio_id))])];
+    const porEspacio = idsConReservas.map(id => {
+      const suyas = reservas.filter(r => Number(r.espacio_id) === id);
+      const activas = suyas.filter(r => r.estado === 'activa');
+      const pasadas = activas.filter(r => r.fecha < hoyTexto);
+      return {
+        espacio: getEspacioNombre(id), total: suyas.length, activas: activas.length, canceladas: suyas.length - activas.length,
+        cargadas_desde_el_panel: suyas.filter(r => r.reservado_por_admin).length,
+        vino: pasadas.filter(r => r.asistencia === 'vino').length, no_vino: pasadas.filter(r => r.asistencia === 'no_vino').length,
+        sin_marcar: pasadas.filter(r => !r.asistencia).length,
+        acompanantes: activas.reduce((n, r) => n + (Array.isArray(r.acompanantes) ? r.acompanantes.length : 0), 0),
+        bloqueos: bloqueos.filter(b => Number(b.espacio_id) === id).length,
+        horarios: Object.entries(contar(activas, r => descripcionHorario(id, String(r.hora_inicio).substring(0, 5), String(r.hora_fin).substring(0, 5))))
+          .sort((a, b) => b[1] - a[1]).slice(0, 8).map(([horario, cantidad]) => ({ horario, cantidad })),
+        motivos: defEspacio(id).motivos.length
+          ? Object.entries(contar(activas.filter(r => defEspacio(id).motivos.includes(r.motivo)), r => r.motivo)).sort((a, b) => b[1] - a[1]).map(([motivo, cantidad]) => ({ motivo, cantidad }))
+          : []
+      };
+    });
+    const meses = [...new Set(reservas.map(r => String(r.fecha).slice(0, 7)))].sort();
+    const activasTodas = reservas.filter(r => r.estado === 'activa');
+    const conDatos = reservas.filter(r => r.contacto && r.contacto !== '-');
+    const dias = contar(activasTodas, r => new Date(r.fecha + 'T12:00:00Z').getUTCDay());
+
+    res.set('Cache-Control', 'no-store');
+    res.json({
+      desde, hasta, generado_en: new Date().toISOString(),
+      total: reservas.length, activas: activasTodas.length, canceladas: reservas.length - activasTodas.length,
+      por_espacio: porEspacio,
+      por_mes: meses.map(mes => ({
+        mes, total: reservas.filter(r => String(r.fecha).startsWith(mes)).length,
+        activas: activasTodas.filter(r => String(r.fecha).startsWith(mes)).length,
+        por_espacio: Object.fromEntries(idsConReservas.map(id => [getEspacioNombre(id), activasTodas.filter(r => Number(r.espacio_id) === id && String(r.fecha).startsWith(mes)).length]))
+      })),
+      por_dia_de_la_semana: NOMBRES_DIAS_SEMANA.map((nombre, i) => ({ dia: nombre, cantidad: dias[i] || 0 })).filter(d => d.cantidad > 0),
+      canceladas_por: contar(reservas.filter(r => r.estado !== 'activa'), r => (r.cancelada_por === 'usuario' ? 'la persona' : (r.cancelada_por ? 'un moderador' : 'sin dato'))),
+      // Personas distintas entre las reservas que todavía tienen sus datos (a los 6 meses se anonimizan)
+      personas_distintas: new Set(conDatos.map(r => codigoPersona(r.contacto)).filter(Boolean)).size,
+      reservas_anonimizadas: reservas.length - conDatos.length,
+      lista_de_espera_ahora: { esperando: espera.filter(l => !l.avisado_en).length, avisadas: espera.filter(l => l.avisado_en).length },
+      reportes: { total: reportes.length, por_estado: contar(reportes, x => NOMBRES_ESTADO_REPORTE[x.estado] || x.estado || 'nuevo') },
+      correos_ultimos_7_dias: { enviados: correos.filter(c => c.estado === 'enviado').length, perdidos: correos.filter(c => c.estado === 'fallido').length, en_espera: correos.filter(c => c.estado === 'pendiente' || c.estado === 'enviando').length },
+      panel: {
+        acciones: actividad.length,
+        intentos_de_ingreso_fallidos: actividad.filter(a => a.accion === ACCION_LOGIN_FALLIDO).length,
+        mas_frecuentes: Object.entries(contar(actividad.filter(a => a.accion !== ACCION_LOGIN_FALLIDO), a => a.accion)).sort((a, b) => b[1] - a[1]).slice(0, 12).map(([accion, cantidad]) => ({ accion, cantidad }))
+      },
+      notas: [
+        'Las reservas se cuentan por su fecha. Las de hace más de 6 meses ya no tienen nombre ni contacto, pero se cuentan igual.',
+        'La asistencia cuenta las reservas activas cuya fecha ya pasó.',
+        'Los intentos de ingreso fallidos se guardan 30 días y los correos, 7: de esos dos datos el informe solo tiene lo más reciente.',
+        'Las caídas del servidor no quedan guardadas en el sistema: se ven en UptimeRobot y en Render.'
+      ]
     });
   } catch (error) {
     manejarError(res, error);
@@ -5142,7 +5849,7 @@ app.delete('/api/superadmin/lista-espera/:id', verifyAdminToken, verifySuperAdmi
     const { data, error } = await supabase.from('lista_espera').delete().eq('id', id).select('espacio_id');
     if (error) throw error;
     if (!data || data.length === 0) return res.status(404).json({ error: 'No está en la lista' });
-    registrarActividad(req.admin.rol, 'Sacó a alguien de la lista de espera', getEspacioNombre(data[0].espacio_id));
+    registrarActividad(req.admin, 'Sacó a alguien de la lista de espera', getEspacioNombre(data[0].espacio_id));
     res.json({ mensaje: 'Listo: ya no está en la lista de espera' });
   } catch (error) {
     manejarError(res, error);
@@ -5161,7 +5868,7 @@ app.post('/api/superadmin/cerrar-sesiones', verifyAdminToken, verifySuperAdmin, 
 
     if (error) throw error;
     versionSesiones = nueva;
-    registrarActividad(req.admin.rol, 'Cerró todas las sesiones del panel');
+    registrarActividad(req.admin, 'Cerró todas las sesiones del panel');
 
     borrarCookiesSesion(res);
     res.json({ mensaje: 'Se cerraron todas las sesiones' });
@@ -5224,7 +5931,7 @@ app.get('/api/sincronizacion/reservas', sincronizacionLimiter, async (req, res) 
         fecha: r.fecha,
         hora_inicio: inicio,
         hora_fin: fin,
-        turno: Number(r.espacio_id) === 3 ? nombreTurnoFrente(inicio, fin) : '',
+        turno: nombreTurno(r.espacio_id, inicio, fin),
         nombre: r.nombre_solicitante || '',
         motivo: (r.motivo || '').trim(),
         acompanantes: (Array.isArray(r.acompanantes) ? r.acompanantes : []).map(a => a && a.nombre).filter(Boolean).join(', '),
@@ -5279,7 +5986,7 @@ async function enviarRecordatorios() {
   const hace12Horas = new Date(Date.now() - 12 * 60 * 60 * 1000).toISOString();
   // Cada espacio con su propio día (si tiene el recordatorio prendido)
   const data = [];
-  for (const id of [3, 1]) {
+  for (const id of idsEspacios()) {
     const regla = reglaEspacio(id);
     if (!regla.recordatorio) continue;
     const objetivo = hoyEnAsuncion();
@@ -5291,7 +5998,9 @@ async function enviarRecordatorios() {
       .eq('estado', 'activa')
       .eq('espacio_id', id)
       .eq('fecha', objetivo.toISOString().slice(0, 10))
-      .eq('reservado_por_admin', false)
+      // En los espacios que se reservan solo por moderador, todas las reservas se cargan desde el
+      // panel: ahí también llevan recordatorio
+      .in('reservado_por_admin', defEspacio(id).modo === 'moderador' ? [true, false] : [false])
       .is('recordatorio_enviado_en', null)
       .lt('created_at', hace12Horas)
       .limit(MAX_RECORDATORIOS_POR_TANDA);
@@ -5363,18 +6072,25 @@ async function aplicarPlazosDeConservacion() {
   const fechaLimite = limite.toISOString().slice(0, 10);
   const datosBorrados = { nombre_solicitante: NOMBRE_ANONIMIZADO, contacto: '-', acompanantes: [], motivo_cancelacion: null };
 
-  const { data: frente, error: e1 } = await supabase.from('reservas').update(datosBorrados)
-    .lt('fecha', fechaLimite).neq('nombre_solicitante', NOMBRE_ANONIMIZADO).neq('espacio_id', 1).select('id');
+  const { data: anonimizadasAhora, error: e1 } = await supabase.from('reservas').update(datosBorrados)
+    .lt('fecha', fechaLimite).neq('nombre_solicitante', NOMBRE_ANONIMIZADO).select('id');
   if (e1) throw e1;
-  const { data: altillo, error: e2 } = await supabase.from('reservas').update({ ...datosBorrados, motivo: '' })
-    .lt('fecha', fechaLimite).neq('nombre_solicitante', NOMBRE_ANONIMIZADO).eq('espacio_id', 1).select('id');
-  if (e2) throw e2;
-  // En el Frente el motivo se conserva solo si es uno de la lista (es una categoría, no un dato
-  // personal). Las reservas de prioridad del panel pueden tener motivo libre: ese se borra.
-  const { error: e4 } = await supabase.from('reservas').update({ motivo: '' })
-    .lt('fecha', fechaLimite).eq('espacio_id', 3).neq('motivo', '')
-    .not('motivo', 'in', `(${config.motivos_frente.map(m => `"${m}"`).join(',')})`);
-  if (e4) throw e4;
+  // El motivo se conserva solo si es uno de la lista del espacio (es una categoría, no un dato
+  // personal). El motivo escrito a mano se borra: el de los espacios sin lista y el de las reservas
+  // cargadas desde el panel.
+  const todosLosEspacios = [...new Set([...Object.keys(nombresEspacios).map(Number), ...idsEspacios()])];
+  for (const id of todosLosEspacios) {
+    const motivos = espacioConfigurado(id) ? defEspacio(id).motivos : [];
+    let consulta = supabase.from('reservas').update({ motivo: '' }).lt('fecha', fechaLimite).eq('espacio_id', id).neq('motivo', '');
+    if (motivos.length) consulta = consulta.not('motivo', 'in', `(${motivos.map(m => `"${m}"`).join(',')})`);
+    const { error: e4 } = await consulta;
+    if (e4) throw e4;
+  }
+  const frente = anonimizadasAhora, altillo = [];
+  if (huellaRedDisponible) {
+    const { error: errorHuella } = await supabase.from('reservas').update({ huella_red: null }).lt('fecha', fechaLimite).not('huella_red', 'is', null);
+    if (errorHuella) console.warn('⚠️ No se pudo borrar la huella de red de las reservas viejas:', errorHuella.message || errorHuella.code);
+  }
   const { data: reportes, error: e3 } = await supabase.from('reportes_errores').delete().lt('created_at', fechaLimite + 'T00:00:00').select('id');
   if (e3) throw e3;
   // R9: los intentos fallidos de inicio de sesión solo sirven para el tope de la última hora. Se
@@ -5424,7 +6140,7 @@ async function armarCsvReservas() {
     const fin = String(r.hora_fin || '').substring(0, 5);
     lineas.push([
       r.id, r.fecha, getEspacioNombre(r.espacio_id),
-      Number(r.espacio_id) === 3 ? nombreTurnoFrente(inicio, fin) : '',
+      nombreTurno(r.espacio_id, inicio, fin),
       inicio, fin, r.nombre_solicitante, celular, email, (r.motivo || '').trim(),
       acompanantesTexto(r.acompanantes),
       r.estado === 'cancelada' ? 'Cancelada' : 'Activa',
@@ -5446,7 +6162,7 @@ const TABLAS_COPIA = [
   ['espacios', 'id'], ['meses_habilitados', 'id'], ['configuracion', 'clave'], ['reservas', 'id'],
   ['bloqueos', 'id'], ['lista_espera', 'id'], ['reportes_errores', 'id'], ['registro_actividad', 'id']
 ];
-const CLAVES_FUERA_DE_LA_COPIA = ['admin_password_hash', 'login_redes_conocidas'];
+const CLAVES_FUERA_DE_LA_COPIA = ['admin_password_hash', 'login_redes_conocidas', 'usuarios_panel'];
 
 async function armarCopiaCompleta() {
   const tablas = {};

@@ -70,6 +70,8 @@ create table public.reservas (
   cancelada_por           text,
   motivo_cancelacion      text,
   recordatorio_enviado_en timestamptz,
+  -- huella cifrada de la red desde la que se reservo (detector de abusos); no es la IP
+  huella_red              text,
   asistencia              text,
   acompanantes            jsonb not null default '[]'::jsonb,
 
