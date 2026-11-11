@@ -36,6 +36,7 @@ const PRUEBAS = [
   ['Plazos de conservación de la Política de Privacidad', 'probar_retencion.js', [raiz, aqui]],
   ['Auditoría del 23/10: topes de correos, lista de espera, inicio de sesión, lecturas públicas, código e historial', 'probar_auditoria_octubre.js', [raiz, aqui]],
   ['Espacios creados desde el panel y cuentas con usuario y contraseña por espacio', 'probar_espacios_y_cuentas.js', [raiz, aqui]],
+  ['Tarjeta de un espacio (guardar todo junto: Frente, Altillo y uno nuevo) y detector de abusos con período', 'probar_espacio_entero.js', [raiz, aqui]],
   ['Limpieza de Gmail (copias de seguridad y avisos viejos)', 'probar_limpieza_gmail.js', [path.join(raiz, 'limpiar-copias-de-seguridad.gs')]],
   ['Estructura y reglas de la base de datos', 'probar_esquema.js', [raiz, path.join(raiz, 'esquema-base-de-datos.sql')], '@electric-sql/pglite'],
   ['Copia completa y restauración en una base nueva (restaurar.js)', 'probar_restaurar.js', [raiz, aqui], '@electric-sql/pglite']
