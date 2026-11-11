@@ -133,8 +133,8 @@ const CORREO_CONTACTO = 'reservas@ceq-una.com';
 // Email específico para avisos del espacio Frente (si no se configura, usa el general)
 const EMAIL_MODERADOR_FRENTE = process.env.EMAIL_MODERADOR_FRENTE || EMAIL_MODERADOR;
 
-// Correos que reciben los avisos internos de un espacio. Se eligen en el admin supremo (Correos >
-// Quién recibe los avisos); por defecto, Altillo: el general; Frente: el general y el del Frente.
+// Correos que reciben los avisos internos de un espacio. Se eligen en el admin supremo (Espacios >
+// la tarjeta del espacio); por defecto, Altillo: el general; Frente: el general y el del Frente.
 function getEmailModerador(espacio_id) {
   return (config.avisos_destinatarios && config.avisos_destinatarios[Number(espacio_id)]) || [EMAIL_MODERADOR];
 }
@@ -727,7 +727,7 @@ const CONFIG_POR_DEFECTO = {
     { nombre: 'Merienda', inicio: '14:00', fin: '18:00' }
   ],
   max_reservas_por_persona_mes: 2,
-  // El de verdad está guardado en la base (Avanzado → Turnos, horarios y contacto); este solo se usa
+  // El de verdad está guardado en la base (Avanzado → Espacios → Frente); este solo se usa
   // en una base nueva. Antes era el Gmail personal de quien moderaba el Frente (AUD-16).
   contacto_email_frente: CORREO_CONTACTO,
   contacto_whatsapp_frente: '595972753471', // formato wa.me: código de país + número, sin +, espacios ni guiones
@@ -4086,7 +4086,10 @@ async function espaciosParaElPanel() {
       turnos: d.turnos || [], hora_desde: d.hora_desde == null ? null : d.hora_desde, hora_hasta: d.hora_hasta == null ? null : d.hora_hasta,
       max_horas: d.max_horas == null ? null : d.max_horas, motivos: d.motivos || [],
       contacto_email: d.contacto_email || '', contacto_whatsapp: d.contacto_whatsapp || '',
-      reglas: reglaEspacio(e.id), avisos_destinatarios: getEmailModerador(e.id)
+      reglas: reglaEspacio(e.id), avisos_destinatarios: getEmailModerador(e.id),
+      // Un solo "límite por persona" para todos (0 = sin límite). El del Frente se guarda en otra
+      // clave (max_reservas_por_persona_mes) y no puede ser 0
+      limite_por_persona: limitePorPersona(e.id) || 0, limite_minimo: Number(e.id) === 3 ? 1 : 0
     };
   });
 }
@@ -4136,7 +4139,7 @@ app.post('/api/superadmin/espacios', verifyAdminToken, verifySuperAdmin, verific
       throw err;
     }
     registrarActividad(req.admin, 'Creó un espacio', `${nombre} (${def.horario === 'turnos' ? 'por turnos' : 'por bloques de 1 hora'}${def.modo === 'moderador' ? ', solo por moderador' : ''})`);
-    res.status(201).json({ mensaje: `Se creó el espacio ${nombre}. Todavía no está publicado: revisá sus reglas y publicalo.`, id, espacios: await espaciosParaElPanel() });
+    res.status(201).json({ mensaje: `Se creó el espacio ${nombre}. Todavía no está publicado: revisá sus reglas en su tarjeta y publicalo.`, id, espacios: await espaciosParaElPanel() });
   } catch (error) {
     manejarError(res, error);
   }
@@ -4160,22 +4163,8 @@ app.put('/api/superadmin/espacios/:id/definicion', verifyAdminToken, verifySuper
     // Con reservas activas que todavía no pasaron no se cambia la forma de reservar (turnos o
     // bloques) ni se achican los horarios por debajo de ellas: primero hay que cancelarlas o esperar
     if (id !== 3 && id !== 1) {
-      const hoy = hoyEnAsuncion().toISOString().slice(0, 10);
-      const futuras = await leerTodasLasFilas(() => supabase.from('reservas').select('id, hora_inicio, hora_fin')
-        .eq('espacio_id', id).eq('estado', 'activa').gte('fecha', hoy).order('id', { ascending: true }), 20000);
-      const antes = espaciosDef;
-      const encaja = r => {
-        espaciosDef = { ...antes, [id]: def };
-        try {
-          return !errorDeHorarioYMotivo(id, String(r.hora_inicio).substring(0, 5), String(r.hora_fin).substring(0, 5), '', { motivoLibre: true });
-        } finally {
-          espaciosDef = antes;
-        }
-      };
-      const afuera = futuras.filter(r => !encaja(r));
-      if (afuera.length) {
-        return res.status(409).json({ error: `Hay ${afuera.length} reserva(s) activa(s) que no entran en el horario nuevo (por ejemplo, la #${afuera[0].id}). Cancelalas o movelas antes de cambiar el horario.` });
-      }
+      const choque = await reservasFueraDelHorarioNuevo(id, def);
+      if (choque) return res.status(409).json({ error: choque });
     }
     const { data: existentes, error: errorExistentes } = await supabase.from('espacios').select('id, nombre');
     if (errorExistentes) throw errorExistentes;
@@ -4192,12 +4181,178 @@ app.put('/api/superadmin/espacios/:id/definicion', verifyAdminToken, verifySuper
   }
 });
 
+// Con reservas activas que todavía no pasaron no se achica el horario de un espacio creado desde el
+// panel por debajo de ellas. Devuelve el mensaje para el panel, o '' si todas entran.
+async function reservasFueraDelHorarioNuevo(id, def) {
+  const hoy = hoyEnAsuncion().toISOString().slice(0, 10);
+  const futuras = await leerTodasLasFilas(() => supabase.from('reservas').select('id, hora_inicio, hora_fin')
+    .eq('espacio_id', id).eq('estado', 'activa').gte('fecha', hoy).order('id', { ascending: true }), 20000);
+  const antes = espaciosDef;
+  const encaja = r => {
+    espaciosDef = { ...antes, [id]: def };
+    try {
+      return !errorDeHorarioYMotivo(id, String(r.hora_inicio).substring(0, 5), String(r.hora_fin).substring(0, 5), '', { motivoLibre: true });
+    } finally {
+      espaciosDef = antes;
+    }
+  };
+  const afuera = futuras.filter(r => !encaja(r));
+  return afuera.length
+    ? `Hay ${afuera.length} reserva(s) activa(s) que no entran en el horario nuevo (por ejemplo, la #${afuera[0].id}). Cancelalas o movelas antes de cambiar el horario.`
+    : '';
+}
+
+// ========== TODO LO DE UN ESPACIO, JUNTO (admin supremo > Espacios) ==========
+// La tarjeta de un espacio en el panel guarda acá, de una sola vez: nombre, publicación y aviso,
+// quién reserva y el cartel, cómo se reserva (turnos o bloques), motivos, contacto, reglas, límite
+// por persona y quién recibe los avisos internos. Primero se valida todo; si algo está mal no se
+// guarda nada. Lo que no viene en el pedido queda como estaba.
+// Cada dato se sigue guardando donde siempre (ver el README, "Dónde se guarda cada cosa"): el
+// Frente y el Altillo en sus claves de siempre, los demás en espacios_def.
+app.put('/api/superadmin/espacios/:id', verifyAdminToken, verifySuperAdmin, verificarCSRF, async (req, res) => {
+  try {
+    const id = Number(req.params.id);
+    if (!espacioConfigurado(id)) return res.status(404).json({ error: 'Ese espacio no existe' });
+    const b = req.body || {};
+    const actual = defEspacio(id);
+    const tiene = campo => b[campo] !== undefined && b[campo] !== null;
+
+    const { data: fila, error: errorFila } = await supabase.from('espacios').select('id, nombre, publico, aviso').eq('id', id).maybeSingle();
+    if (errorFila) throw errorFila;
+    if (!fila) return res.status(404).json({ error: 'Espacio no encontrado' });
+
+    // ----- 1. Validar todo -----
+    if (b.publico !== undefined && typeof b.publico !== 'boolean') return res.status(400).json({ error: 'El campo publico debe ser true o false' });
+    if (b.mostrar_aviso !== undefined && typeof b.mostrar_aviso !== 'boolean') return res.status(400).json({ error: 'El campo mostrar_aviso debe ser true o false' });
+    if (tiene('aviso') && (typeof b.aviso !== 'string' || b.aviso.length > 1000)) return res.status(400).json({ error: 'El aviso debe ser un texto de hasta 1000 caracteres' });
+    const publico = b.publico === undefined ? fila.publico === true : b.publico;
+    const aviso = b.aviso === undefined ? (fila.aviso || null) : (b.aviso ? b.aviso.trim() : null) || null;
+
+    const claves = {}; // clave de configuracion -> valor nuevo ya validado
+    let nombre, def;
+    try {
+      nombre = nombreDeEspacioValido(tiene('nombre') ? b.nombre : (fila.nombre || getEspacioNombre(id)));
+      // Lo que no viene, queda como está
+      const junto = { ...actual, ...Object.fromEntries(Object.entries(b).filter(([, v]) => v !== undefined && v !== null)) };
+      def = validarDefEspacio(junto, id);
+      if (id === 3) {
+        if (tiene('horario') && b.horario !== 'turnos') throw new Error('El Frente se reserva siempre por turnos');
+        claves.turnos_frente = VALIDADORES_CONFIG.turnos_frente(junto.turnos);
+        claves.motivos_frente = VALIDADORES_CONFIG.motivos_frente(junto.motivos);
+        claves.contacto_email_frente = VALIDADORES_CONFIG.contacto_email_frente(junto.contacto_email);
+        claves.contacto_whatsapp_frente = VALIDADORES_CONFIG.contacto_whatsapp_frente(junto.contacto_whatsapp);
+      } else if (id === 1) {
+        if (tiene('horario') && b.horario !== 'bloques') throw new Error('El Altillo se reserva siempre por bloques de 1 hora');
+        if (Array.isArray(b.motivos) && b.motivos.length) throw new Error('En el Altillo el motivo lo escribe siempre la persona: no lleva lista de motivos');
+        if (tiene('contacto_email') && String(b.contacto_email).trim() && String(b.contacto_email).trim().toLowerCase() !== CORREO_CONTACTO) throw new Error(`El contacto del Altillo es siempre ${CORREO_CONTACTO}`);
+        if (tiene('contacto_whatsapp') && String(b.contacto_whatsapp).replace(/\D/g, '')) throw new Error('El Altillo no tiene WhatsApp de contacto');
+        claves.altillo_hora_desde = VALIDADORES_CONFIG.altillo_hora_desde(junto.hora_desde);
+        claves.altillo_hora_hasta = VALIDADORES_CONFIG.altillo_hora_hasta(junto.hora_hasta);
+        claves.altillo_max_horas = VALIDADORES_CONFIG.altillo_max_horas(junto.max_horas);
+        if (claves.altillo_hora_hasta - claves.altillo_hora_desde < 1) throw new Error('El Altillo tiene que cerrar al menos 1 hora después de abrir');
+        if (claves.altillo_max_horas > claves.altillo_hora_hasta - claves.altillo_hora_desde) throw new Error(`El máximo de horas del Altillo no puede ser mayor que su horario (${claves.altillo_hora_hasta - claves.altillo_hora_desde} h)`);
+      }
+      claves.espacios_def = validarEspaciosDef({ ...espaciosDef, [id]: def });
+
+      // Reglas y límite por persona (un solo campo: en el Frente es otra clave y no puede ser 0)
+      const reglasDelEspacio = { ...reglaEspacio(id), ...(b.reglas && typeof b.reglas === 'object' ? b.reglas : {}) };
+      if (id === 3) {
+        reglasDelEspacio.limite_por_persona_mes = 0;
+        if (tiene('limite_por_persona')) {
+          if (Number(b.limite_por_persona) === 0) throw new Error('El Frente siempre tiene un límite por persona: tiene que ser un número entre 1 y 20');
+          claves.max_reservas_por_persona_mes = VALIDADORES_CONFIG.max_reservas_por_persona_mes(b.limite_por_persona);
+        }
+      } else if (tiene('limite_por_persona')) {
+        reglasDelEspacio.limite_por_persona_mes = b.limite_por_persona;
+      }
+      claves.reglas_espacios = validarReglasEspacios({ ...config.reglas_espacios, [id]: reglasDelEspacio });
+
+      // Quién recibe los avisos internos de este espacio
+      if (b.avisos_destinatarios !== undefined) {
+        claves.avisos_destinatarios = validarAvisosDestinatarios({ ...config.avisos_destinatarios, [id]: b.avisos_destinatarios });
+      }
+      // Mostrar u ocultar el aviso al entrar (sin borrar el texto)
+      if (b.mostrar_aviso !== undefined) {
+        claves.avisos_ocultos = VALIDADORES_CONFIG.avisos_ocultos(b.mostrar_aviso
+          ? config.avisos_ocultos.filter(x => x !== id)
+          : [...config.avisos_ocultos, id]);
+      }
+    } catch (err) {
+      return res.status(400).json({ error: err.message });
+    }
+
+    if (id !== 3 && id !== 1) {
+      const choque = await reservasFueraDelHorarioNuevo(id, def);
+      if (choque) return res.status(409).json({ error: choque });
+    }
+    const { data: existentes, error: errorExistentes } = await supabase.from('espacios').select('id, nombre');
+    if (errorExistentes) throw errorExistentes;
+    if ((existentes || []).some(e => Number(e.id) !== id && String(e.nombre).toLowerCase() === nombre.toLowerCase())) {
+      return res.status(409).json({ error: 'Ya hay otro espacio con ese nombre' });
+    }
+
+    // ----- 2. Qué cambió (para no escribir de más y para el registro de actividad) -----
+    const igual = (a, c) => JSON.stringify(a) === JSON.stringify(c);
+    const deSiempre = id === 3 || id === 1;
+    const cambiadas = Object.keys(claves).filter(clave => {
+      if (clave === 'espacios_def') return !igual(claves.espacios_def[id], espaciosDef[id] || (deSiempre ? { modo: 'publico', contacto_texto: '' } : null));
+      if (clave === 'reglas_espacios') return !igual(claves.reglas_espacios[id], reglaEspacio(id));
+      if (clave === 'avisos_destinatarios') return !igual(claves.avisos_destinatarios[id], getEmailModerador(id));
+      return !igual(claves[clave], config[clave]);
+    });
+    const cambios = [];
+    if (nombre !== fila.nombre) cambios.push('nombre');
+    if (publico !== (fila.publico === true)) cambios.push(publico ? 'lo publicó' : 'lo dejó sin publicar');
+    if (aviso !== (fila.aviso || null) || cambiadas.includes('avisos_ocultos')) cambios.push('aviso');
+    const defAntes = defEspacio(id), defDespues = { ...defAntes, ...def };
+    if (defDespues.modo !== defAntes.modo || defDespues.contacto_texto !== defAntes.contacto_texto) cambios.push(defDespues.modo === 'moderador' ? 'quién reserva (solo por moderador)' : 'quién reserva');
+    if (['turnos_frente', 'altillo_hora_desde', 'altillo_hora_hasta', 'altillo_max_horas'].some(c => cambiadas.includes(c)) ||
+        (!deSiempre && ['horario', 'turnos', 'hora_desde', 'hora_hasta', 'max_horas'].some(c => !igual(defDespues[c], defAntes[c])))) cambios.push('horario');
+    if (cambiadas.includes('motivos_frente') || (!deSiempre && !igual(defDespues.motivos, defAntes.motivos))) cambios.push('motivos');
+    if (cambiadas.includes('contacto_email_frente') || cambiadas.includes('contacto_whatsapp_frente') ||
+        (!deSiempre && (defDespues.contacto_email !== defAntes.contacto_email || defDespues.contacto_whatsapp !== defAntes.contacto_whatsapp))) cambios.push('contacto');
+    if (cambiadas.includes('reglas_espacios')) {
+      const antes = reglaEspacio(id);
+      cambios.push(...Object.keys(NOMBRES_REGLAS).filter(k => !igual(antes[k], claves.reglas_espacios[id][k])).map(k => NOMBRES_REGLAS[k]));
+    }
+    if (cambiadas.includes('max_reservas_por_persona_mes')) cambios.push(`límite por persona (${claves.max_reservas_por_persona_mes})`);
+    // Sin los correos en el registro (son datos de personas): solo cuántos quedaron
+    if (cambiadas.includes('avisos_destinatarios')) cambios.push(`quién recibe los avisos (${claves.avisos_destinatarios[id].length} correo(s))`);
+    const cambiaLaFila = nombre !== fila.nombre || publico !== (fila.publico === true) || aviso !== (fila.aviso || null);
+    if (!cambiaLaFila && !cambiadas.length) {
+      return res.json({ mensaje: 'No había cambios', cambios: [], espacios: await espaciosParaElPanel() });
+    }
+
+    // ----- 3. Guardar: la fila del espacio y, en un solo paso, toda su configuración. Si lo segundo
+    // falla, la fila vuelve a como estaba: o se guarda todo o no se guarda nada -----
+    if (cambiaLaFila) {
+      const { error } = await supabase.from('espacios').update({ nombre, publico, aviso }).eq('id', id);
+      if (error) throw error;
+    }
+    if (cambiadas.length) {
+      try {
+        await guardarFilasConfig(cambiadas.map(clave => ({ clave, valor: comoTexto(clave, claves[clave]) })));
+      } catch (err) {
+        if (cambiaLaFila) await supabase.from('espacios').update({ nombre: fila.nombre, publico: fila.publico, aviso: fila.aviso }).eq('id', id);
+        throw err;
+      }
+    } else {
+      await cargarConfiguracion(); // para que el nombre nuevo se vea enseguida
+    }
+    const lista = [...new Set(cambios)];
+    registrarActividad(req.admin, 'Cambió un espacio', `${nombre}: ${lista.join(', ')}`.slice(0, 480));
+    res.json({ mensaje: 'Espacio guardado', cambios: lista, espacios: await espaciosParaElPanel() });
+  } catch (error) {
+    manejarError(res, error);
+  }
+});
+
 // Quitar un espacio creado desde el panel. Con reservas activas que no pasaron, no se puede. Si tuvo
 // reservas, la fila queda (las reservas viejas siguen mostrando su nombre) pero deja de usarse.
 app.delete('/api/superadmin/espacios/:id', verifyAdminToken, verifySuperAdmin, verificarCSRF, async (req, res) => {
   try {
     const id = Number(req.params.id);
-    if (id === 3 || id === 1) return res.status(400).json({ error: 'El Frente y el Altillo no se pueden quitar: se pueden deshabilitar en "Espacios disponibles"' });
+    if (id === 3 || id === 1) return res.status(400).json({ error: 'El Frente y el Altillo no se pueden quitar: se pueden dejar sin publicar desde su tarjeta, en Espacios' });
     if (!espacioConfigurado(id)) return res.status(404).json({ error: 'Ese espacio no existe' });
     const hoy = hoyEnAsuncion().toISOString().slice(0, 10);
     const { data: futuras, error: errorFuturas } = await supabase.from('reservas').select('id')
@@ -5643,8 +5798,8 @@ app.post('/api/superadmin/copia/enviar', verifyAdminToken, verifySuperAdmin, ver
 
 // ========== DETECTOR DE ABUSOS (admin supremo > Personas) ==========
 // El límite por persona se controla por correo O por celular, sin verificar ninguno de los dos
-// (decisión del CEQ). Esto no bloquea nada: junta las reservas de los últimos 90 días que parecen
-// de una misma persona con datos distintos, para que el moderador las mire y decida.
+// (decisión del CEQ). Esto no bloquea nada: junta las reservas del período (por defecto, los últimos
+// 90 días) que parecen de una misma persona con datos distintos, para que el moderador las mire y decida.
 //   - el mismo celular con varios correos, o el mismo correo con varios celulares
 //   - el mismo nombre con correo y celular distintos en el mismo espacio y mes
 //   - la misma red (conexión) con 3 o más personas distintas
@@ -5674,13 +5829,37 @@ function nombreNormalizado(nombre) {
   return String(nombre || '').toLowerCase().normalize('NFD').replace(/[̀-ͯ]/g, '').replace(/[^a-z\s]/g, ' ').split(/\s+/).filter(Boolean).sort().join(' ');
 }
 
+// Período: ?desde=AAAA-MM-DD&hasta=AAAA-MM-DD, sobre la FECHA de la reserva. Sin fechas, los últimos
+// 90 días (y lo que ya está reservado para más adelante), como siempre. Con "hasta" solo, los 90 días
+// anteriores a esa fecha. Como máximo, un año.
+const DIAS_ABUSOS_POR_DEFECTO = 90;
+const DIAS_ABUSOS_MAXIMO = 366;
 app.get('/api/superadmin/abusos', verifyAdminToken, verifySuperAdmin, async (req, res) => {
   try {
-    const limite = hoyEnAsuncion();
-    limite.setUTCDate(limite.getUTCDate() - 90);
-    const desde = limite.toISOString().slice(0, 10);
-    const leer = columnas => leerTodasLasFilas(() => supabase.from('reservas').select(columnas)
-      .gte('fecha', desde).neq('contacto', '-').order('id', { ascending: true }), 50000);
+    const dato = campo => (req.query[campo] === undefined || req.query[campo] === '' ? null : String(req.query[campo]));
+    let desde = dato('desde');
+    const hasta = dato('hasta');
+    if ((desde && !esFechaValida(desde)) || (hasta && !esFechaValida(hasta))) {
+      return res.status(400).json({ error: 'Las fechas del período no son válidas (van como AAAA-MM-DD)' });
+    }
+    const hoy = hoyEnAsuncion();
+    const hoyTexto = hoy.toISOString().slice(0, 10);
+    const restarDias = (fecha, dias) => { const f = new Date(fecha + 'T00:00:00Z'); f.setUTCDate(f.getUTCDate() - dias); return f.toISOString().slice(0, 10); };
+    if (!desde) desde = restarDias(hasta || hoyTexto, DIAS_ABUSOS_POR_DEFECTO);
+    if (hasta && desde > hasta) return res.status(400).json({ error: 'La fecha "desde" no puede ser posterior a la fecha "hasta"' });
+    // El tope se mide hasta la fecha "hasta" o, si no se puso, hasta hoy
+    const fin = hasta || (desde > hoyTexto ? desde : hoyTexto);
+    if ((new Date(fin + 'T00:00:00Z') - new Date(desde + 'T00:00:00Z')) / 86400000 > DIAS_ABUSOS_MAXIMO) {
+      return res.status(400).json({ error: 'El período puede ser de hasta un año' });
+    }
+    // Las reservas de más de 6 meses ya no tienen nombre, contacto ni huella de red
+    const anonimizadas = new Date(hoy);
+    anonimizadas.setUTCMonth(anonimizadas.getUTCMonth() - MESES_CONSERVACION);
+    const sinDatosAntesDe = anonimizadas.toISOString().slice(0, 10);
+    const leer = columnas => leerTodasLasFilas(() => {
+      const consulta = supabase.from('reservas').select(columnas).gte('fecha', desde);
+      return (hasta ? consulta.lte('fecha', hasta) : consulta).neq('contacto', '-').order('id', { ascending: true });
+    }, 50000);
     const base = 'id, espacio_id, fecha, hora_inicio, hora_fin, nombre_solicitante, contacto, estado, reservado_por_admin';
     let filas, conRed = true;
     try {
@@ -5737,7 +5916,11 @@ app.get('/api/superadmin/abusos', verifyAdminToken, verifySuperAdmin, async (req
     }
     casos.sort((a, b) => (b.pasa_el_limite - a.pasa_el_limite) || (b.reservas.length - a.reservas.length));
     res.set('Cache-Control', 'no-store');
-    res.json({ desde, revisadas: reservas.length, con_red: conRed, casos: casos.slice(0, 100) });
+    res.json({
+      desde, hasta, revisadas: reservas.length, con_red: conRed, casos: casos.slice(0, 100),
+      // Para el aviso del panel: antes de esta fecha no hay datos con los que comparar
+      sin_datos_antes_de: sinDatosAntesDe, meses_conservacion: MESES_CONSERVACION, periodo_con_anonimizadas: desde < sinDatosAntesDe
+    });
   } catch (error) {
     manejarError(res, error);
   }
